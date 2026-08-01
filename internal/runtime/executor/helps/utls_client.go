@@ -55,7 +55,7 @@ func (b *closeConnectionBody) Close() error {
 }
 
 func newUtlsRoundTripper(proxyURL string) *utlsRoundTripper {
-	var dialer proxy.Dialer = proxy.Direct
+	var dialer proxy.Dialer = &net.Dialer{}
 	if proxyURL != "" {
 		proxyDialer, mode, errBuild := proxyutil.BuildDialer(proxyURL)
 		if errBuild != nil {
@@ -100,6 +100,40 @@ func (t *utlsRoundTripper) createConnection(ctx context.Context, host, addr stri
 	}
 
 	return h2Conn, nil
+}
+
+func dialProxyContext(ctx context.Context, dialer proxy.Dialer, network, addr string) (net.Conn, error) {
+	if contextDialer, ok := dialer.(proxy.ContextDialer); ok {
+		return contextDialer.DialContext(ctx, network, addr)
+	}
+	type dialResult struct {
+		connection net.Conn
+		err        error
+	}
+	result := make(chan dialResult)
+	go func() {
+		connection, errDial := dialer.Dial(network, addr)
+		dialed := dialResult{connection: connection, err: errDial}
+		select {
+		case result <- dialed:
+		case <-ctx.Done():
+			if connection != nil {
+				_ = connection.Close()
+			}
+		}
+	}()
+	select {
+	case dialed := <-result:
+		if errContext := ctx.Err(); errContext != nil {
+			if dialed.connection != nil {
+				_ = dialed.connection.Close()
+			}
+			return nil, errContext
+		}
+		return dialed.connection, dialed.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -374,6 +408,13 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 	if proxyURL == "" && cfg != nil {
 		proxyURL = strings.TrimSpace(cfg.ProxyURL)
 	}
+	return NewUtlsHTTPClientWithProxyURL(ctx, proxyURL, timeout)
+}
+
+// NewUtlsHTTPClientWithProxyURL creates the same protected-host client with an
+// explicitly resolved proxy URL. An empty URL uses a direct connection.
+func NewUtlsHTTPClientWithProxyURL(ctx context.Context, proxyURL string, timeout time.Duration) *http.Client {
+	proxyURL = strings.TrimSpace(proxyURL)
 
 	var ctxRoundTripper http.RoundTripper
 	if ctx != nil {

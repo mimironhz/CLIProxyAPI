@@ -137,7 +137,7 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 		mergedInput = []byte(nextInput.Raw)
 	} else {
 		appendInputRaw := nextInput.Raw
-		if inputContainsFullTranscript(nextInput) {
+		if compactReplay {
 			appendInputRaw = inputWithoutCompactionItems(nextInput)
 		}
 

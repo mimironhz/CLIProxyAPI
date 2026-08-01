@@ -1,0 +1,60 @@
+# Root remains Desktop-only on loopback. The full CPA Relay listens separately
+# on 127.0.0.1:8318 and authenticates this hop with CPA_RELAY_API_KEY.
+host: "127.0.0.1"
+port: 8317
+debug: false
+
+logging:
+  # Application/debug logging is written to root.log. Debug controls the log
+  # level independently from access and traffic capture.
+  logging-to-file: true
+  # Relative paths resolve against this YAML file. A frozen deployment should
+  # use an absolute runtime path outside its checksummed artifact directory.
+  directory: "logs/root"
+  # One metadata-only JSON record for every HTTP request or WebSocket session.
+  request-access-log: true
+  # Exact stock request/response payload bytes. Relay bodies are never captured.
+  stock-request-response-log: true
+  # auto emits readable UTF-8 as payload_text in root.stock-traffic.v2 and
+  # falls back to base64 for encoded, binary, or invalid UTF-8 bytes. Use
+  # base64 to retain the original root.stock-traffic.v1-only contract.
+  stock-payload-format: auto
+  max-file-size-mb: 32
+  max-backups: 15
+  max-age-days: 7
+  max-total-size-mb: 512
+  compress: true
+
+relay:
+  base-url: "http://127.0.0.1:8318/v1"
+  api-key-env: "CPA_RELAY_API_KEY"
+
+routing:
+  # Use exact model identifiers. The sets must be non-empty and disjoint.
+  stock-models:
+    - "gpt-5.6-sol"
+    - "gpt-5.6-terra"
+    - "gpt-5.6-luna"
+  relay-models:
+    - "kimi-k3"
+  # Optional for ordinary turns, but required for compaction creation or
+  # replay. Models in the same family may reuse provider-local state.
+  relay-model-providers:
+    "kimi-k3": "kimi"
+
+websocket:
+  # Production-safe default. The installed ChatGPT Desktop client interprets
+  # HTTP 426 as a sticky switch to the HTTP/SSE Responses transport. Set this
+  # to "first-message" only to opt into the experimental WebSocket bridge.
+  mode: "http-fallback"
+  max-message-bytes: 67108864
+  # Caps sockets waiting for a first message or an upstream handshake. The
+  # oldest unestablished route is replaced when the cap is reached.
+  max-pending-routes: 64
+  # Shared by WebSocket and HTTP routes. An absent Origin is accepted. Add only
+  # exact origins observed from trusted Desktop clients; wildcards are rejected.
+  allowed-origins: []
+
+http:
+  # Applied independently to the raw body and a zstd-decoded inspection copy.
+  max-request-body-bytes: 67108864

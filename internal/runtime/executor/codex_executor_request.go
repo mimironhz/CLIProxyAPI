@@ -355,10 +355,21 @@ func applyCodexHeadersFromSources(r *http.Request, auth *cliproxyauth.Auth, toke
 		r.Header.Set("Originator", codexOriginator)
 	}
 	if !isAPIKey {
+		accountID := ""
 		if auth != nil && auth.Metadata != nil {
-			if accountID, ok := auth.Metadata["account_id"].(string); ok {
-				r.Header.Set("Chatgpt-Account-Id", accountID)
+			if v, ok := auth.Metadata["account_id"].(string); ok {
+				accountID = v
 			}
+		}
+		// The passthrough client owns the account the token belongs to, so its
+		// own account header wins over anything the stored credential carries.
+		if passthrough != "" {
+			if v := strings.TrimSpace(ginHeaders.Get("Chatgpt-Account-Id")); v != "" {
+				accountID = v
+			}
+		}
+		if accountID != "" {
+			r.Header.Set("Chatgpt-Account-Id", accountID)
 		}
 	}
 	var attrs map[string]string

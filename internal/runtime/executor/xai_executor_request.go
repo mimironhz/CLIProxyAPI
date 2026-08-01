@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -34,6 +35,7 @@ type xaiPreparedRequest struct {
 	sessionID             string
 	replayScope           xaiReasoningReplayScope
 	filterInternalXSearch bool
+	viewImageToolAlias    bool
 }
 
 type xaiNamespaceToolRef struct {
@@ -56,7 +58,29 @@ type xaiClientToolKey struct {
 }
 
 func (e *XAIExecutor) prepareResponsesRequest(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, stream bool) (*xaiPreparedRequest, error) {
-	return e.prepareResponsesRequestTo(ctx, req, opts, stream, sdktranslator.FormatCodex)
+	prepared, err := e.prepareResponsesRequestTo(ctx, req, opts, stream, sdktranslator.FormatCodex)
+	if err != nil {
+		return nil, err
+	}
+	applyXAIViewImageAliasToPrepared(prepared)
+	return prepared, nil
+}
+
+func applyXAIViewImageAliasToPrepared(prepared *xaiPreparedRequest) {
+	if prepared == nil {
+		return
+	}
+	originalBody := prepared.body
+	prepared.body, prepared.viewImageToolAlias = applyXAIViewImageToolAlias(prepared.body)
+	if !prepared.viewImageToolAlias {
+		return
+	}
+	var ok bool
+	prepared.body, ok = rewriteXAIViewImageInputCalls(prepared.body)
+	if !ok {
+		prepared.body = originalBody
+		prepared.viewImageToolAlias = false
+	}
 }
 
 func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, stream bool, to sdktranslator.Format) (*xaiPreparedRequest, error) {
@@ -97,6 +121,10 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 	clientDeclaredTools := collectXAIClientDeclaredToolKeys(body)
 	body = normalizeXAIToolsWithFold(body, shouldFold)
 	body = promoteXAIAdditionalTools(body)
+	// Re-add the tools the client loaded through tool_search. They exist only
+	// inside tool_search_output history items, so they must be merged into tools
+	// before tool_choice pruning or a choice naming one would be dropped.
+	body = applyXAIToolSearchRequest(body)
 	// Drop choices that point at tools removed by normalizeXAITools before any
 	// configured x_search injection, so no surviving choice references a deleted tool.
 	body = normalizeXAINamespaceToolChoiceWithFold(body, shouldFold)
@@ -1405,6 +1433,12 @@ func normalizeXAITool(tool gjson.Result, namespaceName string, keepImageGenerati
 	}
 
 	raw := []byte(tool.Raw)
+	// xAI has no deferred-loading mechanism, so a forwarded tool that keeps
+	// defer_loading stays invisible and the model re-searches for it forever.
+	if updatedTool, deferStripped := stripXAIDeferLoading(raw); deferStripped {
+		raw = updatedTool
+		changed = true
+	}
 	schemaTool := tool
 	if toolType == xaiFunctionToolType || toolType == xaiCustomToolType {
 		if rawParams := schemaTool.Get("parameters"); rawParams.Exists() {
@@ -1543,7 +1577,13 @@ func collectXAINamespaceToolRefsWithFold(body []byte, shouldFold bool) map[strin
 	input := gjson.GetBytes(body, "input")
 	if input.Exists() && input.IsArray() {
 		for _, item := range input.Array() {
-			if item.Get("type").String() == "additional_tools" {
+			// tool_search_output carries the namespaces the client loaded through
+			// tool_search. applyXAIToolSearchRequest merges them into the tools array
+			// already flattened, so their (namespace, short name) mapping has to be
+			// recorded here or Grok's call comes back as the qualified name and Codex
+			// rejects it with "unsupported call: codex_app__send_message_to_thread".
+			switch item.Get("type").String() {
+			case "additional_tools", xaiToolSearchOutputItemType:
 				collect(item.Get("tools"))
 			}
 		}

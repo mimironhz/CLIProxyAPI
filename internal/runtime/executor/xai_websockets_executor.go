@@ -21,6 +21,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -505,10 +506,12 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 		}
 		prepared.body = idMapper.upstreamRequestPayload(prepared.body)
 	}
+	applyXAIViewImageAliasToPrepared(prepared)
 	reporter.SetTranslatedReasoningEffort(prepared.body, e.Identifier())
 
 	wsHeaders := applyXAIWebsocketHeaders(http.Header{}, auth, token, prepared.sessionID, opts.Headers)
 	wsReqBody := buildXAIWebsocketRequestBody(prepared.body)
+	transcriptRequestBody := xaiViewImageClientTranscriptRequest(wsReqBody, prepared.viewImageToolAlias)
 	requestType := strings.TrimSpace(gjson.GetBytes(req.Payload, "type").String())
 	transcriptReset := strings.TrimSpace(gjson.GetBytes(wsReqBody, "previous_response_id").String()) == "" &&
 		(requestType != "response.append" || (idMapper != nil && idMapper.replayedCompactedTranscript))
@@ -774,7 +777,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 					if warmupRequest {
 						warmupCompletedPayload = buildXAIWebsocketWarmupCompletedPayload(payload)
 						if idMapper != nil && idMapper.state != nil && !recordedTranscript {
-							idMapper.state.recordTranscriptTurn(wsReqBody, warmupCompletedPayload, transcriptReset)
+							idMapper.state.recordTranscriptTurn(transcriptRequestBody, warmupCompletedPayload, transcriptReset)
 							recordedTranscript = true
 						}
 						logXAIWebsocketWarmupCompleted(executionSessionID, authID, wsURL, payload)
@@ -790,7 +793,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 					payload = xaiNormalizeReasoningSummaryData(payload)
 					cacheXAIReasoningReplayFromCompleted(ctx, prepared.replayScope, payload)
 					if !warmupRequest && idMapper != nil && idMapper.state != nil && !recordedTranscript {
-						idMapper.state.recordTranscriptTurn(wsReqBody, payload, transcriptReset)
+						idMapper.state.recordTranscriptTurn(transcriptRequestBody, payload, transcriptReset)
 						recordedTranscript = true
 					}
 				case "response.done":
@@ -799,7 +802,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 						reporter.Publish(ctx, detail)
 					}
 					if !warmupRequest && idMapper != nil && idMapper.state != nil && !recordedTranscript {
-						idMapper.state.recordTranscriptTurn(wsReqBody, payload, transcriptReset)
+						idMapper.state.recordTranscriptTurn(transcriptRequestBody, payload, transcriptReset)
 						recordedTranscript = true
 					}
 				}
@@ -1032,7 +1035,7 @@ func xaiBareWebsocketErrorStatus(payload []byte) int {
 }
 
 func (e *XAIWebsocketsExecutor) prepareResponsesWebsocketRequest(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*xaiPreparedRequest, error) {
-	prepared, err := e.prepareResponsesRequest(ctx, req, opts, true)
+	prepared, err := e.prepareResponsesRequestTo(ctx, req, opts, true, sdktranslator.FormatCodex)
 	if err != nil {
 		return nil, err
 	}

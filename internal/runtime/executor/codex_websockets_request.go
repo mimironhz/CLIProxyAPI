@@ -81,6 +81,13 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 		ginHeaders = ginCtx.Request.Header.Clone()
 	}
 
+	if passthrough := codexPassthroughToken(cfg, ginHeaders); passthrough != "" {
+		token = passthrough
+	}
+	if strings.TrimSpace(token) != "" {
+		headers.Set("Authorization", "Bearer "+token)
+	}
+
 	isAPIKey := codexAuthUsesAPIKey(auth)
 	cfgUserAgent, cfgBetaFeatures := codexHeaderDefaults(cfg, auth)
 	ensureHeaderWithPriority(headers, ginHeaders, "x-codex-beta-features", cfgBetaFeatures, "")

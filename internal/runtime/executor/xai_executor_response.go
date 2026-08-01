@@ -92,7 +92,10 @@ func collectXAIClientDeclaredToolKeys(body []byte) map[xaiClientToolKey]struct{}
 	input := gjson.GetBytes(body, "input")
 	if input.Exists() && input.IsArray() {
 		for _, item := range input.Array() {
-			if item.Get("type").String() == "additional_tools" {
+			// Tools loaded through tool_search are as client-declared as the ones in
+			// the base list; the response filter drops calls it cannot attribute.
+			switch item.Get("type").String() {
+			case "additional_tools", xaiToolSearchOutputItemType:
 				collect(item.Get("tools"))
 			}
 		}

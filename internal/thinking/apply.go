@@ -543,7 +543,7 @@ func extractThinkingConfig(body []byte, provider string) ThinkingConfig {
 		return extractInteractionsConfig(body)
 	case "openai":
 		return extractOpenAIConfig(body)
-	case "codex", "xai":
+	case "codex", "openai-response", "xai":
 		return extractCodexConfig(body)
 	case "kimi":
 		return extractKimiConfig(body)

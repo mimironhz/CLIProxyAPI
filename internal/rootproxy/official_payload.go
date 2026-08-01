@@ -1,0 +1,176 @@
+package rootproxy
+
+import (
+	"encoding/base64"
+	"errors"
+	"fmt"
+	"strings"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
+)
+
+var errNonPortableCompaction = errors.New("cross-provider compaction state is not portable to the selected upstream")
+
+const kimiCompactionPrefix = "kimi-compaction-v1:"
+
+func payloadContainsCompaction(payload []byte) bool {
+	return payloadContainsInputType(payload, "compaction")
+}
+
+func payloadContainsCompactionTrigger(payload []byte) bool {
+	return payloadContainsInputType(payload, "compaction_trigger")
+}
+
+func payloadContainsInputType(payload []byte, expected string) bool {
+	input := gjson.GetBytes(payload, "input")
+	if !input.Exists() || !input.IsArray() {
+		return false
+	}
+	for _, item := range input.Array() {
+		if strings.TrimSpace(item.Get("type").String()) == expected {
+			return true
+		}
+	}
+	return false
+}
+
+// validateRelayPayloadState rejects compaction that cannot be attributed to
+// the configured target provider. A compaction creation request also requires
+// an attributed target even when it does not carry an earlier compaction item.
+func validateRelayPayloadState(payload []byte, target relayProvider, createsCompaction bool) error {
+	if target == "" && (createsCompaction || payloadContainsCompactionTrigger(payload) || payloadContainsCompaction(payload)) {
+		return errors.New("Relay compaction requires a configured relay model provider")
+	}
+
+	input := gjson.GetBytes(payload, "input")
+	if !input.Exists() || !input.IsArray() {
+		return nil
+	}
+	for index, item := range input.Array() {
+		if strings.TrimSpace(item.Get("type").String()) != "compaction" {
+			continue
+		}
+		encrypted := item.Get("encrypted_content")
+		if encrypted.Type != gjson.String || strings.TrimSpace(encrypted.String()) != encrypted.String() {
+			return fmt.Errorf("%w at input[%d]", errNonPortableCompaction, index)
+		}
+		source := inspectRelayCompactionProvider(encrypted.String())
+		if source == "" || source != target {
+			return fmt.Errorf("%w at input[%d]", errNonPortableCompaction, index)
+		}
+	}
+	return nil
+}
+
+func inspectRelayCompactionProvider(encryptedContent string) relayProvider {
+	if strings.HasPrefix(encryptedContent, kimiCompactionPrefix) {
+		encoded := strings.TrimPrefix(encryptedContent, kimiCompactionPrefix)
+		decoded, errDecode := base64.StdEncoding.DecodeString(encoded)
+		if errDecode == nil && strings.TrimSpace(string(decoded)) != "" {
+			return relayProviderKimi
+		}
+		return ""
+	}
+	if _, errInspect := signature.InspectGrokEncryptedContent(encryptedContent); errInspect == nil {
+		return relayProviderXAI
+	}
+	return ""
+}
+
+// prepareOfficialPayload removes only provider-bound reasoning state that the
+// official upstream cannot consume. Valid GPT opaque state and all ordinary
+// request bytes remain unchanged. Foreign compaction cannot be discarded
+// without losing conversation history, so it fails closed instead.
+func prepareOfficialPayload(payload []byte) ([]byte, error) {
+	input := gjson.GetBytes(payload, "input")
+	if !input.Exists() || !input.IsArray() {
+		return payload, nil
+	}
+
+	items := input.Array()
+	stripOrphanIDs := !gjson.GetBytes(payload, "store").Bool()
+	var rebuilt []byte
+	itemsWritten := 0
+	keep := func(raw string) {
+		if rebuilt == nil {
+			return
+		}
+		if itemsWritten > 0 {
+			rebuilt = append(rebuilt, ',')
+		}
+		rebuilt = append(rebuilt, raw...)
+		itemsWritten++
+	}
+	startRebuild := func(index int) {
+		if rebuilt != nil {
+			return
+		}
+		rebuilt = make([]byte, 0, len(input.Raw))
+		rebuilt = append(rebuilt, '[')
+		for preceding := range index {
+			keep(items[preceding].Raw)
+		}
+	}
+
+	for index, item := range items {
+		itemType := strings.TrimSpace(item.Get("type").String())
+		if itemType != "reasoning" && itemType != "compaction" {
+			keep(item.Raw)
+			continue
+		}
+
+		encrypted := item.Get("encrypted_content")
+		validGPTState := encrypted.Type == gjson.String && strings.TrimSpace(encrypted.String()) == encrypted.String()
+		if validGPTState {
+			_, errInspect := signature.InspectGPTReasoningSignature(encrypted.String())
+			validGPTState = errInspect == nil
+		}
+		if itemType == "compaction" {
+			if !validGPTState {
+				return nil, fmt.Errorf("%w at input[%d]", errNonPortableCompaction, index)
+			}
+			keep(item.Raw)
+			continue
+		}
+
+		if validGPTState {
+			keep(item.Raw)
+			continue
+		}
+
+		nextItem := item.Raw
+		changed := false
+		if encrypted.Exists() {
+			var errDelete error
+			nextItem, errDelete = sjson.Delete(nextItem, "encrypted_content")
+			if errDelete != nil {
+				return nil, fmt.Errorf("remove foreign reasoning state at input[%d]: %w", index, errDelete)
+			}
+			changed = true
+		}
+		if stripOrphanIDs && item.Get("id").Exists() {
+			var errDeleteID error
+			nextItem, errDeleteID = sjson.Delete(nextItem, "id")
+			if errDeleteID != nil {
+				return nil, fmt.Errorf("remove foreign reasoning id at input[%d]: %w", index, errDeleteID)
+			}
+			changed = true
+		}
+		if changed {
+			startRebuild(index)
+		}
+		keep(nextItem)
+	}
+
+	if rebuilt == nil {
+		return payload, nil
+	}
+	rebuilt = append(rebuilt, ']')
+	updated, errSet := sjson.SetRawBytes(payload, "input", rebuilt)
+	if errSet != nil {
+		return nil, fmt.Errorf("rebuild official request input: %w", errSet)
+	}
+	return updated, nil
+}

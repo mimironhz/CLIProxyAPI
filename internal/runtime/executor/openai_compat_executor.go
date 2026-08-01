@@ -105,6 +105,11 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	to := sdktranslator.FromString("openai")
 	endpoint := "/chat/completions"
+	useResponses := e.usesResponsesAPI(auth, from, responseFormat)
+	if useResponses {
+		to = sdktranslator.FromString("openai-response")
+		endpoint = "/responses"
+	}
 	if opts.Alt == "responses/compact" {
 		to = sdktranslator.FromString("openai-response")
 		endpoint = "/responses/compact"
@@ -140,6 +145,20 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 			translated = updated
 		}
 		translated = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "openai compat executor", translated)
+	} else if useResponses {
+		// The client's own payload is forwarded almost verbatim, so its stream
+		// flag survives translation and would contradict this call, and tool
+		// schemas reach the upstream without passing the Chat Completions
+		// translator that would otherwise repair them.
+		translated = helps.SetBoolIfDifferent(translated, "stream", false)
+		translated = helps.NormalizeResponsesToolSchemas(translated)
+	}
+	if helps.IsDeepSeekBaseURL(baseURL) {
+		if useResponses {
+			translated = helps.RestoreDeepSeekResponsesReasoningContent(translated)
+		} else {
+			translated = helps.EnsureDeepSeekReasoningContent(translated, req.Payload)
+		}
 	}
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
 
@@ -323,6 +342,12 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	to := sdktranslator.FromString("openai")
+	endpoint := "/chat/completions"
+	useResponses := e.usesResponsesAPI(auth, from, responseFormat)
+	if useResponses {
+		to = sdktranslator.FromString("openai-response")
+		endpoint = "/responses"
+	}
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
@@ -350,12 +375,28 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		}
 	}
 
-	// Request usage data in the final streaming chunk so that token statistics
-	// are captured even when the upstream is an OpenAI-compatible provider.
-	translated = helps.SetBoolIfDifferent(translated, "stream_options.include_usage", true)
+	if useResponses {
+		// A Responses stream always reports usage in its terminal event, and the
+		// client's own stream flag survives translation unchanged. See Execute for
+		// the tool schema repair a Responses upstream would otherwise miss.
+		translated = helps.SetBoolIfDifferent(translated, "stream", true)
+		translated = helps.NormalizeResponsesToolSchemas(translated)
+	} else {
+		// Request usage data in the final streaming chunk so that token statistics
+		// are captured even when the upstream is an OpenAI-compatible provider.
+		translated = helps.SetBoolIfDifferent(translated, "stream_options.include_usage", true)
+	}
+	sealDeepSeekReasoning := helps.IsDeepSeekBaseURL(baseURL)
+	if sealDeepSeekReasoning {
+		if useResponses {
+			translated = helps.RestoreDeepSeekResponsesReasoningContent(translated)
+		} else {
+			translated = helps.EnsureDeepSeekReasoningContent(translated, req.Payload)
+		}
+	}
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
 
-	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
+	url := strings.TrimSuffix(baseURL, "/") + endpoint
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
 	if err != nil {
 		return nil, err
@@ -409,6 +450,22 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		return nil, err
 	}
 	out := make(chan cliproxyexecutor.StreamChunk)
+	if useResponses {
+		go e.streamResponses(ctx, streamResponsesArgs{
+			body:              httpResp.Body,
+			out:               out,
+			reporter:          reporter,
+			from:              from,
+			to:                to,
+			responseFormat:    responseFormat,
+			model:             req.Model,
+			originalRequest:   opts.OriginalRequest,
+			originalPayload:   originalPayload,
+			translated:        translated,
+			deepSeekReasoning: sealDeepSeekReasoning,
+		})
+		return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
+	}
 	go func() {
 		defer close(out)
 		defer func() {
@@ -556,6 +613,10 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			// Other protocols retain compatibility with providers that omit [DONE].
 			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, []byte("data: [DONE]"), &param, claudeInputTokens)
 			for i := range chunks {
+				chunks[i] = helps.RestoreToolSearchStreamChunk(chunks[i])
+				if sealDeepSeekReasoning {
+					chunks[i] = helps.SealDeepSeekReasoningStreamChunk(chunks[i])
+				}
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
 				case <-ctx.Done():

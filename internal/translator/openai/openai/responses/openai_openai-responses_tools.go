@@ -150,9 +150,28 @@ func convertResponsesFunctionToolToOpenAIChat(tool gjson.Result, overrideName st
 		chatTool, _ = sjson.SetBytes(chatTool, "function.description", description)
 	}
 	if parameters := responsesToolParameters(tool); parameters.Exists() {
-		chatTool, _ = sjson.SetRawBytes(chatTool, "function.parameters", []byte(parameters.Raw))
+		chatTool, _ = sjson.SetRawBytes(chatTool, "function.parameters", normalizeResponsesToolParameters(parameters))
 	}
 	return chatTool, true
+}
+
+// normalizeResponsesToolParameters stamps the root "type" onto a schema that
+// omits it. Codex declares tools whose parameters are a bare root union — the
+// deferred codex_app.automation_update is {"oneOf":[...],"$defs":{...}} — which
+// the Responses API accepts but Chat Completions upstreams reject outright
+// (Kimi: 400 `tools.function.parameters.type is required and must be "object"`,
+// which kills the whole turn). Function call arguments are always an object, so
+// the added constraint preserves what the schema already meant.
+func normalizeResponsesToolParameters(parameters gjson.Result) []byte {
+	raw := []byte(parameters.Raw)
+	if !parameters.IsObject() || parameters.Get("type").Exists() {
+		return raw
+	}
+	normalized, errSet := sjson.SetBytes(raw, "type", "object")
+	if errSet != nil {
+		return raw
+	}
+	return normalized
 }
 
 func responsesToolName(tool gjson.Result) string {
@@ -247,7 +266,7 @@ func responsesSingleCustomToolName(requestRawJSON []byte) (string, bool) {
 	// once and freeform unwrapping stays enabled.
 	toolCount := len(mergeResponsesRequestChatTools(gjson.ParseBytes(requestRawJSON)))
 	for name := range customToolNames {
-		return name, toolCount == 1
+		return name, len(toolNames) == 1
 	}
 	return "", false
 }

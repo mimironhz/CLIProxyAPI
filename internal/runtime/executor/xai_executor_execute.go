@@ -137,6 +137,16 @@ func (e *XAIExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.Aut
 }
 
 func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*xaiPreparedRequest, []byte, http.Header, error) {
+	requestKind := "websocket_trigger"
+	if opts.Alt == "responses/compact" {
+		requestKind = "responses_compact"
+	}
+	helps.LogWithRequestID(ctx).WithFields(helps.CompactionDiagnosticFields(req.Payload)).WithFields(log.Fields{
+		"compaction_provider": "xai",
+		"compaction_phase":    "client_request",
+		"request_kind":        requestKind,
+	}).Info("compaction capture")
+
 	token, _ := xaiCreds(auth)
 	// Compact must not use xaiChatBaseURL: CLI chat-proxy returns 404 for
 	// /responses/compact and a 404 cools down the whole xAI auth pool.
@@ -163,6 +173,12 @@ func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxya
 	reporter.SetTranslatedReasoningEffort(prepared.body, e.Identifier())
 
 	requestURL := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
+	helps.LogWithRequestID(ctx).WithFields(helps.CompactionDiagnosticFields(prepared.body)).WithFields(log.Fields{
+		"compaction_provider": "xai",
+		"compaction_phase":    "upstream_request",
+		"request_kind":        requestKind,
+		"upstream_url":        requestURL,
+	}).Info("compaction capture")
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, bytes.NewReader(prepared.body))
 	if err != nil {
 		return nil, nil, nil, err
@@ -177,6 +193,12 @@ func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxya
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		helps.LogWithRequestID(ctx).WithError(err).WithFields(log.Fields{
+			"compaction_provider": "xai",
+			"compaction_phase":    "upstream_transport_error",
+			"request_kind":        requestKind,
+			"upstream_url":        requestURL,
+		}).Warn("compaction capture")
 		return nil, nil, nil, err
 	}
 	defer func() {
@@ -189,9 +211,26 @@ func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxya
 	data, err := io.ReadAll(httpResp.Body)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		helps.LogWithRequestID(ctx).WithError(err).WithFields(log.Fields{
+			"compaction_provider": "xai",
+			"compaction_phase":    "upstream_read_error",
+			"http_status":         httpResp.StatusCode,
+			"request_kind":        requestKind,
+			"upstream_url":        requestURL,
+		}).Warn("compaction capture")
 		return nil, nil, nil, err
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+	responseFields := helps.CompactionDiagnosticFields(data)
+	responseFields["compaction_provider"] = "xai"
+	responseFields["compaction_phase"] = "upstream_response"
+	responseFields["http_status"] = httpResp.StatusCode
+	responseFields["request_kind"] = requestKind
+	responseFields["upstream_url"] = requestURL
+	if upstreamRequestID := strings.TrimSpace(httpResp.Header.Get("x-request-id")); upstreamRequestID != "" {
+		responseFields["upstream_request_id"] = upstreamRequestID
+	}
+	helps.LogWithRequestID(ctx).WithFields(responseFields).Info("compaction capture")
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
@@ -218,6 +257,11 @@ func (e *XAIExecutor) executeCompactionTriggerStream(ctx context.Context, auth *
 	headers.Set("Content-Type", "text/event-stream")
 
 	chunks := xaiBuildCompactionTriggerStreamChunks(prepared, data)
+	helps.LogWithRequestID(ctx).WithFields(helps.CompactionStreamDiagnosticFields(chunks)).WithFields(log.Fields{
+		"compaction_provider": "xai",
+		"compaction_phase":    "client_response",
+		"request_kind":        "websocket_trigger",
+	}).Info("compaction capture")
 	out := make(chan cliproxyexecutor.StreamChunk, len(chunks))
 	for _, chunk := range chunks {
 		out <- cliproxyexecutor.StreamChunk{Payload: chunk}
