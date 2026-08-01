@@ -304,12 +304,23 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 	// "additional_tools" input item instead of the top-level "tools" field,
 	// so merge both sources.
 	var chatCompletionsTools []interface{}
+	// Both sources routinely describe the same tool, and a namespace child can
+	// qualify to a name that a top-level tool already uses. Chat Completions
+	// upstreams reject repeats outright (Kimi: "function name X is duplicated"),
+	// so keep the first declaration of each name.
+	seenChatToolNames := make(map[string]struct{})
 	appendChatTools := func(tools gjson.Result) {
 		if !tools.Exists() || !tools.IsArray() {
 			return
 		}
 		tools.ForEach(func(_, tool gjson.Result) bool {
 			for _, chatTool := range convertResponsesToolToOpenAIChatTools(tool) {
+				if name := gjson.GetBytes(chatTool, "function.name").String(); name != "" {
+					if _, seen := seenChatToolNames[name]; seen {
+						continue
+					}
+					seenChatToolNames[name] = struct{}{}
+				}
 				chatCompletionsTools = append(chatCompletionsTools, gjson.ParseBytes(chatTool).Value())
 			}
 			return true

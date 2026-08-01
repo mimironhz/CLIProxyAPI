@@ -26,6 +26,27 @@ var (
 	codexClientModelTemplatesErr      error
 )
 
+// codexClientSearchToolProviders lists the providers whose executors can serve
+// Codex's hosted tool_search tool. Codex Desktop offers tool_search only when a
+// model advertises supports_search_tool, and without it the deferred children of
+// the codex_app namespace (send_message_to_thread, wait_threads, handoff_thread,
+// ...) are never materialized: the model sees only the eagerly declared
+// load_workspace_dependencies, navigate_to_codex_page, and read_thread_terminal.
+// The xai and kimi executors translate the hosted tool into a plain function and
+// convert the model's call back into a tool_search_call, so both can honor it.
+var codexClientSearchToolProviders = map[string]struct{}{
+	"codex": {},
+	"xai":   {},
+	"kimi":  {},
+}
+
+// codexClientAllowedReasoningLevels gates the reasoning levels published in the
+// Codex client catalog. It intentionally allows "ultra", which no model declares
+// as a thinking level in the registry: for Codex "ultra" is a working mode (max
+// effort plus multi-agent delegation) that the client never sends as
+// reasoning.effort, so the catalog advertises it for discovery while the request
+// validator still rejects it. See upstream PR #4160 and issue #4463 before
+// "fixing" the discrepancy. Documented in docs/codex-desktop.md.
 var codexClientAllowedReasoningLevels = map[string]struct{}{
 	"none":    {},
 	"minimal": {},
@@ -188,12 +209,12 @@ func applyCodexClientSearchToolSupport(entry map[string]any, id string, template
 		return
 	}
 
-	if !templateModel {
-		entry["supports_search_tool"] = false
-		return
-	}
-
 	if providersForModel == nil {
+		// Provider membership is unknown here, so only the curated template models
+		// keep the capability; a synthesized model cannot be verified.
+		if !templateModel {
+			entry["supports_search_tool"] = false
+		}
 		return
 	}
 
@@ -203,7 +224,7 @@ func applyCodexClientSearchToolSupport(entry map[string]any, id string, template
 		return
 	}
 	for _, provider := range providers {
-		if !strings.EqualFold(strings.TrimSpace(provider), "codex") {
+		if _, ok := codexClientSearchToolProviders[strings.ToLower(strings.TrimSpace(provider))]; !ok {
 			entry["supports_search_tool"] = false
 			return
 		}

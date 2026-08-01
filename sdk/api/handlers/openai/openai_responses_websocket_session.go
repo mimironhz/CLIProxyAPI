@@ -202,7 +202,12 @@ func responsesWebsocketAuthSupportsCompactionReplay(auth *coreauth.Auth) bool {
 	if auth == nil {
 		return false
 	}
-	return strings.EqualFold(strings.TrimSpace(auth.Provider), "codex")
+	switch strings.ToLower(strings.TrimSpace(auth.Provider)) {
+	case "codex", "xai":
+		return true
+	default:
+		return false
+	}
 }
 
 func responsesWebsocketAuthAvailableForModel(auth *coreauth.Auth, modelName string, now time.Time) bool {

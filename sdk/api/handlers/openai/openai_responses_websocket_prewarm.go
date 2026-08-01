@@ -152,7 +152,7 @@ func inputWithoutCompactionItems(input gjson.Result) string {
 	filtered := make([]string, 0, len(input.Array()))
 	for _, item := range input.Array() {
 		t := item.Get("type").String()
-		if t == "compaction" || t == "compaction_summary" {
+		if t == "compaction" || t == "compaction_summary" || t == "compaction_trigger" {
 			continue
 		}
 		filtered = append(filtered, item.Raw)

@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	sdkpluginstore "github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginstore"
+	log "github.com/sirupsen/logrus"
 )
 
 // NormalizePluginsConfig applies default plugin configuration values.
@@ -114,6 +115,15 @@ func (cfg *Config) SanitizeOpenAICompatibility() {
 		e.Prefix = normalizeModelPrefix(e.Prefix)
 		e.BaseURL = strings.TrimSpace(e.BaseURL)
 		e.Headers = NormalizeHeaders(e.Headers)
+		if raw := strings.TrimSpace(e.API); raw != "" {
+			e.API = NormalizeOpenAICompatAPI(raw)
+			if !strings.EqualFold(raw, e.API) {
+				// A typo here would otherwise be indistinguishable from the
+				// default, silently sending Responses traffic to
+				// /chat/completions.
+				log.Warnf("config: openai-compatibility provider %q has unsupported api %q; using %q", e.Name, raw, e.API)
+			}
+		}
 		if e.BaseURL == "" {
 			// Skip providers with no base-url; treated as removed
 			continue

@@ -16,6 +16,40 @@ func TestModelOverrideHeadersFromEmbeddedModels(t *testing.T) {
 	}
 }
 
+// DeepSeek's own API accepts only "high" and "max" as reasoning_effort; "low"
+// and "medium" collapse to "high" and "xhigh" to "max". Advertising the aliases
+// would offer Codex four levels that behave as two, so the static definitions
+// carry the effective pair.
+func TestDeepSeekModelsExposeOfficialLimits(t *testing.T) {
+	for _, modelID := range []string{"deepseek-v4-flash", "deepseek-v4-pro"} {
+		info := LookupStaticModelInfo(modelID)
+		if info == nil {
+			t.Fatalf("LookupStaticModelInfo(%q) = nil, want model info", modelID)
+		}
+		if info.DisplayName == "" || info.DisplayName == modelID {
+			t.Fatalf("%s display name = %q, want a readable name", modelID, info.DisplayName)
+		}
+		if info.ContextLength != 1048576 {
+			t.Fatalf("%s context length = %d, want 1048576", modelID, info.ContextLength)
+		}
+		if info.MaxCompletionTokens != 393216 {
+			t.Fatalf("%s max completion tokens = %d, want 393216", modelID, info.MaxCompletionTokens)
+		}
+		if info.Thinking == nil {
+			t.Fatalf("%s thinking support = nil, want levels", modelID)
+		}
+		if want := []string{"high", "max"}; len(info.Thinking.Levels) != len(want) {
+			t.Fatalf("%s thinking levels = %v, want %v", modelID, info.Thinking.Levels, want)
+		} else {
+			for index, level := range want {
+				if info.Thinking.Levels[index] != level {
+					t.Fatalf("%s thinking levels = %v, want %v", modelID, info.Thinking.Levels, want)
+				}
+			}
+		}
+	}
+}
+
 func TestGeminiVertexModelsUseFlashLiteReleaseID(t *testing.T) {
 	const releaseID = "gemini-3.1-flash-lite"
 	const previewID = releaseID + "-preview"

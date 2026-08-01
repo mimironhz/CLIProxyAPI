@@ -246,16 +246,23 @@ func TestXAIExecutorExecuteShapesResponsesRequest(t *testing.T) {
 		t.Fatalf("input.2 exists, want consecutive reasoning item merged; body=%s", string(gotBody))
 	}
 	tools := gjson.GetBytes(gotBody, "tools").Array()
-	if len(tools) != 6 {
-		t.Fatalf("tools length = %d, want 6; body=%s", len(tools), string(gotBody))
+	if len(tools) != 7 {
+		t.Fatalf("tools length = %d, want 7; body=%s", len(tools), string(gotBody))
 	}
 	foundAutomationUpdate := false
 	foundNamespaceCustom := false
 	foundXSearch := false
+	toolSearchCount := 0
 	for i, tool := range tools {
 		toolType := tool.Get("type").String()
 		if toolType == "image_generation" {
 			t.Fatalf("tools.%d.type = image_generation, want removed; body=%s", i, string(gotBody))
+		}
+		if toolType == "tool_search" {
+			t.Fatalf("tools.%d.type = tool_search, want rewritten to a function; body=%s", i, string(gotBody))
+		}
+		if toolType == "function" && tool.Get("name").String() == "tool_search" {
+			toolSearchCount++
 		}
 		if toolType != "function" && toolType != "web_search" && toolType != "x_search" {
 			t.Fatalf("tools.%d.type = %q, want function, web_search, or x_search; body=%s", i, toolType, string(gotBody))
@@ -292,6 +299,11 @@ func TestXAIExecutorExecuteShapesResponsesRequest(t *testing.T) {
 	}
 	if !foundXSearch {
 		t.Fatalf("native x_search tool was not injected; body=%s", string(gotBody))
+	}
+	// The payload declares tool_search twice (top level and inside the codex_app
+	// namespace); both normalize to the same shim and must collapse into one.
+	if toolSearchCount != 1 {
+		t.Fatalf("tool_search function count = %d, want 1; body=%s", toolSearchCount, string(gotBody))
 	}
 	if got := gjson.GetBytes(gotBody, "tool_choice.tools.0.name").String(); got != "codex_app__automation_update" {
 		t.Fatalf("tool_choice.tools.0.name = %q, want codex_app__automation_update; body=%s", got, string(gotBody))
@@ -2363,7 +2375,7 @@ func TestXAIExecutorAppliesThinkingSuffix(t *testing.T) {
 	}
 }
 
-func TestXAIExecutorExecuteStreamFiltersToolSearchTool(t *testing.T) {
+func TestXAIExecutorExecuteStreamRewritesToolSearchTool(t *testing.T) {
 	var gotBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var errRead error
@@ -2400,8 +2412,19 @@ func TestXAIExecutorExecuteStreamFiltersToolSearchTool(t *testing.T) {
 	}
 
 	tools := gjson.GetBytes(gotBody, "tools").Array()
-	if len(tools) != 6 {
-		t.Fatalf("tools length = %d, want 6; body=%s", len(tools), string(gotBody))
+	if len(tools) != 7 {
+		t.Fatalf("tools length = %d, want 7; body=%s", len(tools), string(gotBody))
+	}
+	// tool_search is declared twice (top level and inside codex_app); both become
+	// the same function shim and must collapse to a single entry.
+	toolSearchCount := 0
+	for _, tool := range tools {
+		if tool.Get("type").String() == "function" && tool.Get("name").String() == "tool_search" {
+			toolSearchCount++
+		}
+	}
+	if toolSearchCount != 1 {
+		t.Fatalf("tool_search function count = %d, want 1; body=%s", toolSearchCount, string(gotBody))
 	}
 	if gjson.GetBytes(gotBody, "input.0.content").Exists() {
 		t.Fatalf("input.0.content exists, want removed; body=%s", string(gotBody))

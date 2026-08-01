@@ -277,6 +277,7 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 		internalProviderKey := util.OpenAICompatibleProviderKey(providerName)
 		base := strings.TrimSpace(compat.BaseURL)
 		disableCooling := compat.DisableCooling
+		upstreamAPI := config.NormalizeOpenAICompatAPI(compat.API)
 
 		// Handle new APIKeyEntries format (preferred)
 		createdEntries := 0
@@ -292,6 +293,9 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 				"compat_name":  compat.Name,
 				"provider_key": internalProviderKey,
 				"config_index": strconv.Itoa(i),
+			}
+			if upstreamAPI != config.OpenAICompatAPIChatCompletions {
+				attrs["upstream_api"] = upstreamAPI
 			}
 			metadata := map[string]any{}
 			if disableCooling {
@@ -336,6 +340,9 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 				"compat_name":  compat.Name,
 				"provider_key": internalProviderKey,
 				"config_index": strconv.Itoa(i),
+			}
+			if upstreamAPI != config.OpenAICompatAPIChatCompletions {
+				attrs["upstream_api"] = upstreamAPI
 			}
 			metadata := map[string]any{}
 			if disableCooling {

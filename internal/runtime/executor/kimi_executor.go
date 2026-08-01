@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -81,8 +83,427 @@ func (e *KimiExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth,
 	return httpClient.Do(httpReq)
 }
 
+// kimiRequestIsCompaction reports whether a request asks for context compaction.
+//
+// Kimi For Coding exposes only an OpenAI-compatible Chat Completions API, so
+// there is no compaction endpoint to forward to. The executor stands in for one:
+// it summarizes the transcript with an ordinary chat turn and returns the single
+// compaction output item Codex requires. Served as a plain turn instead, Codex
+// fails the task with "expected exactly one compaction output item, got 0 from N
+// output items"; answered with an error, Codex retries the compact task without
+// bound and the thread cannot get past its context limit.
+//
+// Clients signal compaction two different ways, and both must be caught:
+//   - HTTP clients POST to /responses/compact, surfaced as opts.Alt.
+//   - Codex Desktop runs over the Responses websocket, where every turn is a
+//     response.create and compaction is instead marked by a compaction_trigger
+//     input item. opts.Alt is empty there.
+//
+// The xAI helpers reused below (xaiInputHasItemType, xaiRemoveInputItemsByType,
+// xaiBuildSSEFrame) are provider-agnostic operations on the Responses shape.
+func kimiRequestIsCompaction(payload []byte, opts cliproxyexecutor.Options) bool {
+	if opts.Alt == "responses/compact" {
+		return true
+	}
+	return xaiInputHasItemType(payload, "compaction_trigger")
+}
+
+// kimiCompactionEncryptedContentPrefix marks a compaction item this executor
+// synthesized. A real provider returns an opaque blob it can decrypt on later
+// turns; Kimi has no such facility, so the summary travels base64-encoded in the
+// same field. The field is opaque to the client either way, and only this
+// executor reads it back.
+const kimiCompactionEncryptedContentPrefix = "kimi-compaction-v1:"
+
+// kimiCompactionInstructions replaces the agent instructions for the single
+// summarization turn that stands in for a compaction endpoint.
+const kimiCompactionInstructions = `You are compacting a coding agent's conversation that has reached its context limit. Replace the transcript with one summary complete enough that the agent can continue with no other memory of it.
+
+Cover, omitting any heading with nothing to report:
+- Objective: what the user asked for, including constraints and preferences they stated.
+- Work completed: what was actually done, with file paths, and the reasoning behind each decision.
+- Current state: what is verified working, what is unverified, and what is known broken.
+- Key facts: commands, identifiers, versions, API shapes, and other details that were expensive to discover.
+- Next steps: what remains, in the order it should be taken.
+
+Prefer specifics over narrative: exact paths, names, and numbers carry the value. Do not address the user, ask questions, or call tools. Output only the summary.`
+
+// kimiCompactionUserPrompt is the final turn that asks for the summary.
+const kimiCompactionUserPrompt = "Compact the conversation above as instructed. Output only the summary."
+
+// kimiCompactionReplayHeader frames a restored summary for the next turn.
+const kimiCompactionReplayHeader = "Summary of the conversation so far, standing in for the messages that were compacted away:"
+
+// kimiBuildCompactionRequest turns a compaction request into an ordinary
+// summarization turn: the trigger is removed, the agent instructions are
+// replaced, and a final user turn asks for the summary. Tools are kept because
+// the transcript still contains calls that reference them, but tool_choice is
+// pinned to "none" so the answer comes back as text.
+func kimiBuildCompactionRequest(payload []byte) []byte {
+	body := xaiRemoveInputItemsByType(payload, "compaction_trigger")
+	body = kimiExpandCompactionInputItems(body)
+	body, _ = sjson.SetBytes(body, "instructions", kimiCompactionInstructions)
+	body, _ = sjson.SetBytes(body, "tool_choice", "none")
+	// Codex asks for low verbosity; a compaction summary needs the opposite.
+	body, _ = sjson.DeleteBytes(body, "text")
+	body, _ = sjson.DeleteBytes(body, "stream")
+	body, _ = sjson.DeleteBytes(body, "stream_options")
+
+	message := []byte(`{"type":"message","role":"user","content":[{"type":"input_text","text":""}]}`)
+	message, _ = sjson.SetBytes(message, "content.0.text", kimiCompactionUserPrompt)
+	if updated, err := sjson.SetRawBytes(body, "input.-1", message); err == nil {
+		body = updated
+	}
+	return body
+}
+
+// kimiExpandCompactionInputItems restores summaries this executor produced.
+// Codex replays the compaction item as ordinary input on every later turn, and
+// Kimi cannot read it, so each one becomes a plain user message. Items minted by
+// another provider are dropped: their encrypted_content means nothing here, and
+// forwarding it upstream would only corrupt the turn.
+func kimiExpandCompactionInputItems(body []byte) []byte {
+	// Every ordinary turn passes through here, so leave without allocating when
+	// there is nothing to restore.
+	if !xaiInputHasItemType(body, "compaction") {
+		return body
+	}
+	input := gjson.GetBytes(body, "input")
+	if !input.IsArray() {
+		return body
+	}
+
+	items := make([]json.RawMessage, 0, len(input.Array()))
+	changed := false
+	for _, item := range input.Array() {
+		if item.Get("type").String() != "compaction" {
+			items = append(items, json.RawMessage(item.Raw))
+			continue
+		}
+		changed = true
+		summary, ok := kimiCompactionSummary(item.Get("encrypted_content").String())
+		if !ok {
+			continue
+		}
+		message := []byte(`{"type":"message","role":"user","content":[{"type":"input_text","text":""}]}`)
+		message, _ = sjson.SetBytes(message, "content.0.text", kimiCompactionReplayHeader+"\n\n"+summary)
+		items = append(items, json.RawMessage(message))
+	}
+	if !changed {
+		return body
+	}
+
+	encoded, err := json.Marshal(items)
+	if err != nil {
+		return body
+	}
+	updated, err := sjson.SetRawBytes(body, "input", encoded)
+	if err != nil {
+		return body
+	}
+	return updated
+}
+
+// kimiCompactionSummary decodes a summary this executor previously encoded.
+func kimiCompactionSummary(encryptedContent string) (string, bool) {
+	if !strings.HasPrefix(encryptedContent, kimiCompactionEncryptedContentPrefix) {
+		return "", false
+	}
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(encryptedContent, kimiCompactionEncryptedContentPrefix))
+	if err != nil {
+		return "", false
+	}
+	summary := strings.TrimSpace(string(decoded))
+	if summary == "" {
+		return "", false
+	}
+	return summary, true
+}
+
+// kimiCompactionOutputItem builds the one output item Codex requires.
+func kimiCompactionOutputItem(summary, responseID string) []byte {
+	item := []byte(`{"type":"compaction","encrypted_content":""}`)
+	item, _ = sjson.SetBytes(item, "id", "cmp_"+strings.TrimPrefix(responseID, "resp_"))
+	item, _ = sjson.SetBytes(item, "encrypted_content", kimiCompactionEncryptedContentPrefix+base64.StdEncoding.EncodeToString([]byte(summary)))
+	return item
+}
+
+// kimiBuildCompactionResponse echoes the request configuration back the way the
+// Responses API does, so the synthesized response is indistinguishable from an
+// upstream one apart from its output.
+func kimiBuildCompactionResponse(payload []byte, model, responseID string, createdAt int64, status string) []byte {
+	response := []byte(`{"id":"","object":"response","created_at":0,"status":"","background":false,"error":null,"incomplete_details":null,"output":[]}`)
+	response, _ = sjson.SetBytes(response, "id", responseID)
+	response, _ = sjson.SetBytes(response, "created_at", createdAt)
+	response, _ = sjson.SetBytes(response, "status", status)
+	if requestModel := strings.TrimSpace(gjson.GetBytes(payload, "model").String()); requestModel != "" {
+		model = requestModel
+	}
+	if model != "" {
+		response, _ = sjson.SetBytes(response, "model", model)
+	}
+	for _, field := range []string{
+		"instructions",
+		"max_output_tokens",
+		"max_tool_calls",
+		"parallel_tool_calls",
+		"previous_response_id",
+		"prompt_cache_key",
+		"reasoning",
+		"text",
+		"tool_choice",
+		"tools",
+		"truncation",
+		"user",
+		"metadata",
+	} {
+		if value := gjson.GetBytes(payload, field); value.Exists() {
+			response, _ = sjson.SetRawBytes(response, field, []byte(value.Raw))
+		}
+	}
+	return response
+}
+
+// kimiBuildCompletedCompactionResponse returns the terminal compaction response.
+// The /responses/compact endpoint answers with object "response.compaction",
+// so the Alt path keeps that shape.
+func kimiBuildCompletedCompactionResponse(payload []byte, model, summary string, usage []byte, compactEndpoint bool) []byte {
+	responseID := kimiCompactionResponseID()
+	now := time.Now().Unix()
+	response := kimiBuildCompactionResponse(payload, model, responseID, now, "completed")
+	response, _ = sjson.SetBytes(response, "completed_at", now)
+	response, _ = sjson.SetRawBytes(response, "output", kimiCompactionOutputArray(kimiCompactionOutputItem(summary, responseID)))
+	if len(usage) > 0 {
+		response, _ = sjson.SetRawBytes(response, "usage", usage)
+	}
+	if compactEndpoint {
+		response, _ = sjson.SetBytes(response, "object", "response.compaction")
+	}
+	return response
+}
+
+// kimiBuildCompactionStreamChunks replays the synthesized response as the SSE
+// frames a streaming Responses call would have produced.
+func kimiBuildCompactionStreamChunks(payload []byte, model, summary string, usage []byte) [][]byte {
+	responseID := kimiCompactionResponseID()
+	now := time.Now().Unix()
+	item := kimiCompactionOutputItem(summary, responseID)
+
+	createdResponse := kimiBuildCompactionResponse(payload, model, responseID, now, "in_progress")
+	inProgressResponse := kimiBuildCompactionResponse(payload, model, responseID, now, "in_progress")
+	completedResponse := kimiBuildCompactionResponse(payload, model, responseID, now, "completed")
+	completedResponse, _ = sjson.SetBytes(completedResponse, "completed_at", now)
+	completedResponse, _ = sjson.SetRawBytes(completedResponse, "output", kimiCompactionOutputArray(item))
+	if len(usage) > 0 {
+		completedResponse, _ = sjson.SetRawBytes(completedResponse, "usage", usage)
+	}
+
+	createdPayload := []byte(`{"type":"response.created","sequence_number":0}`)
+	createdPayload, _ = sjson.SetRawBytes(createdPayload, "response", createdResponse)
+	inProgressPayload := []byte(`{"type":"response.in_progress","sequence_number":1}`)
+	inProgressPayload, _ = sjson.SetRawBytes(inProgressPayload, "response", inProgressResponse)
+	addedPayload := []byte(`{"type":"response.output_item.added","sequence_number":2,"output_index":0}`)
+	addedPayload, _ = sjson.SetRawBytes(addedPayload, "item", item)
+	donePayload := []byte(`{"type":"response.output_item.done","sequence_number":3,"output_index":0}`)
+	donePayload, _ = sjson.SetRawBytes(donePayload, "item", item)
+	completedPayload := []byte(`{"type":"response.completed","sequence_number":4}`)
+	completedPayload, _ = sjson.SetRawBytes(completedPayload, "response", completedResponse)
+
+	return [][]byte{
+		xaiBuildSSEFrame("response.created", createdPayload),
+		xaiBuildSSEFrame("response.in_progress", inProgressPayload),
+		xaiBuildSSEFrame("response.output_item.added", addedPayload),
+		xaiBuildSSEFrame("response.output_item.done", donePayload),
+		xaiBuildSSEFrame("response.completed", completedPayload),
+	}
+}
+
+func kimiCompactionOutputArray(item []byte) []byte {
+	output := make([]byte, 0, len(item)+2)
+	output = append(output, '[')
+	output = append(output, item...)
+	output = append(output, ']')
+	return output
+}
+
+func kimiCompactionResponseID() string {
+	return fmt.Sprintf("resp_kimi_compaction_%d", time.Now().UnixNano())
+}
+
+// kimiCompactionUsage reports the size of the compaction result, not the cost of
+// producing it.
+//
+// The summarization call's prompt is the whole transcript being compacted, so its
+// prompt_tokens sits at or above the context window by construction. Codex reads
+// this field as the conversation's current size and compares it against
+// model_context_window: report the prompt there and every compaction ends with
+// "still over the limit", which triggers another compaction, forever. The
+// transcript grows each round, so the reported figure climbs with it.
+//
+// Only the summary survives into the next turn, so only the summary is reported.
+// The true cost is still recorded through the executor's usage reporter.
+func kimiCompactionUsage(data []byte) []byte {
+	usage := gjson.GetBytes(data, "usage")
+	if !usage.Exists() {
+		return nil
+	}
+	summaryTokens := usage.Get("completion_tokens").Int()
+	out := []byte(`{"input_tokens":0,"output_tokens":0,"total_tokens":0}`)
+	out, _ = sjson.SetBytes(out, "output_tokens", summaryTokens)
+	out, _ = sjson.SetBytes(out, "total_tokens", summaryTokens)
+	return out
+}
+
+// executeCompaction runs the summarization turn that stands in for a compaction
+// endpoint and returns the summary text.
+func (e *KimiExecutor) executeCompaction(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (summary string, usage []byte, headers http.Header, err error) {
+	from := opts.SourceFormat
+	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	token := kimiCreds(auth)
+	requestKind := "websocket_trigger"
+	if opts.Alt == "responses/compact" {
+		requestKind = "responses_compact"
+	}
+	helps.LogWithRequestID(ctx).WithFields(helps.CompactionDiagnosticFields(req.Payload)).WithFields(log.Fields{
+		"compaction_provider": "kimi",
+		"compaction_phase":    "client_request",
+		"request_kind":        requestKind,
+	}).Info("compaction capture")
+
+	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
+	defer reporter.TrackFailure(ctx, &err)
+
+	to := sdktranslator.FromString("openai")
+	compactPayload := helps.PrepareResponsesToolSearch(kimiBuildCompactionRequest(bytes.Clone(req.Payload)))
+	body := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, compactPayload, false)
+
+	body, err = sjson.SetBytes(body, "model", normalizeKimiUpstreamModel(baseModel))
+	if err != nil {
+		return "", nil, nil, fmt.Errorf("kimi executor: failed to set model in compaction payload: %w", err)
+	}
+	body, err = thinking.ApplyThinking(body, req.Model, from.String(), "kimi", e.Identifier())
+	if err != nil {
+		return "", nil, nil, err
+	}
+	body, err = normalizeKimiToolMessageLinks(body)
+	if err != nil {
+		return "", nil, nil, err
+	}
+	reporter.SetTranslatedReasoningEffort(body, e.Identifier())
+
+	url := kimiauth.KimiAPIBaseURL + "/v1/chat/completions"
+	helps.LogWithRequestID(ctx).WithFields(helps.CompactionDiagnosticFields(body)).WithFields(log.Fields{
+		"compaction_provider": "kimi",
+		"compaction_phase":    "upstream_request",
+		"request_kind":        requestKind,
+		"upstream_url":        url,
+	}).Info("compaction capture")
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return "", nil, nil, err
+	}
+	applyKimiHeadersWithAuth(httpReq, token, false, auth)
+	var attrs map[string]string
+	if auth != nil {
+		attrs = auth.Attributes
+	}
+	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+	var authID, authLabel, authType, authValue string
+	if auth != nil {
+		authID = auth.ID
+		authLabel = auth.Label
+		authType, authValue = auth.AccountInfo()
+	}
+	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
+		URL:       url,
+		Method:    http.MethodPost,
+		Headers:   httpReq.Header.Clone(),
+		Body:      body,
+		Provider:  e.Identifier(),
+		AuthID:    authID,
+		AuthLabel: authLabel,
+		AuthType:  authType,
+		AuthValue: authValue,
+	})
+
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient = reporter.TrackHTTPClient(httpClient)
+	httpResp, err := httpClient.Do(httpReq)
+	if err != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		helps.LogWithRequestID(ctx).WithError(err).WithFields(log.Fields{
+			"compaction_provider": "kimi",
+			"compaction_phase":    "upstream_transport_error",
+			"request_kind":        requestKind,
+			"upstream_url":        url,
+		}).Warn("compaction capture")
+		return "", nil, nil, err
+	}
+	defer func() {
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("kimi executor: close response body error: %v", errClose)
+		}
+	}()
+	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+
+	data, err := io.ReadAll(httpResp.Body)
+	if err != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		helps.LogWithRequestID(ctx).WithError(err).WithFields(log.Fields{
+			"compaction_provider": "kimi",
+			"compaction_phase":    "upstream_read_error",
+			"http_status":         httpResp.StatusCode,
+			"request_kind":        requestKind,
+			"upstream_url":        url,
+		}).Warn("compaction capture")
+		return "", nil, nil, err
+	}
+	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+	responseFields := helps.CompactionDiagnosticFields(data)
+	responseFields["compaction_provider"] = "kimi"
+	responseFields["compaction_phase"] = "upstream_response"
+	responseFields["http_status"] = httpResp.StatusCode
+	responseFields["request_kind"] = requestKind
+	responseFields["upstream_url"] = url
+	if upstreamRequestID := strings.TrimSpace(httpResp.Header.Get("x-request-id")); upstreamRequestID != "" {
+		responseFields["upstream_request_id"] = upstreamRequestID
+	}
+	helps.LogWithRequestID(ctx).WithFields(responseFields).Info("compaction capture")
+
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		helps.LogWithRequestID(ctx).Debugf("compaction request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
+		err = statusErr{code: httpResp.StatusCode, msg: string(data)}
+		return "", nil, nil, err
+	}
+
+	reporter.Publish(ctx, helps.ParseOpenAIUsage(data))
+	summary = strings.TrimSpace(gjson.GetBytes(data, "choices.0.message.content").String())
+	if summary == "" {
+		err = statusErr{code: http.StatusBadGateway, msg: "kimi compaction produced an empty summary"}
+		return "", nil, nil, err
+	}
+	return summary, kimiCompactionUsage(data), httpResp.Header.Clone(), nil
+}
+
 // Execute performs a non-streaming chat completion request to Kimi.
 func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	if kimiRequestIsCompaction(req.Payload, opts) {
+		summary, usage, headers, errCompact := e.executeCompaction(ctx, auth, req, opts)
+		if errCompact != nil {
+			return resp, errCompact
+		}
+		out := kimiBuildCompletedCompactionResponse(req.Payload, req.Model, summary, usage, opts.Alt == "responses/compact")
+		requestKind := "websocket_trigger"
+		if opts.Alt == "responses/compact" {
+			requestKind = "responses_compact"
+		}
+		helps.LogWithRequestID(ctx).WithFields(helps.CompactionDiagnosticFields(out)).WithFields(log.Fields{
+			"compaction_provider": "kimi",
+			"compaction_phase":    "client_response",
+			"request_kind":        requestKind,
+		}).Info("compaction capture")
+		return cliproxyexecutor.Response{Payload: out, Headers: headers}, nil
+	}
 	from := opts.SourceFormat
 	if from.String() == "claude" {
 		auth.Attributes["base_url"] = kimiauth.KimiAPIBaseURL
@@ -102,9 +523,11 @@ func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
 	}
-	originalPayload := bytes.Clone(originalPayloadSource)
+	// Codex replays the compaction item on every turn after a compaction; restore
+	// the summary it stands for before the payload is translated.
+	originalPayload := helps.PrepareResponsesToolSearch(kimiExpandCompactionInputItems(bytes.Clone(originalPayloadSource)))
 	originalTranslated := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, false)
-	body := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, bytes.Clone(req.Payload), false)
+	body := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, helps.PrepareResponsesToolSearch(kimiExpandCompactionInputItems(bytes.Clone(req.Payload))), false)
 
 	// Strip kimi- prefix and any [1m] suffix for upstream API
 	upstreamModel := normalizeKimiUpstreamModel(baseModel)
@@ -187,12 +610,39 @@ func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	// Note: TranslateNonStream uses req.Model (original with suffix) to preserve
 	// the original model name in the response for client compatibility.
 	out := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, body, data, &param)
+	// Kimi calls the tool_search stand-in as a plain function; Codex Desktop only
+	// runs its deferred-tool loader for a real tool_search_call item.
+	out = helps.RestoreToolSearchResponse(out)
 	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 	return resp, nil
 }
 
 // ExecuteStream performs a streaming chat completion request to Kimi.
 func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
+	if kimiRequestIsCompaction(req.Payload, opts) {
+		summary, usage, headers, errCompact := e.executeCompaction(ctx, auth, req, opts)
+		if errCompact != nil {
+			return nil, errCompact
+		}
+		if headers == nil {
+			headers = make(http.Header)
+		} else {
+			headers = headers.Clone()
+		}
+		headers.Set("Content-Type", "text/event-stream")
+		chunks := kimiBuildCompactionStreamChunks(req.Payload, req.Model, summary, usage)
+		helps.LogWithRequestID(ctx).WithFields(helps.CompactionStreamDiagnosticFields(chunks)).WithFields(log.Fields{
+			"compaction_provider": "kimi",
+			"compaction_phase":    "client_response",
+			"request_kind":        "websocket_trigger",
+		}).Info("compaction capture")
+		out := make(chan cliproxyexecutor.StreamChunk, len(chunks))
+		for _, chunk := range chunks {
+			out <- cliproxyexecutor.StreamChunk{Payload: chunk}
+		}
+		close(out)
+		return &cliproxyexecutor.StreamResult{Headers: headers, Chunks: out}, nil
+	}
 	from := opts.SourceFormat
 	if from.String() == "claude" {
 		auth.Attributes["base_url"] = kimiauth.KimiAPIBaseURL
@@ -211,9 +661,11 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
 	}
-	originalPayload := bytes.Clone(originalPayloadSource)
+	// Codex replays the compaction item on every turn after a compaction; restore
+	// the summary it stands for before the payload is translated.
+	originalPayload := helps.PrepareResponsesToolSearch(kimiExpandCompactionInputItems(bytes.Clone(originalPayloadSource)))
 	originalTranslated := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, true)
-	body := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, bytes.Clone(req.Payload), true)
+	body := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, helps.PrepareResponsesToolSearch(kimiExpandCompactionInputItems(bytes.Clone(req.Payload))), true)
 
 	// Strip kimi- prefix and any [1m] suffix for upstream API
 	upstreamModel := normalizeKimiUpstreamModel(baseModel)
@@ -307,6 +759,9 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 			streamUsage.ObserveOpenAIStream(line)
 			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, body, bytes.Clone(line), &param, claudeInputTokens)
 			for i := range chunks {
+				// Kimi calls the tool_search stand-in as a plain function; Codex Desktop
+				// only runs its deferred-tool loader for a real tool_search_call item.
+				chunks[i] = helps.RestoreToolSearchStreamChunk(chunks[i])
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
 				case <-ctx.Done():

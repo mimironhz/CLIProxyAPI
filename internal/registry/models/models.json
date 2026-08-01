@@ -2441,6 +2441,44 @@
       }
     }
   ],
+  "deepseek": [
+    {
+      "id": "deepseek-v4-flash",
+      "object": "model",
+      "created": 1776988800,
+      "owned_by": "deepseek",
+      "type": "deepseek",
+      "display_name": "DS/v4 Flash",
+      "description": "DeepSeek V4 Flash - DeepSeek's fast V4 tier (284B MoE, 13B activated) with 1M context",
+      "context_length": 1048576,
+      "max_completion_tokens": 393216,
+      "thinking": {
+        "zero_allowed": false,
+        "levels": [
+          "high",
+          "max"
+        ]
+      }
+    },
+    {
+      "id": "deepseek-v4-pro",
+      "object": "model",
+      "created": 1776988800,
+      "owned_by": "deepseek",
+      "type": "deepseek",
+      "display_name": "DeepSeek V4 Pro",
+      "description": "DeepSeek V4 Pro - DeepSeek's flagship V4 tier (1.6T MoE, 49B activated) with 1M context",
+      "context_length": 1048576,
+      "max_completion_tokens": 393216,
+      "thinking": {
+        "zero_allowed": false,
+        "levels": [
+          "high",
+          "max"
+        ]
+      }
+    }
+  ],
   "antigravity": [
     {
       "id": "claude-opus-4-6-thinking",

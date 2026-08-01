@@ -307,6 +307,10 @@ func applyCodexDirectImageHeaders(r *http.Request, auth *cliproxyauth.Auth, toke
 
 func applyCodexHeadersFromSources(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, cfg *config.Config, ginHeaders http.Header) {
 	r.Header.Set("Content-Type", "application/json")
+	passthrough := codexPassthroughToken(cfg, ginHeaders)
+	if passthrough != "" {
+		token = passthrough
+	}
 	r.Header.Set("Authorization", "Bearer "+token)
 
 	if ginHeaders != nil && ginHeaders.Get("X-Codex-Beta-Features") != "" {
@@ -335,16 +339,33 @@ func applyCodexHeadersFromSources(r *http.Request, auth *cliproxyauth.Auth, toke
 			isAPIKey = true
 		}
 	}
+	// A passthrough bearer is a ChatGPT OAuth token regardless of how the
+	// selected credential is configured, so the request must carry OAuth-shaped
+	// identity headers even when a placeholder api-key credential was selected.
+	if passthrough != "" {
+		isAPIKey = false
+	}
 	if originator := strings.TrimSpace(ginHeaders.Get("Originator")); originator != "" {
 		r.Header.Set("Originator", originator)
 	} else if !isAPIKey {
 		r.Header.Set("Originator", codexOriginator)
 	}
 	if !isAPIKey {
+		accountID := ""
 		if auth != nil && auth.Metadata != nil {
-			if accountID, ok := auth.Metadata["account_id"].(string); ok {
-				r.Header.Set("Chatgpt-Account-Id", accountID)
+			if v, ok := auth.Metadata["account_id"].(string); ok {
+				accountID = v
 			}
+		}
+		// The passthrough client owns the account the token belongs to, so its
+		// own account header wins over anything the stored credential carries.
+		if passthrough != "" {
+			if v := strings.TrimSpace(ginHeaders.Get("Chatgpt-Account-Id")); v != "" {
+				accountID = v
+			}
+		}
+		if accountID != "" {
+			r.Header.Set("Chatgpt-Account-Id", accountID)
 		}
 	}
 	var attrs map[string]string

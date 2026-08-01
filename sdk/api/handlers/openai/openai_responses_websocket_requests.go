@@ -130,18 +130,29 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 	// function_call / function_call_output pairings.
 	// See: https://github.com/router-for-me/CLIProxyAPI/issues/2207
 	var mergedInput string
-	if allowCompactionReplayBypass && inputContainsFullTranscript(nextInput) {
+	compactReplay := inputContainsFullTranscript(nextInput)
+	if allowCompactionReplayBypass && compactReplay {
 		log.Infof("responses websocket: full transcript detected, skipping stale merge (input items=%d)", len(nextInput.Array()))
 		mergedInput = nextInput.Raw
 	} else {
 		appendInputRaw := nextInput.Raw
-		if inputContainsFullTranscript(nextInput) {
+		if compactReplay {
 			appendInputRaw = inputWithoutCompactionItems(nextInput)
 		}
 
 		existingInput := gjson.GetBytes(lastRequest, "input")
+		existingInputRaw := existingInput.Raw
+		lastResponseOutputRaw := normalizeJSONArrayRaw(lastResponseOutput)
+		if compactReplay {
+			// Compaction triggers are one-shot control items. When the selected
+			// provider cannot consume compact replay directly, rebuild the full
+			// transcript without replaying the consumed trigger or opaque compact
+			// state from any side of the merge.
+			existingInputRaw = inputWithoutCompactionItems(existingInput)
+			lastResponseOutputRaw = inputWithoutCompactionItems(gjson.Parse(lastResponseOutputRaw))
+		}
 		var errMerge error
-		mergedInput, errMerge = mergeJSONArrayRaw(existingInput.Raw, normalizeJSONArrayRaw(lastResponseOutput))
+		mergedInput, errMerge = mergeJSONArrayRaw(existingInputRaw, lastResponseOutputRaw)
 		if errMerge != nil {
 			return nil, lastRequest, &interfaces.ErrorMessage{
 				StatusCode: http.StatusBadRequest,

@@ -18,15 +18,20 @@ var (
 )
 
 const (
-	xaiImageHandlerType        = "openai-image"
-	xaiVideoHandlerType        = "openai-video"
-	xaiCustomToolType          = "custom"
-	xaiFunctionToolType        = "function"
-	xaiImageGenerationToolType = "image_generation"
-	xaiNamespaceToolType       = "namespace"
-	xaiToolSearchType          = "tool_search"
-	xaiWebSearchToolType       = "web_search"
-	xaiXSearchToolType         = "x_search"
+	xaiImageHandlerType           = "openai-image"
+	xaiVideoHandlerType           = "openai-video"
+	xaiCustomToolType             = "custom"
+	xaiFunctionToolType           = "function"
+	xaiImageGenerationToolType    = "image_generation"
+	xaiNamespaceToolType          = "namespace"
+	xaiToolSearchType             = "tool_search"
+	xaiWebSearchToolType          = "web_search"
+	xaiXSearchToolType            = "x_search"
+	xaiViewImageToolName          = "view_image"
+	xaiReadFileToolName           = "read_file"
+	xaiViewImageDescription       = "View a local image file from the filesystem when visual inspection is needed. Use this for images already available on disk."
+	xaiViewImagePathDescription   = "Local filesystem path to an image file."
+	xaiViewImageDetailDescription = "Image detail level. Defaults to `high`; use `original` to preserve exact resolution."
 	// Codex Desktop injects codex_app.automation_update with a large oneOf+$ref
 	// schema. xAI's free/build Responses path accepts the HTTP request but never
 	// emits SSE when that schema is present, so Desktop hangs on "thinking".

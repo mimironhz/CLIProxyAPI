@@ -222,6 +222,13 @@ codex:
   identity-confuse: false
   # Disable forcing the official Codex User-Agent and Originator headers on HTTP requests.
   disable-codex-cloaking: false
+  # When true, forward the calling client's own ChatGPT OAuth bearer to the Codex
+  # upstream instead of the selected credential's token. Intended for Codex
+  # Desktop / codex-cli pointed here through openai_base_url, so ChatGPT usage
+  # stays on the account the client is already signed in as. Only JWT-shaped
+  # bearers are forwarded (so a configured api-keys value is never mistaken for a
+  # ChatGPT credential), and only on the Codex path — xAI keeps its own credential.
+  passthrough-client-token: false
   # When true, optimize Codex Desktop and codex-tui requests for multi-agent v2.
   # This refreshes Codex spawn_agent model details, removes message parameter encryption,
   # normalizes encrypted agent_message content for Codex, and converts agent_message input
@@ -444,6 +451,15 @@ nonstream-keepalive-interval: 0
 #     disabled: false # optional: set to true to disable this provider without removing it
 #     prefix: "test" # optional: require calls like "test/kimi-k2" to target this provider's credentials
 #     base-url: "https://openrouter.ai/api/v1" # The base URL of the provider.
+#     api: chat-completions # optional: wire protocol spoken to this upstream.
+#       # "chat-completions" (the default) translates every request to
+#       # /chat/completions. Set "responses" only for an upstream that implements
+#       # the OpenAI Responses API itself (for example https://api.deepseek.com/v1),
+#       # and requests reach /responses without the round trip through Chat
+#       # Completions. Note that "responses" applies to the whole provider, and
+#       # that only clients calling /v1/responses benefit: callers using
+#       # /v1/chat/completions and the Claude or Gemini endpoints keep Chat
+#       # Completions, because no translator reads a Responses upstream for them.
 #     disable-cooling: false # optional: per-provider override for auth/model cooldown scheduling
 #     headers:
 #       X-Custom-Header: "custom-value"

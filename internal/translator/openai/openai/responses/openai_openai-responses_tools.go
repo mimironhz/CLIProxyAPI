@@ -86,9 +86,28 @@ func convertResponsesFunctionToolToOpenAIChat(tool gjson.Result, overrideName st
 		chatTool, _ = sjson.SetBytes(chatTool, "function.description", description)
 	}
 	if parameters := responsesToolParameters(tool); parameters.Exists() {
-		chatTool, _ = sjson.SetRawBytes(chatTool, "function.parameters", []byte(parameters.Raw))
+		chatTool, _ = sjson.SetRawBytes(chatTool, "function.parameters", normalizeResponsesToolParameters(parameters))
 	}
 	return chatTool, true
+}
+
+// normalizeResponsesToolParameters stamps the root "type" onto a schema that
+// omits it. Codex declares tools whose parameters are a bare root union — the
+// deferred codex_app.automation_update is {"oneOf":[...],"$defs":{...}} — which
+// the Responses API accepts but Chat Completions upstreams reject outright
+// (Kimi: 400 `tools.function.parameters.type is required and must be "object"`,
+// which kills the whole turn). Function call arguments are always an object, so
+// the added constraint preserves what the schema already meant.
+func normalizeResponsesToolParameters(parameters gjson.Result) []byte {
+	raw := []byte(parameters.Raw)
+	if !parameters.IsObject() || parameters.Get("type").Exists() {
+		return raw
+	}
+	normalized, errSet := sjson.SetBytes(raw, "type", "object")
+	if errSet != nil {
+		return raw
+	}
+	return normalized
 }
 
 func responsesToolName(tool gjson.Result) string {
@@ -193,13 +212,22 @@ func responsesSingleCustomToolName(requestRawJSON []byte) (string, bool) {
 		return "", false
 	}
 
-	toolCount := 0
+	// Count distinct names so the single-custom-tool optimization still applies
+	// when the same tool is declared in both tools and additional_tools, which is
+	// how Codex Desktop delivers them.
+	toolNames := make(map[string]struct{})
 	collect := func(tools gjson.Result) {
 		if !tools.Exists() || !tools.IsArray() {
 			return
 		}
 		tools.ForEach(func(_, tool gjson.Result) bool {
-			toolCount += len(convertResponsesToolToOpenAIChatTools(tool))
+			for _, chatTool := range convertResponsesToolToOpenAIChatTools(tool) {
+				name := gjson.GetBytes(chatTool, "function.name").String()
+				if name == "" {
+					continue
+				}
+				toolNames[name] = struct{}{}
+			}
 			return true
 		})
 	}
@@ -215,7 +243,7 @@ func responsesSingleCustomToolName(requestRawJSON []byte) (string, bool) {
 		})
 	}
 	for name := range customToolNames {
-		return name, toolCount == 1
+		return name, len(toolNames) == 1
 	}
 	return "", false
 }
@@ -290,7 +318,14 @@ func splitResponsesQualifiedFunctionCallFromRequest(requestRawJSON []byte, quali
 	collect(root.Get("tools"))
 	if input := root.Get("input"); input.Exists() && input.IsArray() {
 		input.ForEach(func(_, item gjson.Result) bool {
-			if item.Get("type").String() == "additional_tools" {
+			// tool_search_output carries the namespaces the client loaded through
+			// tool_search. Those children are forwarded upstream under their
+			// qualified "<namespace>__<child>" name like any other, so the mapping
+			// has to be recoverable here; otherwise the call returns to Codex as
+			// codex_app__send_message_to_thread and is rejected as an unsupported
+			// call.
+			switch item.Get("type").String() {
+			case "additional_tools", "tool_search_output":
 				collect(item.Get("tools"))
 			}
 			return true

@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	sdkpluginstore "github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginstore"
@@ -131,6 +132,12 @@ type CodexConfig struct {
 	DisableCodexCloaking bool `yaml:"disable-codex-cloaking" json:"disable-codex-cloaking"`
 	// OptimizeMultiAgentV2 optimizes official Codex multi-agent requests.
 	OptimizeMultiAgentV2 bool `yaml:"optimize-multi-agent-v2" json:"optimize-multi-agent-v2"`
+	// PassthroughClientToken forwards the inbound client's own ChatGPT OAuth
+	// bearer to the Codex upstream instead of the stored credential's token.
+	// Intended for Codex Desktop pointed at this proxy through openai_base_url,
+	// so ChatGPT usage stays on the account the client is already signed in as.
+	// Only tokens shaped like a JWT are forwarded, and only on the Codex path.
+	PassthroughClientToken bool `yaml:"passthrough-client-token" json:"passthrough-client-token"`
 	// LiveMediaRelay terminates and relays Codex Live WebRTC media in this process.
 	LiveMediaRelay CodexLiveMediaRelayConfig `yaml:"live-media-relay" json:"live-media-relay"`
 }
@@ -547,6 +554,28 @@ func (m GeminiModel) GetForceMapping() bool { return m.ForceMapping }
 
 func (m GeminiModel) GetThinking() *registry.ThinkingSupport { return m.Thinking }
 
+const (
+	// OpenAICompatAPIChatCompletions posts translated requests to
+	// /chat/completions. It is the default for every provider that does not set
+	// an explicit api value.
+	OpenAICompatAPIChatCompletions = "chat-completions"
+
+	// OpenAICompatAPIResponses posts Responses-shaped requests to /responses.
+	OpenAICompatAPIResponses = "responses"
+)
+
+// NormalizeOpenAICompatAPI canonicalizes a configured api value. An empty or
+// unrecognized value falls back to Chat Completions, which every
+// OpenAI-compatible upstream implements.
+func NormalizeOpenAICompatAPI(api string) string {
+	switch strings.ToLower(strings.TrimSpace(api)) {
+	case OpenAICompatAPIResponses:
+		return OpenAICompatAPIResponses
+	default:
+		return OpenAICompatAPIChatCompletions
+	}
+}
+
 // OpenAICompatibility represents the configuration for OpenAI API compatibility
 // with external providers, allowing model aliases to be routed through OpenAI API format.
 type OpenAICompatibility struct {
@@ -565,6 +594,13 @@ type OpenAICompatibility struct {
 
 	// BaseURL is the base URL for the external OpenAI-compatible API endpoint.
 	BaseURL string `yaml:"base-url" json:"base-url"`
+
+	// API selects the wire protocol spoken to this upstream. An empty value or
+	// OpenAICompatAPIChatCompletions posts translated requests to
+	// /chat/completions; OpenAICompatAPIResponses posts Responses-shaped
+	// requests to /responses instead, which avoids the lossy round trip through
+	// Chat Completions for upstreams that implement the Responses API natively.
+	API string `yaml:"api,omitempty" json:"api,omitempty"`
 
 	// APIKeyEntries defines API keys with optional per-key proxy configuration.
 	APIKeyEntries []OpenAICompatibilityAPIKey `yaml:"api-key-entries,omitempty" json:"api-key-entries,omitempty"`

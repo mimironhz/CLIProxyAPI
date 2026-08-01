@@ -91,7 +91,10 @@ func collectXAIClientDeclaredToolKeys(body []byte) map[xaiClientToolKey]struct{}
 	input := gjson.GetBytes(body, "input")
 	if input.Exists() && input.IsArray() {
 		for _, item := range input.Array() {
-			if item.Get("type").String() == "additional_tools" {
+			// Tools loaded through tool_search are as client-declared as the ones in
+			// the base list; the response filter drops calls it cannot attribute.
+			switch item.Get("type").String() {
+			case "additional_tools", xaiToolSearchOutputItemType:
 				collect(item.Get("tools"))
 			}
 		}
@@ -310,6 +313,65 @@ func normalizeXAIInputNamespaceToolCalls(body []byte) []byte {
 		body = updated
 	}
 	return body
+}
+
+// restoreXAIViewImageToolAlias maps only calls associated with a request that
+// installed the collision-free alias. Arguments stay byte-for-byte unchanged,
+// so streamed path/detail fragments remain valid for the Codex view_image tool.
+func restoreXAIViewImageToolAlias(data []byte, enabled bool) []byte {
+	if !enabled || len(data) == 0 || !gjson.ValidBytes(data) {
+		return data
+	}
+	original := data
+	var ok bool
+	data, ok = rewriteXAIViewImageFunctionCallAtPath(data, "item")
+	if !ok {
+		return original
+	}
+	for _, arrayPath := range []string{"response.output", "output"} {
+		for index := range gjson.GetBytes(data, arrayPath).Array() {
+			data, ok = rewriteXAIViewImageFunctionCallAtPath(data, fmt.Sprintf("%s.%d", arrayPath, index))
+			if !ok {
+				return original
+			}
+		}
+	}
+	for _, arrayPath := range []string{"response.tools", "tools"} {
+		for index := range gjson.GetBytes(data, arrayPath).Array() {
+			path := fmt.Sprintf("%s.%d", arrayPath, index)
+			tool := gjson.GetBytes(data, path)
+			if tool.Get("type").String() != xaiFunctionToolType ||
+				tool.Get("name").String() != xaiReadFileToolName {
+				continue
+			}
+			updated, errSet := sjson.SetBytes(data, path+".name", xaiViewImageToolName)
+			if errSet != nil {
+				return original
+			}
+			data = updated
+		}
+	}
+	for _, choicePath := range []string{"response.tool_choice", "tool_choice"} {
+		data, ok = rewriteXAIToolChoiceFunctionNameAtPath(data, choicePath, xaiReadFileToolName, xaiViewImageToolName)
+		if !ok {
+			return original
+		}
+	}
+	return data
+}
+
+func rewriteXAIViewImageFunctionCallAtPath(data []byte, path string) ([]byte, bool) {
+	item := gjson.GetBytes(data, path)
+	if !item.Exists() || item.Get("type").String() != "function_call" ||
+		strings.TrimSpace(item.Get("namespace").String()) != "" ||
+		item.Get("name").String() != xaiReadFileToolName {
+		return data, true
+	}
+	updated, errSet := sjson.SetBytes(data, path+".name", xaiViewImageToolName)
+	if errSet != nil {
+		return data, false
+	}
+	return updated, true
 }
 
 func restoreXAINamespaceToolCalls(data []byte, refs map[string]xaiNamespaceToolRef) []byte {

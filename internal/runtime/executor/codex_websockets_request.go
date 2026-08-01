@@ -68,13 +68,16 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 	if headers == nil {
 		headers = http.Header{}
 	}
-	if strings.TrimSpace(token) != "" {
-		headers.Set("Authorization", "Bearer "+token)
-	}
-
 	var ginHeaders http.Header
 	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
 		ginHeaders = ginCtx.Request.Header.Clone()
+	}
+
+	if passthrough := codexPassthroughToken(cfg, ginHeaders); passthrough != "" {
+		token = passthrough
+	}
+	if strings.TrimSpace(token) != "" {
+		headers.Set("Authorization", "Bearer "+token)
 	}
 
 	isAPIKey := codexAuthUsesAPIKey(auth)

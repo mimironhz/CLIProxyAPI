@@ -4808,6 +4808,91 @@ func TestNormalizeSubsequentRequestCompactSkipsMerge(t *testing.T) {
 	}
 }
 
+func TestNormalizeSubsequentRequestXAICompactReplayDoesNotReplayTrigger(t *testing.T) {
+	auth := &coreauth.Auth{Provider: "xai"}
+	allowCompactionReplay := responsesWebsocketAuthSupportsCompactionReplay(auth)
+	if !allowCompactionReplay {
+		t.Fatal("xai must support compact replay")
+	}
+
+	lastRequest := []byte(`{"model":"grok-4.5","stream":true,"input":[
+		{"type":"message","role":"user","id":"msg-old","content":"original history"},
+		{"type":"compaction_trigger"}
+	]}`)
+	lastResponseOutput := []byte(`[
+		{"type":"compaction","id":"cmp-old","encrypted_content":"opaque compact state"}
+	]`)
+	raw := []byte(`{"type":"response.create","input":[
+		{"type":"message","role":"user","id":"msg-compacted","content":"retained context"},
+		{"type":"compaction","id":"cmp-current","encrypted_content":"current compact state"},
+		{"type":"message","role":"user","id":"msg-continue","content":"Continue."}
+	]}`)
+
+	normalized, _, errMsg := normalizeResponsesWebsocketRequestWithMode(
+		raw,
+		lastRequest,
+		lastResponseOutput,
+		false,
+		allowCompactionReplay,
+	)
+	if errMsg != nil {
+		t.Fatalf("unexpected error: %v", errMsg.Error)
+	}
+
+	input := gjson.GetBytes(normalized, "input").Array()
+	if len(input) != 3 {
+		t.Fatalf("input len = %d, want 3 compact replay items: %s", len(input), normalized)
+	}
+	wantIDs := []string{"msg-compacted", "cmp-current", "msg-continue"}
+	for i, wantID := range wantIDs {
+		if got := input[i].Get("id").String(); got != wantID {
+			t.Fatalf("input[%d].id = %q, want %q: %s", i, got, wantID, normalized)
+		}
+	}
+	for _, item := range input {
+		if item.Get("type").String() == "compaction_trigger" {
+			t.Fatalf("consumed compaction trigger was replayed: %s", normalized)
+		}
+	}
+}
+
+func TestNormalizeSubsequentRequestCompactFallbackConsumesControlItems(t *testing.T) {
+	lastRequest := []byte(`{"model":"fallback-model","stream":true,"input":[
+		{"type":"message","role":"user","id":"msg-old","content":"original history"},
+		{"type":"compaction_trigger"}
+	]}`)
+	lastResponseOutput := []byte(`[
+		{"type":"compaction","id":"cmp-old","encrypted_content":"opaque compact state"}
+	]`)
+	raw := []byte(`{"type":"response.create","input":[
+		{"type":"message","role":"user","id":"msg-old","content":"original history"},
+		{"type":"compaction","id":"cmp-current","encrypted_content":"current compact state"},
+		{"type":"message","role":"user","id":"msg-continue","content":"Continue."}
+	]}`)
+
+	normalized, _, errMsg := normalizeResponsesWebsocketRequestWithMode(raw, lastRequest, lastResponseOutput, false, false)
+	if errMsg != nil {
+		t.Fatalf("unexpected error: %v", errMsg.Error)
+	}
+
+	input := gjson.GetBytes(normalized, "input").Array()
+	if len(input) != 2 {
+		t.Fatalf("input len = %d, want 2 full-history messages: %s", len(input), normalized)
+	}
+	wantIDs := []string{"msg-old", "msg-continue"}
+	for i, wantID := range wantIDs {
+		if got := input[i].Get("id").String(); got != wantID {
+			t.Fatalf("input[%d].id = %q, want %q: %s", i, got, wantID, normalized)
+		}
+	}
+	for _, item := range input {
+		switch item.Get("type").String() {
+		case "compaction", "compaction_summary", "compaction_trigger":
+			t.Fatalf("compaction control item survived fallback merge: %s", normalized)
+		}
+	}
+}
+
 func TestNormalizeSubsequentRequestReasoningContinuationWithPreviousResponseID(t *testing.T) {
 	lastRequest := []byte(`{"model":"gpt-5.6-terra","stream":true,"input":[{"type":"message","role":"user","id":"old-user","content":"long history"}]}`)
 	lastResponseOutput := []byte(`[{"type":"function_call","id":"old-call","call_id":"old-call","name":"lookup","arguments":"{}"}]`)

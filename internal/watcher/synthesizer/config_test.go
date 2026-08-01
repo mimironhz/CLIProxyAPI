@@ -938,3 +938,61 @@ func TestConfigSynthesizer_AllProviders(t *testing.T) {
 		}
 	}
 }
+
+// The Responses protocol is a property of the upstream, so it has to survive
+// synthesis as an auth attribute for the executor to act on.
+func TestConfigSynthesizer_OpenAICompatCarriesResponsesAPI(t *testing.T) {
+	tests := []struct {
+		name    string
+		compat  config.OpenAICompatibility
+		wantAPI string
+	}{
+		{
+			name: "responses with api key",
+			compat: config.OpenAICompatibility{
+				Name:          "deepseek",
+				BaseURL:       "https://api.deepseek.com/v1",
+				API:           config.OpenAICompatAPIResponses,
+				APIKeyEntries: []config.OpenAICompatibilityAPIKey{{APIKey: "key-1"}},
+			},
+			wantAPI: config.OpenAICompatAPIResponses,
+		},
+		{
+			name: "responses without api key",
+			compat: config.OpenAICompatibility{
+				Name:    "deepseek",
+				BaseURL: "https://api.deepseek.com/v1",
+				API:     config.OpenAICompatAPIResponses,
+			},
+			wantAPI: config.OpenAICompatAPIResponses,
+		},
+		{
+			name: "chat completions stays unmarked",
+			compat: config.OpenAICompatibility{
+				Name:    "deepseek",
+				BaseURL: "https://api.deepseek.com/v1",
+			},
+			wantAPI: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			synth := NewConfigSynthesizer()
+			auths, err := synth.Synthesize(&SynthesisContext{
+				Config:      &config.Config{OpenAICompatibility: []config.OpenAICompatibility{tt.compat}},
+				Now:         time.Now(),
+				IDGenerator: NewStableIDGenerator(),
+			})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(auths) != 1 {
+				t.Fatalf("expected 1 auth, got %d", len(auths))
+			}
+			if got := auths[0].Attributes["upstream_api"]; got != tt.wantAPI {
+				t.Errorf("upstream_api = %q, want %q", got, tt.wantAPI)
+			}
+		})
+	}
+}

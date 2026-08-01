@@ -30,6 +30,12 @@ func NewApplier() *Applier {
 
 func init() {
 	thinking.RegisterProvider("codex", NewApplier())
+	// openai-response is the same wire shape reached through a plain Responses
+	// endpoint rather than the Codex backend, so it takes the same applier.
+	// Without this an openai-compatibility upstream configured for /responses
+	// would forward the client's reasoning.effort unvalidated instead of
+	// clamping it to the levels the registry declares for the model.
+	thinking.RegisterProvider("openai-response", NewApplier())
 }
 
 // Apply applies thinking configuration to Codex request body.

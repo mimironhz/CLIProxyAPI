@@ -175,19 +175,27 @@ func TestCodexClientModelsResponse_DisablesSearchToolForSynthesizedModels(t *tes
 	}
 }
 
-func TestCodexClientModelsResponse_RequiresTemplateAndCodexProvidersForSearchTool(t *testing.T) {
+// Codex Desktop offers tool_search only when the model advertises
+// supports_search_tool, and without it the deferred codex_app children such as
+// send_message_to_thread are never materialized. The xai and kimi executors both
+// translate the hosted tool into a plain function and convert the call back, so
+// their models must keep the capability; providers without that shim must not.
+func TestCodexClientModelsResponse_AllowsSearchToolForShimmedProviders(t *testing.T) {
 	providers := map[string][]string{
+		"grok-4.5":        {"xai"},
+		"kimi-k3":         {"kimi"},
 		"new-codex-model": {"codex"},
-		"gpt-5.5":         {"openai-compatible-deepseek"},
 		"gpt-5.4":         {"codex", "xai"},
 		"gpt-5.6-sol":     {"codex"},
+		"gpt-5.5":         {"openai-compatible-deepseek"},
+		"mixed-model":     {"codex", "openai-compatible-deepseek"},
+		"orphan-model":    nil,
 	}
-	resp := BuildResponse([]map[string]any{
-		{"id": "new-codex-model"},
-		{"id": "gpt-5.5"},
-		{"id": "gpt-5.4"},
-		{"id": "gpt-5.6-sol"},
-	}, func(id string) []string {
+	ids := make([]map[string]any, 0, len(providers))
+	for id := range providers {
+		ids = append(ids, map[string]any{"id": id})
+	}
+	resp := BuildResponse(ids, func(id string) []string {
 		return providers[id]
 	}, false)
 	models, ok := resp["models"].([]map[string]any)
@@ -200,10 +208,12 @@ func TestCodexClientModelsResponse_RequiresTemplateAndCodexProvidersForSearchToo
 		bySlug[stringModelValue(model, "slug")] = model
 	}
 
-	if got, ok := bySlug["gpt-5.6-sol"]["supports_search_tool"].(bool); !ok || !got {
-		t.Errorf("gpt-5.6-sol supports_search_tool = %#v, want true", bySlug["gpt-5.6-sol"]["supports_search_tool"])
+	for _, slug := range []string{"grok-4.5", "kimi-k3", "new-codex-model", "gpt-5.4", "gpt-5.6-sol"} {
+		if got, ok := bySlug[slug]["supports_search_tool"].(bool); !ok || !got {
+			t.Errorf("%s supports_search_tool = %#v, want true", slug, bySlug[slug]["supports_search_tool"])
+		}
 	}
-	for _, slug := range []string{"new-codex-model", "gpt-5.5", "gpt-5.4"} {
+	for _, slug := range []string{"gpt-5.5", "mixed-model", "orphan-model"} {
 		if got, ok := bySlug[slug]["supports_search_tool"].(bool); !ok || got {
 			t.Errorf("%s supports_search_tool = %#v, want false", slug, bySlug[slug]["supports_search_tool"])
 		}

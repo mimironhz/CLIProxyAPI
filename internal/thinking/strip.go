@@ -53,7 +53,7 @@ func StripThinkingConfig(body []byte, provider string) []byte {
 			"reasoning_effort",
 			"thinking",
 		}
-	case "codex", "xai":
+	case "codex", "openai-response", "xai":
 		paths = []string{"reasoning"}
 	default:
 		return body
