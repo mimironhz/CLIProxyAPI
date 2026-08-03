@@ -65,24 +65,85 @@ not portable and remains fail-closed; start a new chain for that boundary.
 ## Model discovery
 
 `GET /v1/models` and `GET /backend-api/codex/models` return the complete Codex
-`{"models":[...]}` catalog shape expected by the installed Desktop client. Root
-synthesizes the response once at startup from the exact configured allowlists
-and the repository's validated Codex metadata templates; it does not query
-Relay or expose the Relay key. Stock models retain their curated metadata.
-Relay models use conservative metadata, expose no speed tier, and advertise
-hosted search only when their configured `xai`, `kimi` or `deepseek` provider
-supports the Relay shim. They deliberately omit the optional OpenAI `comp_hash`: inheriting
-the fallback GPT template's hash would make Codex run an old-model compaction
-on every stock-to-Relay switch and then send that provider-bound opaque state
-to Relay. With no asserted compatibility hash, ordinary model changes replay
-the portable full history and Root removes only provider-local reasoning state.
+`{"models":[...]}` catalog shape expected by the installed Desktop client.
+`routing.discovery` selects how that catalog is produced.
 
-Configuration order is authoritative: all stock entries precede Relay entries,
-and the first stock entry becomes Desktop's default. In `http-fallback` mode,
-every entry advertises `prefer_websockets: false`; explicit `first-message` mode
-advertises `true`. The response has a deterministic strong `ETag` and supports
-`If-None-Match`. The only accepted query parameter is the optional, single
-`client_version` value sent by Codex.
+### `discovery: static`
+
+The default. Root synthesizes the response once at startup from the exact
+configured allowlists and the repository's validated Codex metadata templates;
+it does not query either upstream. `routing.stock-models` and
+`routing.relay-models` are the complete routing surface, and a model absent from
+both is rejected locally. Configuration order is authoritative: all stock entries
+precede Relay entries, and the first stock entry becomes Desktop's default.
+
+### `discovery: auto`
+
+Root assembles the catalog per request from both upstreams. The two halves are
+discovered differently because Root holds no ChatGPT credential of its own:
+
+- The **stock** half is fetched live from `chatgpt.com/backend-api/codex/models`
+  using the inbound Desktop bearer, which is why it cannot be resolved at
+  startup. Its entries are passed through unchanged, so Desktop receives the
+  upstream's real `comp_hash`, speed tiers, and upgrade metadata rather than a
+  synthesized approximation. `client_version` is forwarded.
+- The **relay** half comes from Relay `/v1/models`, authenticated with the Relay
+  CPA key. Relay is loopback and needs no user credential, so this runs at
+  startup, on a five-minute refresh, and opportunistically on every catalog
+  request. Each model's `owned_by` supplies its provider family.
+
+The merged catalog is cached and refreshed in the background, because the
+installed Desktop client will not wait for it. Desktop treats Root as a local
+endpoint and abandons the catalog poll after roughly 100ms, while a ChatGPT
+round trip costs around 300ms; serving the request inline produced a canceled
+poll and no catalog at all. Instead Root answers from cache immediately and,
+when the cache is missing or older than 30 seconds, starts a refresh detached
+from the inbound request's cancellation. The borrowed Desktop bearer is used
+only for the lifetime of that refresh and is never stored. Refreshes are
+single-flighted, and Desktop's roughly 60-second poll picks up the new catalog.
+
+Before the first successful merge Root answers from a cold-start catalog
+synthesized from the `stock-models` pin plus the discovered Relay set, using the
+same metadata templates as `static` mode. Pinning `stock-models` under `auto` is
+therefore recommended: without it the first poll advertises only Relay models
+until the background merge completes. Root returns HTTP `502` only when there is
+no cache, no stock pin and no discovered Relay model — nothing it could
+truthfully advertise.
+
+A failed *Relay* refresh keeps the last known Relay set, because emptying it
+would silently reroute every Relay model to the official arm.
+
+The configured lists degrade to optional pins. A non-empty `stock-models` is
+protected from Relay collisions, a non-empty `relay-models` narrows the
+discovered Relay catalog, and `relay-model-providers` overrides `owned_by` for a
+model the catalog cannot attribute. All three may be omitted.
+
+Routing in `auto` mode is deliberately asymmetric: the Relay set is authoritative
+and **everything else routes to the official arm**, which validates the model
+itself. Root no longer rejects an unrecognized model locally. When an identifier
+appears in both catalogs the official arm wins — the Relay entry is dropped from
+both the advertised catalog and the route table, so a Relay-side `gpt-*` cannot
+divert a conversation to a third party.
+
+### Both modes
+
+Relay models use conservative synthesized metadata, expose no speed tier, and
+advertise hosted search only when their `xai`, `kimi` or `deepseek` provider
+supports the Relay shim. They deliberately omit the optional OpenAI `comp_hash`:
+inheriting the fallback GPT template's hash would make Codex run an old-model
+compaction on every stock-to-Relay switch and then send that provider-bound
+opaque state to Relay. With no asserted compatibility hash, ordinary model
+changes replay the portable full history and Root removes only provider-local
+reasoning state. Stock entries always precede Relay entries, so the first
+official model remains Desktop's default.
+
+In `http-fallback` mode, every entry advertises `prefer_websockets: false`;
+explicit `first-message` mode advertises `true`. The response has a strong
+`ETag` computed over the emitted body and supports `If-None-Match`. A client
+`If-None-Match` is validated against Root's own ETag and is never forwarded
+upstream, since a `304` would leave no body to merge the Relay half into. The
+only accepted query parameter is the optional, single `client_version` value
+sent by Codex.
 
 This catalog is an allowlist, not live provider-availability evidence. Root does
 not infer quota or authentication health from Relay `/v1/models`, and it never
@@ -201,7 +262,19 @@ launchd stdout/stderr should remain as bootstrap-failure fallbacks.
   family names.
   It is backward compatible for ordinary requests, but an unclassified Relay
   model cannot create or consume compaction, and distinct unclassified model
-  names are treated as separate logical targets.
+  names are treated as separate logical targets. Under `discovery: auto` the
+  same family names are derived from each Relay model's `owned_by`, and an
+  unrecognized value leaves the model routable but unattributed.
+- `discovery: auto` moves part of Root's routing surface outside Root's own
+  configuration. Whoever can change the Relay catalog — including the Relay
+  management API, which rewrites `relay.yaml` in place — can add a model that
+  Root will accept and route to Relay. Previously that required a Root config
+  change and a restart. Pin `routing.stock-models`, and optionally
+  `routing.relay-models`, to bound this.
+- `discovery: auto` also stops rejecting unknown models locally: anything Relay
+  does not serve is forwarded to the official arm, which validates it. Root no
+  longer guarantees that it contacts ChatGPT only for an explicitly listed set
+  of models.
 - The Relay CPA key is loaded only from the environment variable named by
   `relay.api-key-env`; inline keys are rejected as unknown configuration.
 - Every inference route requires one inbound Desktop Bearer value. Stock
@@ -209,7 +282,11 @@ launchd stdout/stderr should remain as bootstrap-failure fallbacks.
   cookies, API-key variants, organization, project, proxy, Origin, and
   WebSocket negotiation headers, before injecting only the Relay CPA key.
 - Model discovery also requires one Desktop Bearer value and applies the shared
-  Origin policy, but never forwards credentials to either upstream.
+  Origin policy. Under `discovery: static` it forwards no credential to either
+  upstream. Under `discovery: auto` it necessarily does: the Desktop bearer
+  authenticates the ChatGPT catalog fetch and the Relay CPA key authenticates
+  the Relay catalog fetch. The bearer is validated before either upstream is
+  contacted, and the two credentials are never sent to the other arm.
 - Root validates Bearer syntax but does not cryptographically authenticate the
   ChatGPT token. Loopback binding and the Origin policy remain the actual local
   trust boundary.

@@ -20,6 +20,7 @@ type Server struct {
 	address    string
 	bridge     *websocketBridge
 	httpBridge *httpBridge
+	discovery  *relayDiscovery
 	handler    http.Handler
 	logging    *rootLogManager
 	closeOnce  sync.Once
@@ -53,21 +54,51 @@ func NewServer(config *Config) (*Server, error) {
 	if errCookies != nil {
 		return nil, fmt.Errorf("create ChatGPT Cloudflare cookie jar: %w", errCookies)
 	}
+	mode, errMode := config.discoveryMode()
+	if errMode != nil {
+		return nil, errMode
+	}
+
+	// In auto mode a single resolver is shared by both bridges and the catalog
+	// handler so one discovery refresh updates every routing decision at once.
+	var (
+		resolver  *routeResolver
+		discovery *relayDiscovery
+	)
+	if mode == discoveryAuto {
+		var errResolver error
+		resolver, errResolver = newRouteResolver(mode, config.Routing.StockModels, config.Routing.RelayModels, config.Routing.RelayModelProviders)
+		if errResolver != nil {
+			return nil, fmt.Errorf("create root route resolver: %w", errResolver)
+		}
+	}
+
 	websocketOptions := config.bridgeOptions()
 	websocketOptions.officialCookies = officialCookies
 	websocketOptions.logging = loggingManager
-	bridge, errBridge := newWebsocketBridge(websocketOptions)
-	if errBridge != nil {
-		return nil, fmt.Errorf("create root websocket bridge: %w", errBridge)
-	}
+	websocketOptions.resolver = resolver
 	httpOptions := config.httpBridgeOptions()
 	httpOptions.officialCookies = officialCookies
 	httpOptions.logging = loggingManager
+	httpOptions.resolver = resolver
 	httpBridge, errHTTPBridge := newHTTPBridge(httpOptions)
 	if errHTTPBridge != nil {
 		return nil, fmt.Errorf("create root HTTP bridge: %w", errHTTPBridge)
 	}
-	models, errModels := newModelsHandler(config)
+	if mode == discoveryAuto {
+		var errDiscovery error
+		discovery, errDiscovery = newRelayDiscovery(config.Relay.BaseURL, config.relayAPIKey, httpBridge.relayClient, resolver)
+		if errDiscovery != nil {
+			return nil, fmt.Errorf("create relay discovery: %w", errDiscovery)
+		}
+		httpBridge.discovery = discovery
+		websocketOptions.discovery = discovery
+	}
+	bridge, errBridge := newWebsocketBridge(websocketOptions)
+	if errBridge != nil {
+		return nil, fmt.Errorf("create root websocket bridge: %w", errBridge)
+	}
+	models, errModels := newModelsHandlerWithDiscovery(config, resolver, discovery, httpBridge.officialBaseURL, httpBridge.officialClient)
 	if errModels != nil {
 		return nil, fmt.Errorf("create root model catalog: %w", errModels)
 	}
@@ -92,6 +123,7 @@ func NewServer(config *Config) (*Server, error) {
 		address:    config.listenAddress(),
 		bridge:     bridge,
 		httpBridge: httpBridge,
+		discovery:  discovery,
 		handler:    handler,
 		logging:    loggingManager,
 	}
@@ -137,6 +169,9 @@ func (s *Server) Run(ctx context.Context) error {
 		ctx = context.Background()
 	}
 	defer s.Close()
+	// Populate the Relay half before the listener accepts traffic where possible;
+	// the first inference request also forces a refresh if this has not completed.
+	s.discovery.start(ctx)
 	listener, errListen := net.Listen("tcp", s.address)
 	if errListen != nil {
 		errWrapped := fmt.Errorf("listen on %s: %w", s.address, errListen)

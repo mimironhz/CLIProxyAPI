@@ -35,6 +35,8 @@ type httpBridgeOptions struct {
 	stockModels     []string
 	relayModels     []string
 	relayProviders  map[string]string
+	resolver        *routeResolver
+	discovery       *relayDiscovery
 	maxRequestBody  int64
 	allowedOrigins  []string
 	officialClient  *http.Client
@@ -44,7 +46,8 @@ type httpBridgeOptions struct {
 }
 
 type httpBridge struct {
-	routes          routeTable
+	routes          *routeResolver
+	discovery       *relayDiscovery
 	officialBaseURL string
 	relayBaseURL    string
 	relayAPIKey     string
@@ -81,9 +84,15 @@ func newHTTPBridge(options httpBridgeOptions) (*httpBridge, error) {
 	if options.maxRequestBody <= 0 {
 		return nil, errors.New("maximum HTTP request body size must be positive")
 	}
-	routes, errRoutes := buildRouteTable(options.stockModels, options.relayModels, options.relayProviders)
-	if errRoutes != nil {
-		return nil, errRoutes
+	// A shared resolver is injected when discovery is active; otherwise the
+	// configured lists remain the complete static routing surface.
+	routes := options.resolver
+	if routes == nil {
+		var errRoutes error
+		routes, errRoutes = newRouteResolver(discoveryStatic, options.stockModels, options.relayModels, options.relayProviders)
+		if errRoutes != nil {
+			return nil, errRoutes
+		}
 	}
 	if errOrigins := validateOrigins(options.allowedOrigins); errOrigins != nil {
 		return nil, errOrigins
@@ -122,6 +131,7 @@ func newHTTPBridge(options httpBridgeOptions) (*httpBridge, error) {
 
 	return &httpBridge{
 		routes:          routes,
+		discovery:       options.discovery,
 		officialBaseURL: validatedOfficial,
 		relayBaseURL:    validatedRelay,
 		relayAPIKey:     relayAPIKey,
@@ -258,6 +268,9 @@ func (b *httpBridge) serve(response http.ResponseWriter, request *http.Request, 
 		writeHTTPError(response, http.StatusBadRequest, "invalid_request_error", errStream.Error(), "stream")
 		return
 	}
+	// Without this a Relay that was unreachable at startup would leave every
+	// Relay model looking like an official one.
+	b.discovery.ensure(request.Context())
 	selected, errRoute := b.routes.classify(model)
 	if errRoute != nil {
 		writeHTTPError(response, http.StatusBadRequest, "invalid_request_error", "model is not routable", "model")

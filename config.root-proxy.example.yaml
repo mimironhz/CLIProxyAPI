@@ -30,7 +30,20 @@ relay:
   api-key-env: "CPA_RELAY_API_KEY"
 
 routing:
-  # Use exact model identifiers. The sets must be non-empty and disjoint.
+  # "static" (default) treats the lists below as the complete routing surface;
+  # a model absent from both is rejected. "auto" discovers the Relay half from
+  # the Relay catalog and merges in the ChatGPT catalog, refreshed in the
+  # background, and the lists below become optional pins:
+  #   - a non-empty stock-models list is protected from Relay collisions
+  #   - a non-empty relay-models list narrows the discovered Relay catalog
+  #   - relay-model-providers overrides a model's discovered owned_by
+  # Under "auto" any model Relay does not serve is forwarded to the official
+  # arm, and the Relay catalog becomes part of Root's routing surface. See the
+  # security notes in ROOT_PROXY.md before enabling it.
+  discovery: "static"
+  # Use exact model identifiers. Under "static" the sets must be non-empty and
+  # disjoint; under "auto" both may be omitted, though keeping stock-models
+  # pinned gives a correct catalog before the first background merge lands.
   stock-models:
     - "gpt-5.6-sol"
     - "gpt-5.6-terra"
