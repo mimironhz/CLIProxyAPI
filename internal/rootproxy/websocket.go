@@ -30,6 +30,8 @@ type bridgeOptions struct {
 	stockModels      []string
 	relayModels      []string
 	relayProviders   map[string]string
+	resolver         *routeResolver
+	discovery        *relayDiscovery
 	maxMessageBytes  int64
 	maxPendingRoutes int
 	allowedOrigins   []string
@@ -41,7 +43,8 @@ type bridgeOptions struct {
 
 type websocketBridge struct {
 	upgrader          websocket.Upgrader
-	routes            routeTable
+	routes            *routeResolver
+	discovery         *relayDiscovery
 	officialURL       string
 	relayURL          string
 	relayAPIKey       string
@@ -133,9 +136,15 @@ func newWebsocketBridge(options bridgeOptions) (*websocketBridge, error) {
 	if options.maxPendingRoutes <= 0 {
 		return nil, errors.New("maximum pending websocket routes must be positive")
 	}
-	routes, errRoutes := buildRouteTable(options.stockModels, options.relayModels, options.relayProviders)
-	if errRoutes != nil {
-		return nil, errRoutes
+	// A shared resolver is injected when discovery is active; otherwise the
+	// configured lists remain the complete static routing surface.
+	routes := options.resolver
+	if routes == nil {
+		var errRoutes error
+		routes, errRoutes = newRouteResolver(discoveryStatic, options.stockModels, options.relayModels, options.relayProviders)
+		if errRoutes != nil {
+			return nil, errRoutes
+		}
 	}
 	if errOrigins := validateOrigins(options.allowedOrigins); errOrigins != nil {
 		return nil, errOrigins
@@ -196,6 +205,7 @@ func newWebsocketBridge(options bridgeOptions) (*websocketBridge, error) {
 			CheckOrigin:       checkOrigin,
 		},
 		routes:            routes,
+		discovery:         options.discovery,
 		officialURL:       options.officialURL,
 		relayURL:          options.relayURL,
 		relayAPIKey:       strings.TrimSpace(options.relayAPIKey),
@@ -310,6 +320,9 @@ func (b *websocketBridge) ServeHTTP(response http.ResponseWriter, request *http.
 		session.terminate(websocket.ClosePolicyViolation, "invalid response.create", true, false)
 		return
 	}
+	// Without this a Relay that was unreachable at startup would leave every
+	// Relay model looking like an official one.
+	b.discovery.ensure(request.Context())
 	selected, errRoute := b.routes.classify(model)
 	if errRoute != nil {
 		setAccessOutcome(request.Context(), "rejected", "model_not_routable", websocket.ClosePolicyViolation)

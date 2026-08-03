@@ -64,7 +64,15 @@ type RelayConfig struct {
 }
 
 // RoutingConfig contains exact and disjoint model identifiers.
+//
+// Discovery selects how the lists are interpreted. In the default "static" mode
+// they are the complete and authoritative routing surface. In "auto" mode the
+// Relay half is discovered from the Relay catalog and the lists degrade to
+// optional pins: a non-empty StockModels list is protected from Relay
+// collisions, a non-empty RelayModels list narrows the discovered catalog, and
+// RelayModelProviders overrides the catalog's own attribution.
 type RoutingConfig struct {
+	Discovery           string            `yaml:"discovery"`
 	StockModels         []string          `yaml:"stock-models"`
 	RelayModels         []string          `yaml:"relay-models"`
 	RelayModelProviders map[string]string `yaml:"relay-model-providers"`
@@ -206,7 +214,11 @@ func (c *Config) validateAndResolve(lookupEnv func(string) (string, bool)) error
 		return fmt.Errorf("relay API key environment variable %s contains invalid whitespace or separators", c.Relay.APIKeyEnv)
 	}
 
-	if _, errModels := buildRouteTable(c.Routing.StockModels, c.Routing.RelayModels, c.Routing.RelayModelProviders); errModels != nil {
+	mode, errDiscovery := c.discoveryMode()
+	if errDiscovery != nil {
+		return errDiscovery
+	}
+	if _, errModels := buildRouteTableForMode(mode, c.Routing.StockModels, c.Routing.RelayModels, c.Routing.RelayModelProviders); errModels != nil {
 		return errModels
 	}
 	switch c.Websocket.Mode {
@@ -279,6 +291,19 @@ func (c *Config) validateLogging() error {
 		}
 	}
 	return nil
+}
+
+// discoveryMode resolves routing.discovery. It defaults to static so an existing
+// configuration keeps its exact routing surface after an upgrade.
+func (c *Config) discoveryMode() (discoveryMode, error) {
+	switch strings.TrimSpace(c.Routing.Discovery) {
+	case "", discoveryStatic.String():
+		return discoveryStatic, nil
+	case discoveryAuto.String():
+		return discoveryAuto, nil
+	default:
+		return 0, fmt.Errorf("routing discovery %q must be %q or %q", c.Routing.Discovery, discoveryStatic, discoveryAuto)
+	}
 }
 
 func (c *Config) logDirectory() (string, error) {
