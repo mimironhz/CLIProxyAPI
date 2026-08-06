@@ -30,6 +30,7 @@ type bridgeOptions struct {
 	stockModels      []string
 	relayModels      []string
 	relayProviders   map[string]string
+	fastModels       map[string]struct{}
 	resolver         *routeResolver
 	discovery        *relayDiscovery
 	maxMessageBytes  int64
@@ -48,6 +49,7 @@ type websocketBridge struct {
 	officialURL       string
 	relayURL          string
 	relayAPIKey       string
+	fastModels        map[string]struct{}
 	maxMessage        int64
 	maxPending        int
 	dialOfficial      websocketDialFunc
@@ -209,6 +211,7 @@ func newWebsocketBridge(options bridgeOptions) (*websocketBridge, error) {
 		officialURL:       options.officialURL,
 		relayURL:          options.relayURL,
 		relayAPIKey:       strings.TrimSpace(options.relayAPIKey),
+		fastModels:        options.fastModels,
 		maxMessage:        options.maxMessageBytes,
 		maxPending:        options.maxPendingRoutes,
 		dialOfficial:      options.dialOfficial,
@@ -354,6 +357,10 @@ func (b *websocketBridge) ServeHTTP(response http.ResponseWriter, request *http.
 	upstreamPayload := firstPayload
 	if selected == routeOfficial {
 		upstreamPayload, errEnvelope = prepareOfficialPayload(firstPayload)
+		if errEnvelope == nil {
+			// The first message is always a response.create, so it is a turn.
+			upstreamPayload, errEnvelope = applyOfficialFastServiceTier(upstreamPayload, model, b.fastModels)
+		}
 		if errEnvelope != nil {
 			initialExchange.finish("rejected", false, "official_request_state_not_portable")
 			setAccessOutcome(request.Context(), "rejected", "official_request_state_not_portable", websocket.ClosePolicyViolation)
@@ -714,6 +721,9 @@ func (b *websocketBridge) runController(
 			}
 			if state.route == routeOfficial {
 				upstreamPayload, errInspect = prepareOfficialPayload(result.payload)
+				if errInspect == nil && isCreate {
+					upstreamPayload, errInspect = applyOfficialFastServiceTier(upstreamPayload, nextModel, b.fastModels)
+				}
 				if errInspect != nil {
 					if !b.writeNonPortableStateError(session) {
 						finishStockExchange(&state, requestExchange, "incomplete", false, "local_error_write_failed")
@@ -858,6 +868,10 @@ func (b *websocketBridge) performHandoff(
 	}
 	if nextRoute == routeOfficial {
 		payload, errRoute = prepareOfficialPayload(request.payload)
+		if errRoute == nil {
+			// A handoff only ever carries the response.create that changed target.
+			payload, errRoute = applyOfficialFastServiceTier(payload, request.envelope.model, b.fastModels)
+		}
 		if errRoute != nil {
 			written := b.writeNonPortableStateError(session)
 			if written {

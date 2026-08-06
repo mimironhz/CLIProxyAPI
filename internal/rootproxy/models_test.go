@@ -215,6 +215,105 @@ func TestServerMountsBothModelsAliases(t *testing.T) {
 	}
 }
 
+func TestModelsHandlerAdvertisesMultiAgentV2ForConfiguredSurfaces(t *testing.T) {
+	// A multi-agent v2 parent only accepts a spawn target whose catalog entry
+	// reports v2, so the advertisement is what makes Luna and the Relay half
+	// delegable at all.
+	models := multiAgentV2Catalog(t, []string{"gpt-5.6-luna"}, MultiAgentV2RelaySelection{All: true})
+
+	for slug, want := range map[string]string{
+		"gpt-5.6-luna": multiAgentVersionV2,
+		"grok-4.5":     multiAgentVersionV2,
+		"kimi-k3":      multiAgentVersionV2,
+	} {
+		if got := models[slug][multiAgentVersionKey]; got != want {
+			t.Errorf("%s multi_agent_version = %#v, want %q", slug, models[slug][multiAgentVersionKey], want)
+		}
+	}
+	// Stock models the upstream already reports as v2 must be left alone.
+	for _, slug := range []string{"gpt-5.6-sol", "gpt-5.6-terra"} {
+		if got := models[slug][multiAgentVersionKey]; got != multiAgentVersionV2 {
+			t.Errorf("%s multi_agent_version = %#v, want preserved %q", slug, got, multiAgentVersionV2)
+		}
+	}
+}
+
+func TestModelsHandlerLeavesMultiAgentV2UnadvertisedByDefault(t *testing.T) {
+	models := multiAgentV2Catalog(t, nil, MultiAgentV2RelaySelection{})
+
+	// An unadvertised Relay entry carries no multi-agent metadata at all, and an
+	// unlisted stock model keeps whatever the upstream reported.
+	for _, slug := range []string{"grok-4.5", "kimi-k3"} {
+		if got, exists := models[slug][multiAgentVersionKey]; exists {
+			t.Errorf("%s multi_agent_version = %#v, want absent", slug, got)
+		}
+	}
+	if got := models["gpt-5.6-luna"][multiAgentVersionKey]; got != "v1" {
+		t.Errorf("gpt-5.6-luna multi_agent_version = %#v, want preserved v1", got)
+	}
+}
+
+func TestModelsHandlerAdvertisesOnlySelectedRelayProviders(t *testing.T) {
+	// A provider-qualified list advertises exactly the named model, leaving the
+	// rest of the discovered Relay half untouched.
+	models := multiAgentV2Catalog(t, nil, MultiAgentV2RelaySelection{
+		Models: []string{"xai/grok-4.5"},
+	})
+
+	if got := models["grok-4.5"][multiAgentVersionKey]; got != multiAgentVersionV2 {
+		t.Errorf("grok-4.5 multi_agent_version = %#v, want %q", got, multiAgentVersionV2)
+	}
+	if got, exists := models["kimi-k3"][multiAgentVersionKey]; exists {
+		t.Errorf("kimi-k3 multi_agent_version = %#v, want absent", got)
+	}
+}
+
+func TestModelsHandlerIgnoresRelayEntryAttributedToAnotherProvider(t *testing.T) {
+	// The prefix is part of the match: naming grok-4.5 under the wrong provider
+	// must not advertise the model the catalog attributes to xai.
+	models := multiAgentV2Catalog(t, nil, MultiAgentV2RelaySelection{
+		Models: []string{"deepseek/grok-4.5"},
+	})
+
+	if got, exists := models["grok-4.5"][multiAgentVersionKey]; exists {
+		t.Errorf("grok-4.5 multi_agent_version = %#v, want absent under a mismatched provider", got)
+	}
+}
+
+// multiAgentV2Catalog serves the catalog under the given advertisement settings
+// and returns the entries keyed by slug.
+func multiAgentV2Catalog(t *testing.T, stockModels []string, relay MultiAgentV2RelaySelection) map[string]map[string]any {
+	t.Helper()
+	config := defaultConfig()
+	config.Routing.StockModels = []string{"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"}
+	config.Routing.RelayModels = []string{"grok-4.5", "kimi-k3"}
+	config.Routing.RelayModelProviders = map[string]string{"grok-4.5": "xai", "kimi-k3": "kimi"}
+	config.Routing.MultiAgentV2Models = append([]string(nil), stockModels...)
+	config.Routing.MultiAgentV2Relay = relay
+	if errValidate := config.validateAndResolve(staticEnvironment("relay-secret")); errValidate != nil {
+		t.Fatalf("validateAndResolve() error = %v", errValidate)
+	}
+	handler, errHandler := newModelsHandler(&config)
+	if errHandler != nil {
+		t.Fatalf("newModelsHandler() error = %v", errHandler)
+	}
+
+	response := serveModels(t, handler, http.MethodGet, "/v1/models?client_version=0.146.0", nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", response.Code, response.Body.String())
+	}
+	var payload rootModelsPayload
+	if errDecode := json.Unmarshal(response.Body.Bytes(), &payload); errDecode != nil {
+		t.Fatalf("decode model catalog: %v", errDecode)
+	}
+	catalog := make(map[string]map[string]any, len(payload.Models))
+	for _, model := range payload.Models {
+		slug, _ := model["slug"].(string)
+		catalog[slug] = model
+	}
+	return catalog
+}
+
 func newTestModelsHandler(
 	t *testing.T,
 	stockModels []string,

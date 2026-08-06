@@ -161,6 +161,125 @@ This matches the source tag for installed `codex-cli 0.146.0-alpha.3.1`:
 - [required model-switch compaction runs with the previous model](https://github.com/openai/codex/blob/ff75c5b939c477c49eb1bd5248da6dab71b109d1/codex-rs/core/src/session/turn.rs#L883-L974)
 - [the resume-and-switch contract compacts with the old model before the new-model turn](https://github.com/openai/codex/blob/ff75c5b939c477c49eb1bd5248da6dab71b109d1/codex-rs/core/tests/suite/compact.rs#L3088-L3205)
 
+## Fast service tier
+
+Codex expresses the "Fast" speed tier as a top-level `service_tier: "priority"`
+field on the Responses request, and the stock catalog advertises it per model as
+`service_tiers: [{"id": "priority", "name": "Fast"}]` with a null
+`default_service_tier`. It is normally a per-turn choice the user makes in
+Desktop, which Root simply forwards.
+
+`routing.fast-models` names stock models whose turns Root forces onto that tier:
+
+```yaml
+routing:
+  fast-models:
+    - "gpt-5.6-luna"
+```
+
+Root writes the same field Desktop would have sent, on turn-creating requests
+only. `/v1/responses/compact` is excluded because compaction is background
+summarization that would spend the tier's higher usage for latency no user
+observes, and non-`response.create` WebSocket frames are excluded because they
+are not requests. A payload that already selects `priority` is left byte-identical
+so it keeps its original transfer encoding.
+
+Three constraints are worth stating plainly:
+
+- The tier is **plan-gated** upstream. An account whose plan does not include
+  priority access sees upstream errors rather than a silent downgrade.
+- It is **not free**: the catalog describes it as "1.5x speed, increased usage".
+- Only models that advertise the tier may be listed. The current stock family
+  (`gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`, `gpt-5.4`) does;
+  `gpt-5.4-mini` and `gpt-5.3-codex-spark` publish an empty `service_tiers` and
+  would be rejected upstream.
+
+Relay models are rejected at config load: Root strips speed-tier metadata from
+synthesized Relay entries, and a Relay upstream has no such tier. Under
+`discovery: static` a listed model must also appear in `stock-models`; under
+`auto` the stock half is discovered, so membership is settled by the runtime
+route decision and the tier is applied only when the turn actually routes
+official.
+
+Desktop's own tier indicator still reflects what the user selected — Root shapes
+the request without rewriting the advertised catalog, so a forced turn can read
+as "Standard" client-side while going out as `priority`.
+
+## Multi-agent v2 advertisement
+
+Codex picks its multi-agent backend from the catalog itself: a model entry
+carries `multi_agent_version`, and `gpt-5.6-sol` / `gpt-5.6-terra` report `v2`.
+That choice is made from model metadata alone, ahead of the `features.multi_agent_v2`
+toggle, so a Sol session runs v2 even when the feature is disabled locally.
+
+A v2 parent then filters its own `spawn_agent` targets. In
+`codex-rs/core/src/tools/handlers/multi_agents_common.rs`, `model_supports_multi_agent_backend`
+admits a model only when `model.multi_agent_version == Some(V2)` — a restriction
+added in openai/codex#32751. Everything else is refused before the child starts:
+
+```text
+Unknown model `gpt-5.6-luna` for spawn_agent. Available models: gpt-5.6-sol, gpt-5.6-terra
+```
+
+That catches both halves of Root's catalog. ChatGPT reports `gpt-5.6-luna` as
+`v1`, and `sanitizeRelayModelMetadata` removes the field from synthesized Relay
+entries, so neither can be delegated to by default.
+
+`routing.multi-agent-v2-models` and `routing.multi-agent-v2-relay` advertise `v2`
+for the surfaces that opt in:
+
+```yaml
+routing:
+  multi-agent-v2-models:
+    - "gpt-5.6-luna"
+  multi-agent-v2-relay: true
+```
+
+Stock entries are otherwise passed through from ChatGPT verbatim, and this is the
+one deliberate exception. Under `discovery: static` a listed stock model must
+also appear in `stock-models`, matching `fast-models`.
+
+`multi-agent-v2-relay` also accepts a list of provider-qualified models instead
+of a bool, for advertising only part of the Relay half:
+
+```yaml
+routing:
+  multi-agent-v2-relay:
+    - "xai/grok-4.5"
+    - "deepseek/deepseek-v4-flash"
+```
+
+The prefix is not decoration. Whether a Relay model can serve as a subagent is a
+property of the executor that will carry its `collaboration.*` tools, so the
+provider is the grain the decision is actually made at — the same grain
+`sanitizeRelayModelMetadata` already uses for `supports_search_tool`. It is also
+the half that can be validated at config load, against the closed
+`{xai, kimi, deepseek}` set, which a bare slug could not be under auto discovery.
+The prefix participates in the match: an entry only advertises a model the Relay
+catalog attributes to that same provider, and an unattributed model never matches
+a selective list. Only the first `/` delimits the prefix, so a vendor-qualified
+slug such as `xai/x-ai/grok-4.5` resolves correctly.
+
+A Relay identifier in `multi-agent-v2-models` is rejected at config load, with an
+error pointing at this key.
+
+Two consequences are worth stating plainly:
+
+- An advertised child is a **full v2 participant**, not a leaf worker.
+  `collab_tools_enabled` in `codex-rs/core/src/tools/spec_plan.rs` grants the
+  collaboration tools to a child whose model reports `v2`, so it can spawn its
+  own subagents. Depth is not bounded by `agents.max_depth`, which v2 ignores.
+- A Relay child receives the `collaboration.*` tools over its own upstream
+  rather than the ChatGPT backend. Advertising a Relay model therefore asserts
+  that its executor can carry those tool definitions.
+
+This is deliberately opt-in and expected to be transitional. openai/codex#36892
+relaxes the predicate to `model.multi_agent_version != Some(Disabled)`, which
+admits a `v1` entry — and an absent one — as a **leaf worker** that is spawnable
+without receiving collaboration tools. Once a client carrying that change ships,
+delegation no longer requires this switch, and leaving it unset is the closer
+match to upstream behaviour.
+
 ## Native logging
 
 Root has three independent native log surfaces under `logging`:

@@ -43,6 +43,12 @@ type modelsHandler struct {
 	officialClient   *http.Client
 	// stockPinOrder preserves configuration order for the cold-start catalog.
 	stockPinOrder []string
+	// multiAgentV2Models names stock models advertised as multi-agent v2.
+	// multiAgentV2RelayAll advertises the whole discovered Relay half, and
+	// multiAgentV2RelayModels selects it by provider-qualified identifier.
+	multiAgentV2Models      map[string]struct{}
+	multiAgentV2RelayAll    bool
+	multiAgentV2RelayModels map[string]struct{}
 
 	cacheMu    sync.RWMutex
 	cachedBody []byte
@@ -97,15 +103,27 @@ func newModelsHandlerWithDiscovery(config *Config, resolver *routeResolver, disc
 		allowedOrigins[origin] = struct{}{}
 	}
 
+	multiAgentV2Models := make(map[string]struct{}, len(config.Routing.MultiAgentV2Models))
+	for _, model := range config.Routing.MultiAgentV2Models {
+		multiAgentV2Models[model] = struct{}{}
+	}
+	multiAgentV2RelayModels, errMultiAgentV2Relay := buildMultiAgentV2RelaySet(mode, config.Routing.MultiAgentV2Relay, config.Routing.RelayModels)
+	if errMultiAgentV2Relay != nil {
+		return nil, errMultiAgentV2Relay
+	}
+
 	handler := &modelsHandler{
-		allowedOrigins:   allowedOrigins,
-		mode:             mode,
-		preferWebsockets: preferWebsockets,
-		resolver:         resolver,
-		discovery:        discovery,
-		officialBaseURL:  strings.TrimSuffix(strings.TrimSpace(officialBaseURL), "/"),
-		officialClient:   officialClient,
-		stockPinOrder:    append([]string(nil), config.Routing.StockModels...),
+		allowedOrigins:          allowedOrigins,
+		mode:                    mode,
+		preferWebsockets:        preferWebsockets,
+		resolver:                resolver,
+		discovery:               discovery,
+		officialBaseURL:         strings.TrimSuffix(strings.TrimSpace(officialBaseURL), "/"),
+		officialClient:          officialClient,
+		stockPinOrder:           append([]string(nil), config.Routing.StockModels...),
+		multiAgentV2Models:      multiAgentV2Models,
+		multiAgentV2RelayAll:    config.Routing.MultiAgentV2Relay.All,
+		multiAgentV2RelayModels: multiAgentV2RelayModels,
 	}
 	if mode == discoveryAuto {
 		if resolver == nil || discovery == nil || officialClient == nil || handler.officialBaseURL == "" {
@@ -132,7 +150,7 @@ func newModelsHandlerWithDiscovery(config *Config, resolver *routeResolver, disc
 			return 0, "", errRoute
 		}
 		return selected, routes.relayProvider(slug), nil
-	}, preferWebsockets)
+	}, preferWebsockets, handler.multiAgentV2Policy())
 	if errBuild != nil {
 		return nil, errBuild
 	}
@@ -146,9 +164,70 @@ func newModelsHandlerWithDiscovery(config *Config, resolver *routeResolver, disc
 	return handler, nil
 }
 
+// multiAgentVersionKey is the Codex catalog field naming a model's multi-agent
+// backend; multiAgentVersionV2 is the value that makes it a valid spawn_agent
+// target for a multi-agent v2 parent.
+const (
+	multiAgentVersionKey = "multi_agent_version"
+	multiAgentVersionV2  = "v2"
+)
+
+// multiAgentV2Policy decides which catalog entries advertise multi-agent v2.
+// The Relay half is discovered at runtime, so it is switched as a whole rather
+// than enumerated.
+type multiAgentV2Policy struct {
+	stockModels map[string]struct{}
+	relayAll    bool
+	// relayModels is keyed by relayModelKey, so a configured entry only matches
+	// a model the Relay catalog attributes to that same provider.
+	relayModels map[string]struct{}
+}
+
+func (p multiAgentV2Policy) advertises(slug string, selected route, provider relayProvider) bool {
+	if selected != routeRelay {
+		_, advertised := p.stockModels[slug]
+		return advertised
+	}
+	if p.relayAll {
+		return true
+	}
+	if provider == "" {
+		// An unattributed Relay model cannot be named in a provider-qualified
+		// list, so a selective configuration never advertises it.
+		return false
+	}
+	_, advertised := p.relayModels[relayModelKey(provider, slug)]
+	return advertised
+}
+
+// advertiseMultiAgentV2 marks an entry as a valid spawn_agent target.
+//
+// A multi-agent v2 parent filters spawn targets on the catalog's own
+// multi_agent_version: anything that is not v2 is refused with "Unknown model
+// ... Available models: gpt-5.6-sol, gpt-5.6-terra". Neither a v1 stock model
+// such as gpt-5.6-luna nor a Relay entry — whose field sanitizeRelayModelMetadata
+// removes — can be delegated to without this.
+//
+// The advertisement is not free: a v2 child is a full participant that receives
+// the collaboration tools and can spawn its own subagents, rather than a leaf
+// worker. It is therefore opt-in per model surface.
+func advertiseMultiAgentV2(model map[string]any, slug string, selected route, provider relayProvider, policy multiAgentV2Policy) {
+	if policy.advertises(slug, selected, provider) {
+		model[multiAgentVersionKey] = multiAgentVersionV2
+	}
+}
+
+func (h *modelsHandler) multiAgentV2Policy() multiAgentV2Policy {
+	return multiAgentV2Policy{
+		stockModels: h.multiAgentV2Models,
+		relayAll:    h.multiAgentV2RelayAll,
+		relayModels: h.multiAgentV2RelayModels,
+	}
+}
+
 // synthesizeCodexModels builds Codex catalog entries for models Root describes
 // itself, using the repository's validated metadata templates.
-func synthesizeCodexModels(slugs []string, classify func(string) (route, relayProvider, error), preferWebsockets bool) ([]map[string]any, error) {
+func synthesizeCodexModels(slugs []string, classify func(string) (route, relayProvider, error), preferWebsockets bool, multiAgentV2 multiAgentV2Policy) ([]map[string]any, error) {
 	inputs := make([]map[string]any, 0, len(slugs))
 	for _, model := range slugs {
 		inputs = append(inputs, map[string]any{"id": model})
@@ -191,6 +270,7 @@ func synthesizeCodexModels(slugs []string, classify func(string) (route, relayPr
 		if selected == routeRelay {
 			sanitizeRelayModelMetadata(model, provider)
 		}
+		advertiseMultiAgentV2(model, slug, selected, provider, multiAgentV2)
 		models = append(models, model)
 	}
 	return models, nil
@@ -225,7 +305,10 @@ func sanitizeRelayModelMetadata(model map[string]any, provider relayProvider) {
 	delete(model, "apply_patch_tool_type")
 	delete(model, "auto_review_model_override")
 	delete(model, "tool_mode")
-	delete(model, "multi_agent_version")
+	// Removed unconditionally so an unadvertised Relay entry can never inherit
+	// the template's multi-agent metadata; advertiseMultiAgentV2 re-adds it for
+	// the surfaces that opt in.
+	delete(model, multiAgentVersionKey)
 	// Every relay provider reaches an upstream whose executor rewrites Codex's
 	// hosted tool_search into a plain function and restores the call on the way
 	// back, so deferred tool loading works for all of them. An unattributed
@@ -360,7 +443,7 @@ func (h *modelsHandler) coldStartCatalog() ([]byte, string, error) {
 			return routeOfficial, "", nil
 		}
 		return routeRelay, table.relayProvider(slug), nil
-	}, h.preferWebsockets)
+	}, h.preferWebsockets, h.multiAgentV2Policy())
 	if errBuild != nil {
 		return nil, "", errBuild
 	}
@@ -407,9 +490,18 @@ func (h *modelsHandler) assemble(ctx context.Context, authorization, clientVersi
 
 	relayModels, errRelayModels := synthesizeCodexModels(relaySlugs, func(slug string) (route, relayProvider, error) {
 		return routeRelay, table.relayProvider(slug), nil
-	}, h.preferWebsockets)
+	}, h.preferWebsockets, h.multiAgentV2Policy())
 	if errRelayModels != nil {
 		return nil, "", errRelayModels
+	}
+
+	// Stock entries arrive verbatim from ChatGPT, so the advertisement is the one
+	// deliberate exception to fetchOfficialCatalog's passthrough: the upstream
+	// catalog reports gpt-5.6-luna as v1, which a v2 parent refuses to spawn.
+	multiAgentV2 := h.multiAgentV2Policy()
+	for _, model := range stockModels {
+		slug, _ := model["slug"].(string)
+		advertiseMultiAgentV2(model, slug, routeOfficial, "", multiAgentV2)
 	}
 
 	merged := make([]map[string]any, 0, len(stockModels)+len(relayModels))

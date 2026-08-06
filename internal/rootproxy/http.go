@@ -35,6 +35,7 @@ type httpBridgeOptions struct {
 	stockModels     []string
 	relayModels     []string
 	relayProviders  map[string]string
+	fastModels      map[string]struct{}
 	resolver        *routeResolver
 	discovery       *relayDiscovery
 	maxRequestBody  int64
@@ -51,6 +52,7 @@ type httpBridge struct {
 	officialBaseURL string
 	relayBaseURL    string
 	relayAPIKey     string
+	fastModels      map[string]struct{}
 	maxRequestBody  int64
 	allowedOrigins  map[string]struct{}
 	officialClient  *http.Client
@@ -135,6 +137,7 @@ func newHTTPBridge(options httpBridgeOptions) (*httpBridge, error) {
 		officialBaseURL: validatedOfficial,
 		relayBaseURL:    validatedRelay,
 		relayAPIKey:     relayAPIKey,
+		fastModels:      options.fastModels,
 		maxRequestBody:  options.maxRequestBody,
 		allowedOrigins:  allowedOrigins,
 		officialClient:  officialClient,
@@ -312,6 +315,12 @@ func (b *httpBridge) serve(response http.ResponseWriter, request *http.Request, 
 			normalizedBody, errPrepare := prepareOfficialPayload(decodedBody)
 			if errPrepare != nil {
 				writeStockHTTPError(response, exchange, http.StatusBadRequest, "invalid_request_error", errPrepare.Error(), "input", "rejected", "official_payload_invalid")
+				return
+			}
+			var errTier error
+			normalizedBody, errTier = applyOfficialFastServiceTier(normalizedBody, model, b.fastModels)
+			if errTier != nil {
+				writeStockHTTPError(response, exchange, http.StatusBadRequest, "invalid_request_error", errTier.Error(), "service_tier", "rejected", "official_service_tier_not_applied")
 				return
 			}
 			if !bytes.Equal(normalizedBody, decodedBody) {

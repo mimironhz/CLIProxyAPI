@@ -40,20 +40,48 @@ routing:
   # Under "auto" any model Relay does not serve is forwarded to the official
   # arm, and the Relay catalog becomes part of Root's routing surface. See the
   # security notes in ROOT_PROXY.md before enabling it.
-  discovery: "static"
+  discovery: "auto"
   # Use exact model identifiers. Under "static" the sets must be non-empty and
   # disjoint; under "auto" both may be omitted, though keeping stock-models
   # pinned gives a correct catalog before the first background merge lands.
-  stock-models:
-    - "gpt-5.6-sol"
-    - "gpt-5.6-terra"
-    - "gpt-5.6-luna"
-  relay-models:
-    - "kimi-k3"
+  stock-models: []
+  relay-models: []
   # Optional for ordinary turns, but required for compaction creation or
   # replay. Models in the same family may reuse provider-local state.
-  relay-model-providers:
-    "kimi-k3": "kimi"
+  relay-model-providers: []
+  # Stock models whose turns are forced onto the ChatGPT "Fast" (priority)
+  # service tier, so Desktop no longer has to select it per turn. List only
+  # models whose catalog entry advertises the tier; the current stock family
+  # does, but gpt-5.4-mini and gpt-5.3-codex-spark do not and would be
+  # rejected upstream. Fast trades quota for latency ("1.5x speed, increased
+  # usage") and is plan-gated, so an account without it sees upstream errors.
+  # Relay models are never eligible. Compaction requests are excluded.
+  fast-models:
+    - "gpt-5.6-luna"
+  # Models advertised to Desktop as multi-agent v2. A v2 parent (currently
+  # gpt-5.6-sol and gpt-5.6-terra) will only accept a spawn_agent target whose
+  # catalog entry reports v2, and refuses everything else with "Unknown model
+  # ... Available models: gpt-5.6-sol, gpt-5.6-terra". Advertising v2 is what
+  # makes gpt-5.6-luna — which ChatGPT reports as v1 — and the Relay half
+  # delegable as subagents.
+  #
+  # This is not free: an advertised child becomes a full v2 participant that
+  # receives the collaboration tools and can spawn its own subagents, rather
+  # than a leaf worker. Leave both unset to keep the previous behaviour.
+  multi-agent-v2-models:
+    - "gpt-5.6-luna"
+  # Relay half. Either a bool for the whole discovered catalog, or a list of
+  # provider-qualified models. The prefix names the Relay provider whose
+  # executor will carry the collaboration tools, which is what actually decides
+  # whether the model can serve as a subagent; it is validated against
+  # {xai, kimi, deepseek} at load, and only the first "/" delimits it, so a
+  # vendor-qualified slug such as "xai/x-ai/grok-4.5" works.
+  #
+  #   multi-agent-v2-relay: true
+  #   multi-agent-v2-relay: ["xai/grok-4.5", "deepseek/deepseek-v4-flash"]
+  #
+  # A Relay identifier in multi-agent-v2-models is rejected; use this key.
+  multi-agent-v2-relay: true
 
 websocket:
   # Production-safe default. The installed ChatGPT Desktop client interprets

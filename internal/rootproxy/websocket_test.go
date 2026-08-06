@@ -1,6 +1,7 @@
 package rootproxy
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/tidwall/gjson"
 )
 
 type capturedMessage struct {
@@ -293,6 +295,85 @@ func TestWebsocketBridgeBoundsPreRouteState(t *testing.T) {
 		}
 		assertCloseCode(t, connection, websocket.CloseMessageTooBig)
 	})
+}
+
+func TestWebsocketBridgeForcesFastServiceTierOnTurnCreationOnly(t *testing.T) {
+	stockCapture := make(chan capturedMessage, 8)
+	relayCapture := make(chan capturedMessage, 4)
+	stockServer := newTurnCapturingWebsocketServer(t, stockCapture, `{"type":"response.completed","response":{"id":"stock"}}`)
+	relayServer := newTurnCapturingWebsocketServer(t, relayCapture, `{"type":"response.completed","response":{"id":"relay"}}`)
+	bridge := newTestBridge(t, websocketURL(stockServer.URL), websocketURL(relayServer.URL), func(options *bridgeOptions) {
+		options.stockModels = []string{"gpt-stock", "gpt-standard"}
+		options.fastModels = map[string]struct{}{"gpt-stock": {}}
+	})
+	rootServer := httptest.NewServer(bridge)
+	t.Cleanup(rootServer.Close)
+
+	connection := dialRootWebsocket(t, rootServer.URL, "/v1/responses", desktopBearerHeaders())
+	defer func() { _ = connection.Close() }()
+
+	turns := []struct {
+		name     string
+		payload  string
+		wantTier string
+	}{
+		{
+			name:     "configured stock model",
+			payload:  `{"type":"response.create","model":"gpt-stock","input":[]}`,
+			wantTier: officialFastServiceTier,
+		},
+		{
+			name:    "unlisted stock model keeps the Desktop choice",
+			payload: `{"type":"response.create","model":"gpt-standard","input":[]}`,
+		},
+	}
+	for _, turn := range turns {
+		t.Run(turn.name, func(t *testing.T) {
+			if errWrite := connection.WriteMessage(websocket.TextMessage, []byte(turn.payload)); errWrite != nil {
+				t.Fatalf("write turn: %v", errWrite)
+			}
+			capture := receiveCapture(t, stockCapture)
+			if got := gjson.GetBytes(capture.payload, "service_tier").String(); got != turn.wantTier {
+				t.Fatalf("service_tier = %q, want %q; payload=%s", got, turn.wantTier, capture.payload)
+			}
+			_, terminal, errRead := connection.ReadMessage()
+			if errRead != nil || !upstreamEventIsTerminal(terminal) {
+				t.Fatalf("terminal = %s, error %v", terminal, errRead)
+			}
+		})
+	}
+
+	// A frame that does not create a turn is not a request and must reach the
+	// upstream exactly as Desktop wrote it, even while the model is forced.
+	followUp := []byte(`{"type":"response.cancel"}`)
+	if errWrite := connection.WriteMessage(websocket.TextMessage, followUp); errWrite != nil {
+		t.Fatalf("write follow-up frame: %v", errWrite)
+	}
+	capture := receiveCapture(t, stockCapture)
+	if string(capture.payload) != string(followUp) {
+		t.Fatalf("non-create frame was rewritten: %s", capture.payload)
+	}
+
+	// Returning to the forced model through a route handoff opens a new upstream
+	// connection, which must carry the tier just like the first turn did.
+	relayTurn := []byte(`{"type":"response.create","model":"relay-model","input":[]}`)
+	if errWrite := connection.WriteMessage(websocket.TextMessage, relayTurn); errWrite != nil {
+		t.Fatalf("write relay turn: %v", errWrite)
+	}
+	relayRequest := receiveCapture(t, relayCapture)
+	if !bytes.Equal(relayRequest.payload, relayTurn) {
+		t.Fatalf("Relay turn was rewritten: %s", relayRequest.payload)
+	}
+	if _, terminal, errRead := connection.ReadMessage(); errRead != nil || !upstreamEventIsTerminal(terminal) {
+		t.Fatalf("relay terminal = %s, error %v", terminal, errRead)
+	}
+	if errWrite := connection.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"gpt-stock","input":[]}`)); errWrite != nil {
+		t.Fatalf("write handoff turn: %v", errWrite)
+	}
+	handoff := receiveCapture(t, stockCapture)
+	if got := gjson.GetBytes(handoff.payload, "service_tier").String(); got != officialFastServiceTier {
+		t.Fatalf("handoff service_tier = %q, want %q; payload=%s", got, officialFastServiceTier, handoff.payload)
+	}
 }
 
 func TestWebsocketBridgeSwitchesRoutesOnOneDownstreamConnection(t *testing.T) {
@@ -1492,6 +1573,41 @@ func newTerminalWebsocketServer(t *testing.T, captures chan<- capturedMessage, t
 			return
 		}
 		_, _, _ = connection.ReadMessage()
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+// newTurnCapturingWebsocketServer captures every inbound frame for the lifetime
+// of the connection and answers only turn creation, so a session can be driven
+// across several messages.
+func newTurnCapturingWebsocketServer(t *testing.T, captures chan<- capturedMessage, terminal string) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		connection, errUpgrade := testUpgrader().Upgrade(response, request, nil)
+		if errUpgrade != nil {
+			t.Errorf("upgrade turn capturing upstream: %v", errUpgrade)
+			return
+		}
+		defer func() { _ = connection.Close() }()
+		for {
+			messageType, payload, errRead := connection.ReadMessage()
+			if errRead != nil {
+				return
+			}
+			captures <- capturedMessage{
+				header:      request.Header.Clone(),
+				messageType: messageType,
+				payload:     append([]byte(nil), payload...),
+			}
+			envelope, errInspect := inspectClientMessage(payload)
+			if errInspect != nil || !envelope.hasEventType || envelope.eventType != "response.create" {
+				continue
+			}
+			if errWrite := connection.WriteMessage(websocket.TextMessage, []byte(terminal)); errWrite != nil {
+				return
+			}
+		}
 	}))
 	t.Cleanup(server.Close)
 	return server
