@@ -174,3 +174,67 @@ func TestPrepareOfficialPayloadStripsSealedDeepSeekReasoning(t *testing.T) {
 		t.Errorf("input.1.type = %q, want the user message preserved", got)
 	}
 }
+
+func TestApplyOfficialFastServiceTier(t *testing.T) {
+	fast := map[string]struct{}{"gpt-fast": {}}
+	tests := []struct {
+		name       string
+		payload    string
+		model      string
+		fastModels map[string]struct{}
+		wantTier   string
+		wantSame   bool
+	}{
+		{
+			name:       "configured model is forced onto the priority tier",
+			payload:    `{"model":"gpt-fast","input":[]}`,
+			model:      "gpt-fast",
+			fastModels: fast,
+			wantTier:   officialFastServiceTier,
+		},
+		{
+			name:       "a client tier is overridden",
+			payload:    `{"model":"gpt-fast","service_tier":"default","input":[]}`,
+			model:      "gpt-fast",
+			fastModels: fast,
+			wantTier:   officialFastServiceTier,
+		},
+		{
+			name:       "an already fast turn keeps its exact bytes",
+			payload:    `{"model":"gpt-fast","service_tier":"priority","input":[]}`,
+			model:      "gpt-fast",
+			fastModels: fast,
+			wantTier:   officialFastServiceTier,
+			wantSame:   true,
+		},
+		{
+			name:       "an unconfigured model is untouched",
+			payload:    `{"model":"gpt-standard","input":[]}`,
+			model:      "gpt-standard",
+			fastModels: fast,
+			wantSame:   true,
+		},
+		{
+			name:     "an empty configuration is a no-op",
+			payload:  `{"model":"gpt-fast","input":[]}`,
+			model:    "gpt-fast",
+			wantSame: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			payload := []byte(test.payload)
+			got, errApply := applyOfficialFastServiceTier(payload, test.model, test.fastModels)
+			if errApply != nil {
+				t.Fatalf("applyOfficialFastServiceTier() error = %v", errApply)
+			}
+			if gotTier := gjson.GetBytes(got, "service_tier").String(); gotTier != test.wantTier {
+				t.Fatalf("service_tier = %q, want %q; body=%s", gotTier, test.wantTier, got)
+			}
+			if test.wantSame && !bytes.Equal(got, payload) {
+				t.Fatalf("payload was rewritten\ngot  = %s\nwant = %s", got, payload)
+			}
+		})
+	}
+}

@@ -115,6 +115,129 @@ func buildRouteTableForMode(mode discoveryMode, stockModels, relayModels []strin
 	return table, nil
 }
 
+// buildFastModelSet resolves the models whose stock turns are forced onto the
+// ChatGPT "Fast" (priority) service tier. Only the official arm honours the
+// tier, so a Relay model can never be listed; under static mode the model must
+// also belong to the configured stock surface. Under auto mode the stock half
+// is discovered, so membership is left to the runtime route decision.
+func buildFastModelSet(mode discoveryMode, fastModels, stockModels, relayModels []string) (map[string]struct{}, error) {
+	if len(fastModels) == 0 {
+		return nil, nil
+	}
+	stock := make(map[string]struct{}, len(stockModels))
+	for _, model := range stockModels {
+		stock[model] = struct{}{}
+	}
+	relay := make(map[string]struct{}, len(relayModels))
+	for _, model := range relayModels {
+		relay[model] = struct{}{}
+	}
+	fast := make(map[string]struct{}, len(fastModels))
+	for _, model := range fastModels {
+		if errModel := addExactModel(fast, model, "fast"); errModel != nil {
+			return nil, errModel
+		}
+		if _, isRelay := relay[model]; isRelay {
+			return nil, fmt.Errorf("fast model %q is a relay model; the Fast service tier is official-only", model)
+		}
+		if _, isStock := stock[model]; !isStock && mode == discoveryStatic {
+			return nil, fmt.Errorf("fast model %q is not configured in stock-models", model)
+		}
+	}
+	return fast, nil
+}
+
+// buildMultiAgentV2ModelSet resolves the stock models advertised as multi-agent
+// v2. The Relay half is discovered at runtime and cannot be enumerated here, so
+// it is covered by the routing-wide multi-agent-v2-relay switch instead; a Relay
+// identifier listed here is therefore rejected as a configuration mistake. Under
+// static mode the model must belong to the configured stock surface, matching
+// buildFastModelSet.
+func buildMultiAgentV2ModelSet(mode discoveryMode, multiAgentV2Models, stockModels, relayModels []string) (map[string]struct{}, error) {
+	if len(multiAgentV2Models) == 0 {
+		return nil, nil
+	}
+	stock := make(map[string]struct{}, len(stockModels))
+	for _, model := range stockModels {
+		stock[model] = struct{}{}
+	}
+	relay := make(map[string]struct{}, len(relayModels))
+	for _, model := range relayModels {
+		relay[model] = struct{}{}
+	}
+	advertised := make(map[string]struct{}, len(multiAgentV2Models))
+	for _, model := range multiAgentV2Models {
+		if errModel := addExactModel(advertised, model, "multi-agent-v2"); errModel != nil {
+			return nil, errModel
+		}
+		if _, isRelay := relay[model]; isRelay {
+			return nil, fmt.Errorf("multi-agent-v2 model %q is a relay model; use multi-agent-v2-relay instead", model)
+		}
+		if _, isStock := stock[model]; !isStock && mode == discoveryStatic {
+			return nil, fmt.Errorf("multi-agent-v2 model %q is not configured in stock-models", model)
+		}
+	}
+	return advertised, nil
+}
+
+// relayModelKey is the canonical provider-qualified identifier that matches a
+// discovered Relay model against configuration.
+func relayModelKey(provider relayProvider, model string) string {
+	return string(provider) + "/" + model
+}
+
+// buildMultiAgentV2RelaySet resolves the provider-qualified Relay models
+// advertised as multi-agent v2. A bare bool covers the whole discovered half and
+// resolves to no set. The provider half is validated here; the model half cannot
+// be under auto discovery, where the Relay catalog is only known at runtime, so
+// an unmatched entry stays inert exactly as an unpinned fast model does.
+func buildMultiAgentV2RelaySet(mode discoveryMode, selection MultiAgentV2RelaySelection, relayModels []string) (map[string]struct{}, error) {
+	if len(selection.Models) == 0 {
+		return nil, nil
+	}
+	relay := make(map[string]struct{}, len(relayModels))
+	for _, model := range relayModels {
+		relay[model] = struct{}{}
+	}
+	advertised := make(map[string]struct{}, len(selection.Models))
+	for _, entry := range selection.Models {
+		provider, model, errEntry := parseQualifiedRelayModel(entry)
+		if errEntry != nil {
+			return nil, errEntry
+		}
+		key := relayModelKey(provider, model)
+		if _, duplicate := advertised[key]; duplicate {
+			return nil, fmt.Errorf("multi-agent-v2 relay model %q is duplicated", entry)
+		}
+		advertised[key] = struct{}{}
+		if _, isRelay := relay[model]; !isRelay && mode == discoveryStatic {
+			return nil, fmt.Errorf("multi-agent-v2 relay model %q is not configured in relay-models", entry)
+		}
+	}
+	return advertised, nil
+}
+
+// parseQualifiedRelayModel splits "provider/model" on the first separator. The
+// model half may itself contain slashes, because a Relay catalog can publish
+// vendor-qualified identifiers such as "x-ai/grok-4.5".
+func parseQualifiedRelayModel(entry string) (relayProvider, string, error) {
+	if entry == "" || strings.TrimSpace(entry) != entry {
+		return "", "", fmt.Errorf("multi-agent-v2 relay model %q is empty or has surrounding whitespace", entry)
+	}
+	providerName, model, qualified := strings.Cut(entry, "/")
+	if !qualified {
+		return "", "", fmt.Errorf(`multi-agent-v2 relay model %q must be provider-qualified, for example "xai/grok-4.5"`, entry)
+	}
+	provider, errProvider := parseRelayProvider(providerName)
+	if errProvider != nil {
+		return "", "", fmt.Errorf("multi-agent-v2 relay model %q: %w", entry, errProvider)
+	}
+	if model == "" || strings.ContainsAny(model, "*?") {
+		return "", "", fmt.Errorf("multi-agent-v2 relay model %q must name exactly one model", entry)
+	}
+	return provider, model, nil
+}
+
 func parseRelayProvider(raw string) (relayProvider, error) {
 	if raw == "" || strings.TrimSpace(raw) != raw {
 		return "", fmt.Errorf("provider %q is empty or has surrounding whitespace", raw)

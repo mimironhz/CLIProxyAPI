@@ -653,6 +653,66 @@ func TestHTTPBridgeForwardsOfficialAuthenticationFailureWithoutRetry(t *testing.
 	}
 }
 
+func TestHTTPBridgeForcesFastServiceTierOnConfiguredStockTurnsOnly(t *testing.T) {
+	officialCapture := make(chan capturedHTTPRequest, 4)
+	officialServer := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		captureHTTPRequest(t, request, officialCapture)
+		response.Header().Set("Content-Type", "text/event-stream")
+		_, _ = response.Write([]byte("data: done\n\n"))
+	}))
+	t.Cleanup(officialServer.Close)
+	relayCapture := make(chan capturedHTTPRequest, 1)
+	relayServer := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		captureHTTPRequest(t, request, relayCapture)
+		response.Header().Set("Content-Type", "text/event-stream")
+		_, _ = response.Write([]byte("data: done\n\n"))
+	}))
+	t.Cleanup(relayServer.Close)
+	bridge := newTestHTTPBridge(t, officialServer, relayServer, func(options *httpBridgeOptions) {
+		options.stockModels = []string{"gpt-stock", "gpt-standard"}
+		options.fastModels = map[string]struct{}{"gpt-stock": {}}
+	})
+	rootServer := newTestHTTPRootServer(t, bridge)
+
+	forced := performRootPOST(t, rootServer.URL+"/v1/responses", []byte(`{"model":"gpt-stock","stream":true,"input":[]}`), "", desktopHTTPHeaders())
+	_ = readAndClose(t, forced)
+	if forced.StatusCode != http.StatusOK {
+		t.Fatalf("forced stock status = %d, want 200", forced.StatusCode)
+	}
+	capture := receiveWithTimeout(t, officialCapture)
+	if got := gjson.GetBytes(capture.body, "service_tier").String(); got != officialFastServiceTier {
+		t.Fatalf("forced stock service_tier = %q, want %q; body=%s", got, officialFastServiceTier, capture.body)
+	}
+
+	// An unlisted stock model keeps Desktop's own per-turn choice.
+	standard := performRootPOST(t, rootServer.URL+"/v1/responses", []byte(`{"model":"gpt-standard","stream":true,"input":[]}`), "", desktopHTTPHeaders())
+	_ = readAndClose(t, standard)
+	standardCapture := receiveWithTimeout(t, officialCapture)
+	if gjson.GetBytes(standardCapture.body, "service_tier").Exists() {
+		t.Fatalf("unlisted stock model was forced: %s", standardCapture.body)
+	}
+
+	// Compaction is background summarization and must not spend the tier.
+	compact := performRootPOST(t, rootServer.URL+"/v1/responses/compact", []byte(`{"model":"gpt-stock","input":[]}`), "", desktopHTTPHeaders())
+	_ = readAndClose(t, compact)
+	compactCapture := receiveWithTimeout(t, officialCapture)
+	if compactCapture.path != "/backend-api/codex/responses/compact" {
+		t.Fatalf("compact path = %q", compactCapture.path)
+	}
+	if gjson.GetBytes(compactCapture.body, "service_tier").Exists() {
+		t.Fatalf("compaction was forced onto the fast tier: %s", compactCapture.body)
+	}
+
+	// The Relay arm has no such tier, and its bytes stay untouched.
+	relayBody := []byte(`{"model":"relay-model","stream":true,"input":[]}`)
+	relayResponse := performRootPOST(t, rootServer.URL+"/v1/responses", relayBody, "", desktopHTTPHeaders())
+	_ = readAndClose(t, relayResponse)
+	relayRequest := receiveWithTimeout(t, relayCapture)
+	if !bytes.Equal(relayRequest.body, relayBody) {
+		t.Fatalf("Relay body was rewritten: %s", relayRequest.body)
+	}
+}
+
 func TestCapturedHTTPOutcomeSeparatesResponseStatusFromCaptureCompleteness(t *testing.T) {
 	tests := map[int]string{
 		http.StatusOK:                  "completed",

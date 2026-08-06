@@ -245,6 +245,93 @@ routing:
   relay-models: ["relay-model"]
   relay-model-providers: {relay-model: " xai"}
 `,
+		"fast relay model": `
+routing:
+  stock-models: ["gpt-stock"]
+  relay-models: ["relay-model"]
+  fast-models: ["relay-model"]
+`,
+		"fast model outside the static stock surface": `
+routing:
+  stock-models: ["gpt-stock"]
+  relay-models: ["relay-model"]
+  fast-models: ["gpt-unlisted"]
+`,
+		"duplicate fast model": `
+routing:
+  stock-models: ["gpt-stock"]
+  relay-models: ["relay-model"]
+  fast-models: ["gpt-stock", "gpt-stock"]
+`,
+		"fast model wildcard": `
+routing:
+  discovery: "auto"
+  stock-models: ["gpt-stock"]
+  relay-models: ["relay-model"]
+  fast-models: ["gpt-*"]
+`,
+		"multi-agent-v2 relay model": `
+routing:
+  stock-models: ["gpt-stock"]
+  relay-models: ["relay-model"]
+  multi-agent-v2-models: ["relay-model"]
+`,
+		"multi-agent-v2 model outside the static stock surface": `
+routing:
+  stock-models: ["gpt-stock"]
+  relay-models: ["relay-model"]
+  multi-agent-v2-models: ["gpt-unlisted"]
+`,
+		"duplicate multi-agent-v2 model": `
+routing:
+  stock-models: ["gpt-stock"]
+  relay-models: ["relay-model"]
+  multi-agent-v2-models: ["gpt-stock", "gpt-stock"]
+`,
+		"multi-agent-v2 model wildcard": `
+routing:
+  discovery: "auto"
+  stock-models: ["gpt-stock"]
+  relay-models: ["relay-model"]
+  multi-agent-v2-models: ["gpt-*"]
+`,
+		"multi-agent-v2 relay entry without a provider prefix": `
+routing:
+  stock-models: ["gpt-stock"]
+  relay-models: ["relay-model"]
+  multi-agent-v2-relay: ["relay-model"]
+`,
+		"multi-agent-v2 relay entry with an unknown provider": `
+routing:
+  stock-models: ["gpt-stock"]
+  relay-models: ["relay-model"]
+  multi-agent-v2-relay: ["openai/relay-model"]
+`,
+		"multi-agent-v2 relay model outside the static relay surface": `
+routing:
+  stock-models: ["gpt-stock"]
+  relay-models: ["relay-model"]
+  multi-agent-v2-relay: ["xai/unlisted-model"]
+`,
+		"duplicate multi-agent-v2 relay model": `
+routing:
+  stock-models: ["gpt-stock"]
+  relay-models: ["relay-model"]
+  multi-agent-v2-relay: ["xai/relay-model", "xai/relay-model"]
+`,
+		"multi-agent-v2 relay model wildcard": `
+routing:
+  discovery: "auto"
+  stock-models: ["gpt-stock"]
+  relay-models: ["relay-model"]
+  multi-agent-v2-relay: ["xai/relay-*"]
+`,
+		"multi-agent-v2 relay of the wrong type": `
+routing:
+  stock-models: ["gpt-stock"]
+  relay-models: ["relay-model"]
+  multi-agent-v2-relay: {xai: true}
+`,
 		"zero message limit": `
 routing:
   stock-models: ["gpt-stock"]
@@ -376,6 +463,127 @@ func TestNewServerRevalidatesMutableConfig(t *testing.T) {
 	config.Host = "0.0.0.0"
 	if _, errServer := NewServer(&config); errServer == nil {
 		t.Fatal("NewServer() accepted a post-load public bind mutation")
+	}
+}
+
+func TestLoadConfigResolvesFastModelsForBothBridges(t *testing.T) {
+	path := writeRootConfig(t, `
+routing:
+  stock-models: ["gpt-stock", "gpt-standard"]
+  relay-models: ["relay-model"]
+  fast-models: ["gpt-stock"]
+`)
+	config, errLoad := loadConfig(path, staticEnvironment("relay-secret"))
+	if errLoad != nil {
+		t.Fatalf("loadConfig() error = %v", errLoad)
+	}
+	for name, resolved := range map[string]map[string]struct{}{
+		"http":      config.httpBridgeOptions().fastModels,
+		"websocket": config.bridgeOptions().fastModels,
+	} {
+		if len(resolved) != 1 {
+			t.Fatalf("%s fast models = %#v, want exactly gpt-stock", name, resolved)
+		}
+		if _, fast := resolved["gpt-stock"]; !fast {
+			t.Fatalf("%s fast models = %#v, want gpt-stock", name, resolved)
+		}
+	}
+	// A model may be forced under auto discovery before it is pinned, because
+	// the stock half is only known once the merged catalog lands.
+	autoPath := writeRootConfig(t, `
+routing:
+  discovery: "auto"
+  fast-models: ["gpt-5.6-luna"]
+`)
+	if _, errAuto := loadConfig(autoPath, staticEnvironment("relay-secret")); errAuto != nil {
+		t.Fatalf("loadConfig() under auto discovery error = %v", errAuto)
+	}
+}
+
+func TestLoadConfigResolvesMultiAgentV2Models(t *testing.T) {
+	path := writeRootConfig(t, `
+routing:
+  stock-models: ["gpt-stock", "gpt-standard"]
+  relay-models: ["relay-model"]
+  multi-agent-v2-models: ["gpt-stock"]
+  multi-agent-v2-relay: true
+`)
+	config, errLoad := loadConfig(path, staticEnvironment("relay-secret"))
+	if errLoad != nil {
+		t.Fatalf("loadConfig() error = %v", errLoad)
+	}
+	if len(config.multiAgentV2Models) != 1 {
+		t.Fatalf("multi-agent-v2 models = %#v, want exactly gpt-stock", config.multiAgentV2Models)
+	}
+	if _, advertised := config.multiAgentV2Models["gpt-stock"]; !advertised {
+		t.Fatalf("multi-agent-v2 models = %#v, want gpt-stock", config.multiAgentV2Models)
+	}
+	if !config.Routing.MultiAgentV2Relay.All {
+		t.Fatal("multi-agent-v2-relay = false, want true")
+	}
+
+	// The Relay switch stands alone: advertising the discovered half must not
+	// require naming any stock model.
+	relayOnlyPath := writeRootConfig(t, `
+routing:
+  stock-models: ["gpt-stock"]
+  relay-models: ["relay-model"]
+  multi-agent-v2-relay: true
+`)
+	relayOnly, errRelayOnly := loadConfig(relayOnlyPath, staticEnvironment("relay-secret"))
+	if errRelayOnly != nil {
+		t.Fatalf("loadConfig() with relay-only advertisement error = %v", errRelayOnly)
+	}
+	if len(relayOnly.multiAgentV2Models) != 0 {
+		t.Fatalf("multi-agent-v2 models = %#v, want empty", relayOnly.multiAgentV2Models)
+	}
+
+	// The same key also accepts a provider-qualified list, which resolves to an
+	// explicit set rather than the whole discovered half.
+	selectivePath := writeRootConfig(t, `
+routing:
+  stock-models: ["gpt-stock"]
+  relay-models: ["relay-model", "other-model"]
+  multi-agent-v2-relay: ["xai/relay-model"]
+`)
+	selective, errSelective := loadConfig(selectivePath, staticEnvironment("relay-secret"))
+	if errSelective != nil {
+		t.Fatalf("loadConfig() with a qualified relay list error = %v", errSelective)
+	}
+	if selective.Routing.MultiAgentV2Relay.All {
+		t.Fatal("multi-agent-v2-relay All = true, want false for a list")
+	}
+	if len(selective.multiAgentV2RelayModels) != 1 {
+		t.Fatalf("multi-agent-v2 relay models = %#v, want exactly xai/relay-model", selective.multiAgentV2RelayModels)
+	}
+	if _, advertised := selective.multiAgentV2RelayModels[relayModelKey(relayProviderXAI, "relay-model")]; !advertised {
+		t.Fatalf("multi-agent-v2 relay models = %#v, want xai/relay-model", selective.multiAgentV2RelayModels)
+	}
+
+	// A vendor-qualified slug keeps its own slashes; only the first separator
+	// delimits the provider prefix.
+	nestedPath := writeRootConfig(t, `
+routing:
+  discovery: "auto"
+  multi-agent-v2-relay: ["xai/x-ai/grok-4.5"]
+`)
+	nested, errNested := loadConfig(nestedPath, staticEnvironment("relay-secret"))
+	if errNested != nil {
+		t.Fatalf("loadConfig() with a vendor-qualified slug error = %v", errNested)
+	}
+	if _, advertised := nested.multiAgentV2RelayModels[relayModelKey(relayProviderXAI, "x-ai/grok-4.5")]; !advertised {
+		t.Fatalf("multi-agent-v2 relay models = %#v, want xai/x-ai/grok-4.5", nested.multiAgentV2RelayModels)
+	}
+
+	// A stock model may be advertised under auto discovery before it is pinned,
+	// because the stock half is only known once the merged catalog lands.
+	autoPath := writeRootConfig(t, `
+routing:
+  discovery: "auto"
+  multi-agent-v2-models: ["gpt-5.6-luna"]
+`)
+	if _, errAuto := loadConfig(autoPath, staticEnvironment("relay-secret")); errAuto != nil {
+		t.Fatalf("loadConfig() under auto discovery error = %v", errAuto)
 	}
 }
 

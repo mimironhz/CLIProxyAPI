@@ -51,9 +51,12 @@ type Config struct {
 	HTTP      HTTPConfig      `yaml:"http"`
 	Logging   LoggingConfig   `yaml:"logging"`
 
-	relayAPIKey       string
-	relayWebsocketURL string
-	configDirectory   string
+	relayAPIKey             string
+	relayWebsocketURL       string
+	configDirectory         string
+	fastModels              map[string]struct{}
+	multiAgentV2Models      map[string]struct{}
+	multiAgentV2RelayModels map[string]struct{}
 }
 
 // RelayConfig identifies the local CPA Relay and the environment variable
@@ -71,11 +74,71 @@ type RelayConfig struct {
 // optional pins: a non-empty StockModels list is protected from Relay
 // collisions, a non-empty RelayModels list narrows the discovered catalog, and
 // RelayModelProviders overrides the catalog's own attribution.
+//
+// FastModels is independent of routing: it names stock models whose turns are
+// forced onto the ChatGPT "Fast" (priority) service tier instead of waiting for
+// Desktop to select it per turn.
+//
+// MultiAgentV2Models and MultiAgentV2Relay are likewise independent of routing.
+// They advertise multi_agent_version: v2 so a Codex multi-agent v2 parent will
+// accept the model as a spawn_agent target; see advertiseMultiAgentV2 for why
+// the client rejects anything else.
 type RoutingConfig struct {
 	Discovery           string            `yaml:"discovery"`
 	StockModels         []string          `yaml:"stock-models"`
 	RelayModels         []string          `yaml:"relay-models"`
 	RelayModelProviders map[string]string `yaml:"relay-model-providers"`
+	FastModels          []string          `yaml:"fast-models"`
+	MultiAgentV2Models  []string          `yaml:"multi-agent-v2-models"`
+
+	MultiAgentV2Relay MultiAgentV2RelaySelection `yaml:"multi-agent-v2-relay"`
+}
+
+// MultiAgentV2RelaySelection chooses which Relay models are advertised as
+// multi-agent v2. It accepts either a bool, covering the whole discovered Relay
+// half, or a list of provider-qualified model identifiers:
+//
+//	multi-agent-v2-relay: true
+//	multi-agent-v2-relay: ["xai/grok-4.5", "deepseek/deepseek-v4-flash"]
+//
+// The prefix names the Relay provider whose executor will carry the
+// collaboration tools, which is the property that actually decides whether a
+// model can serve as a subagent. It is also validated at config load against the
+// closed provider set, which a bare slug could not be: under auto discovery the
+// Relay catalog is only known at runtime.
+type MultiAgentV2RelaySelection struct {
+	// All advertises every discovered Relay model.
+	All bool
+	// Models holds the configured provider-qualified identifiers verbatim.
+	Models []string
+}
+
+func (s *MultiAgentV2RelaySelection) UnmarshalYAML(value *yaml.Node) error {
+	if value == nil {
+		return nil
+	}
+	switch value.Kind {
+	case yaml.ScalarNode:
+		if value.ShortTag() == "!!null" {
+			*s = MultiAgentV2RelaySelection{}
+			return nil
+		}
+		var all bool
+		if errDecode := value.Decode(&all); errDecode != nil || value.ShortTag() != "!!bool" {
+			return errors.New("routing multi-agent-v2-relay must be a bool or a list of provider-qualified models")
+		}
+		*s = MultiAgentV2RelaySelection{All: all}
+		return nil
+	case yaml.SequenceNode:
+		var models []string
+		if errDecode := value.Decode(&models); errDecode != nil {
+			return errors.New("routing multi-agent-v2-relay list must contain provider-qualified model strings")
+		}
+		*s = MultiAgentV2RelaySelection{Models: models}
+		return nil
+	default:
+		return errors.New("routing multi-agent-v2-relay must be a bool or a list of provider-qualified models")
+	}
 }
 
 // WebsocketConfig controls transport selection plus message and
@@ -221,6 +284,21 @@ func (c *Config) validateAndResolve(lookupEnv func(string) (string, bool)) error
 	if _, errModels := buildRouteTableForMode(mode, c.Routing.StockModels, c.Routing.RelayModels, c.Routing.RelayModelProviders); errModels != nil {
 		return errModels
 	}
+	fastModels, errFast := buildFastModelSet(mode, c.Routing.FastModels, c.Routing.StockModels, c.Routing.RelayModels)
+	if errFast != nil {
+		return errFast
+	}
+	c.fastModels = fastModels
+	multiAgentV2Models, errMultiAgentV2 := buildMultiAgentV2ModelSet(mode, c.Routing.MultiAgentV2Models, c.Routing.StockModels, c.Routing.RelayModels)
+	if errMultiAgentV2 != nil {
+		return errMultiAgentV2
+	}
+	c.multiAgentV2Models = multiAgentV2Models
+	multiAgentV2RelayModels, errMultiAgentV2Relay := buildMultiAgentV2RelaySet(mode, c.Routing.MultiAgentV2Relay, c.Routing.RelayModels)
+	if errMultiAgentV2Relay != nil {
+		return errMultiAgentV2Relay
+	}
+	c.multiAgentV2RelayModels = multiAgentV2RelayModels
 	switch c.Websocket.Mode {
 	case websocketModeHTTPFallback, websocketModeFirstMessage:
 	default:
@@ -412,6 +490,7 @@ func (c *Config) bridgeOptions() bridgeOptions {
 		stockModels:      append([]string(nil), c.Routing.StockModels...),
 		relayModels:      append([]string(nil), c.Routing.RelayModels...),
 		relayProviders:   cloneStringMap(c.Routing.RelayModelProviders),
+		fastModels:       cloneModelSet(c.fastModels),
 		maxMessageBytes:  c.Websocket.MaxMessageBytes,
 		maxPendingRoutes: c.Websocket.MaxPendingRoutes,
 		allowedOrigins:   append([]string(nil), c.Websocket.AllowedOrigins...),
@@ -425,9 +504,21 @@ func (c *Config) httpBridgeOptions() httpBridgeOptions {
 		stockModels:    append([]string(nil), c.Routing.StockModels...),
 		relayModels:    append([]string(nil), c.Routing.RelayModels...),
 		relayProviders: cloneStringMap(c.Routing.RelayModelProviders),
+		fastModels:     cloneModelSet(c.fastModels),
 		maxRequestBody: c.HTTP.MaxRequestBodyBytes,
 		allowedOrigins: append([]string(nil), c.Websocket.AllowedOrigins...),
 	}
+}
+
+func cloneModelSet(source map[string]struct{}) map[string]struct{} {
+	if len(source) == 0 {
+		return nil
+	}
+	cloned := make(map[string]struct{}, len(source))
+	for key := range source {
+		cloned[key] = struct{}{}
+	}
+	return cloned
 }
 
 func cloneStringMap(source map[string]string) map[string]string {

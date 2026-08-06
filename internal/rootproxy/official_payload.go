@@ -15,6 +15,10 @@ var errNonPortableCompaction = errors.New("cross-provider compaction state is no
 
 const kimiCompactionPrefix = "kimi-compaction-v1:"
 
+// officialFastServiceTier is the wire value behind the catalog's "Fast" speed
+// tier, which every stock entry advertises as service_tiers[].id.
+const officialFastServiceTier = "priority"
+
 func payloadContainsCompaction(payload []byte) bool {
 	return payloadContainsInputType(payload, "compaction")
 }
@@ -77,6 +81,33 @@ func inspectRelayCompactionProvider(encryptedContent string) relayProvider {
 		return relayProviderXAI
 	}
 	return ""
+}
+
+// applyOfficialFastServiceTier forces the ChatGPT "Fast" service tier on stock
+// turns for the models an operator opted in. Desktop expresses the tier as a
+// top-level service_tier field it only sends when the user picks Fast by hand,
+// so Root writes the same value it would have sent. The payload is returned
+// untouched for every other model, and when the tier is already selected, so an
+// unchanged body keeps its original encoding on the way upstream.
+//
+// Only turn-creating requests may carry it: /responses/compact is background
+// summarization that would spend the tier's higher usage for no latency the
+// user can perceive, and a non-create WebSocket frame is not a request at all.
+func applyOfficialFastServiceTier(payload []byte, model string, fastModels map[string]struct{}) ([]byte, error) {
+	if len(fastModels) == 0 {
+		return payload, nil
+	}
+	if _, fast := fastModels[model]; !fast {
+		return payload, nil
+	}
+	if gjson.GetBytes(payload, "service_tier").String() == officialFastServiceTier {
+		return payload, nil
+	}
+	updated, errSet := sjson.SetBytes(payload, "service_tier", officialFastServiceTier)
+	if errSet != nil {
+		return nil, fmt.Errorf("set official service tier for model %q: %w", model, errSet)
+	}
+	return updated, nil
 }
 
 // prepareOfficialPayload removes only provider-bound reasoning state that the
