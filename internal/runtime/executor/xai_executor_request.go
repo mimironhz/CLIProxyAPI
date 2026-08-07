@@ -1496,7 +1496,13 @@ func normalizeXAITool(tool gjson.Result, namespaceName string, keepImageGenerati
 	// Simplify the Codex Desktop automation schema and root unions that xAI
 	// rejects because function parameters must resolve exclusively to objects.
 	if toolType == xaiFunctionToolType && xaiFunctionParametersNeedSimplification(schemaTool, namespaceName) {
-		updatedTool, errSet := sjson.SetRawBytes(raw, "parameters", []byte(xaiSafeFunctionParameters))
+		safeParameters := xaiSafeFunctionParameters
+		if xaiIsCodexAppAutomationUpdate(schemaTool, namespaceName) {
+			// Keep mode/destination/targetThreadId guidance while dropping the hang-
+			// inducing oneOf+$ref tree. Empty additionalProperties alone is not enough.
+			safeParameters = xaiAutomationUpdateSafeParameters
+		}
+		updatedTool, errSet := sjson.SetRawBytes(raw, "parameters", []byte(safeParameters))
 		if errSet != nil {
 			return nil, false, false
 		}
