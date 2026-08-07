@@ -459,6 +459,21 @@ func xaiSchemaTypeIsObjectOnly(schemaType gjson.Result) bool {
 	return true
 }
 
+// xaiIsCodexAppAutomationUpdate reports whether the tool is the Desktop
+// codex_app.automation_update function, either nested or already flattened.
+func xaiIsCodexAppAutomationUpdate(tool gjson.Result, namespaceName string) bool {
+	if !strings.EqualFold(strings.TrimSpace(tool.Get("type").String()), xaiFunctionToolType) {
+		return false
+	}
+	toolName := strings.TrimSpace(tool.Get("name").String())
+	qualifiedAutomationName := xaiCodexAppNamespaceName + "__" + xaiAutomationUpdateToolName
+	if strings.EqualFold(toolName, qualifiedAutomationName) {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(namespaceName), xaiCodexAppNamespaceName) &&
+		strings.EqualFold(toolName, xaiAutomationUpdateToolName)
+}
+
 // xaiFunctionParametersNeedSimplification reports whether a function tool, or
 // a custom tool normalized to a function, has a schema that xAI cannot accept.
 func xaiFunctionParametersNeedSimplification(tool gjson.Result, namespaceName string) bool {
@@ -469,11 +484,7 @@ func xaiFunctionParametersNeedSimplification(tool gjson.Result, namespaceName st
 		return false
 	}
 
-	toolName := strings.TrimSpace(tool.Get("name").String())
-	qualifiedAutomationName := xaiCodexAppNamespaceName + "__" + xaiAutomationUpdateToolName
-	if isFunction && (strings.EqualFold(toolName, qualifiedAutomationName) ||
-		(strings.EqualFold(strings.TrimSpace(namespaceName), xaiCodexAppNamespaceName) &&
-			strings.EqualFold(toolName, xaiAutomationUpdateToolName))) {
+	if isFunction && xaiIsCodexAppAutomationUpdate(tool, namespaceName) {
 		return true
 	}
 

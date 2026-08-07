@@ -3273,6 +3273,22 @@ func TestNormalizeXAITools_SimplifiesCodexAppAutomationUpdateSchema(t *testing.T
 			if tool.Get("parameters.additionalProperties").Type != gjson.True {
 				t.Fatalf("automation_update parameters should allow additionalProperties: %s", paramsRaw)
 			}
+			if got := tool.Get("parameters.properties.mode.type").String(); got != "string" {
+				t.Fatalf("automation_update mode type = %q, want string; parameters=%s", got, paramsRaw)
+			}
+			modeEnum := tool.Get("parameters.properties.mode.enum").Array()
+			if len(modeEnum) != 6 {
+				t.Fatalf("automation_update mode enum = %s, want 6 values", tool.Get("parameters.properties.mode.enum").Raw)
+			}
+			if got := tool.Get("parameters.properties.targetThreadId.type").String(); got != "string" {
+				t.Fatalf("automation_update targetThreadId type = %q, want string; parameters=%s", got, paramsRaw)
+			}
+			if got := tool.Get("parameters.properties.destination.type").String(); got != "string" {
+				t.Fatalf("automation_update destination type = %q, want string; parameters=%s", got, paramsRaw)
+			}
+			if got := tool.Get("parameters.required.0").String(); got != "mode" {
+				t.Fatalf("automation_update required = %s, want [mode]", tool.Get("parameters.required").Raw)
+			}
 			if tool.Get("strict").Type != gjson.False {
 				t.Fatalf("automation_update strict = %s, want false", tool.Get("strict").Raw)
 			}
@@ -3315,6 +3331,15 @@ func TestNormalizeXAITools_SimplifiesFlattenedAndInvalidRootSchemas(t *testing.T
 		}
 		if tool.Get("strict").Type != gjson.False {
 			t.Fatalf("tools.%d strict = %s, want false; body=%s", index, tool.Get("strict").Raw, string(out))
+		}
+		if wantName == "codex_app__automation_update" {
+			if got := tool.Get("parameters.properties.mode.type").String(); got != "string" {
+				t.Fatalf("automation_update mode type = %q, want string; body=%s", got, string(out))
+			}
+			continue
+		}
+		if tool.Get("parameters.properties").Exists() && len(tool.Get("parameters.properties").Map()) != 0 {
+			t.Fatalf("tools.%d should use empty simplified properties: %s", index, string(out))
 		}
 	}
 
@@ -3618,6 +3643,24 @@ func TestNormalizeXAITools_PreservesUnrelatedSchemas(t *testing.T) {
 				t.Fatalf("additionalProperties changed: %s", string(out))
 			}
 		})
+	}
+}
+
+func TestXAIIsCodexAppAutomationUpdate(t *testing.T) {
+	nested := gjson.Parse(`{"type":"function","name":"automation_update"}`)
+	if !xaiIsCodexAppAutomationUpdate(nested, "codex_app") {
+		t.Fatal("nested codex_app.automation_update should match")
+	}
+	if xaiIsCodexAppAutomationUpdate(nested, "calendar") {
+		t.Fatal("automation_update outside codex_app should not match")
+	}
+	flattened := gjson.Parse(`{"type":"function","name":"codex_app__automation_update"}`)
+	if !xaiIsCodexAppAutomationUpdate(flattened, "") {
+		t.Fatal("flattened codex_app__automation_update should match")
+	}
+	custom := gjson.Parse(`{"type":"custom","name":"automation_update"}`)
+	if xaiIsCodexAppAutomationUpdate(custom, "codex_app") {
+		t.Fatal("custom tool should not match function-only helper")
 	}
 }
 

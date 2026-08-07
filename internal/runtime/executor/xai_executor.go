@@ -37,20 +37,25 @@ const (
 	// emits SSE when that schema is present, so Desktop hangs on "thinking".
 	xaiCodexAppNamespaceName    = "codex_app"
 	xaiAutomationUpdateToolName = "automation_update"
-	// Permissive placeholder schema: keeps the tool callable without the hang.
-	xaiSafeFunctionParameters   = `{"type":"object","properties":{},"additionalProperties":true}`
-	xaiImagesGenerationsPath    = "/images/generations"
-	xaiImagesEditsPath          = "/images/edits"
-	xaiDefaultImageEndpointPath = xaiImagesGenerationsPath
-	xaiVideosGenerationsPath    = "/videos/generations"
-	xaiVideosEditsPath          = "/videos/edits"
-	xaiVideosExtensionsPath     = "/videos/extensions"
-	xaiVideosPath               = "/videos"
-	xaiIdempotencyKeyMetaKey    = "idempotency_key"
-	xaiComposerModelPrefix      = "grok-composer-"
-	xaiTokenAuthHeader          = "X-XAI-Token-Auth"
-	xaiTokenAuthValue           = "xai-grok-cli"
-	xaiClientVersionHeader      = "x-grok-client-version"
+	// Permissive placeholder for generic invalid root unions that xAI rejects.
+	xaiSafeFunctionParameters = `{"type":"object","properties":{},"additionalProperties":true}`
+	// Compact codex_app.automation_update schema: keep the mode discriminator and
+	// common fields without the large oneOf+$ref tree that hangs xAI. An empty
+	// additionalProperties object left the model free to invent nested args and
+	// produced "mode: Invalid discriminator" loops in Desktop.
+	xaiAutomationUpdateSafeParameters = `{"type":"object","properties":{"mode":{"type":"string","enum":["view","create","suggested_create","update","suggested_update","delete"],"description":"Operation discriminator. Must be a flat string; never nest other fields under mode."},"id":{"type":"string","description":"Existing automation id for view, update, suggested_update, or delete."},"name":{"type":"string","description":"Automation display name."},"prompt":{"type":"string","description":"Wake prompt for the automation."},"rrule":{"type":"string","description":"Recurrence rule, for example FREQ=MINUTELY;INTERVAL=15."},"status":{"type":"string","enum":["ACTIVE","PAUSED"]},"kind":{"type":"string","enum":["heartbeat","cron"],"description":"Prefer heartbeat unless the user asks for a standalone cron job."},"destination":{"type":"string","enum":["local","thread","worktree"],"description":"For heartbeat create, use thread for the current thread or provide targetThreadId."},"targetThreadId":{"type":"string","description":"Heartbeat target thread id. Required for create unless destination is thread."},"projectId":{"type":"string","description":"Cron project id from list_projects."},"model":{"type":"string"},"reasoningEffort":{"type":"string","enum":["none","minimal","low","medium","high","xhigh","max","ultra"]},"notificationPolicy":{"description":"Use failed_runs_only to mute success notifications, or null to unmute."},"executionEnvironment":{"type":"string","enum":["local","worktree"]}},"required":["mode"],"additionalProperties":true}`
+	xaiImagesGenerationsPath          = "/images/generations"
+	xaiImagesEditsPath                = "/images/edits"
+	xaiDefaultImageEndpointPath       = xaiImagesGenerationsPath
+	xaiVideosGenerationsPath          = "/videos/generations"
+	xaiVideosEditsPath                = "/videos/edits"
+	xaiVideosExtensionsPath           = "/videos/extensions"
+	xaiVideosPath                     = "/videos"
+	xaiIdempotencyKeyMetaKey          = "idempotency_key"
+	xaiComposerModelPrefix            = "grok-composer-"
+	xaiTokenAuthHeader                = "X-XAI-Token-Auth"
+	xaiTokenAuthValue                 = "xai-grok-cli"
+	xaiClientVersionHeader            = "x-grok-client-version"
 	// Keep in sync with the current Grok CLI client version that chat-proxy expects.
 	xaiClientVersionValue = "0.2.93"
 	// xaiUsingAPIAttr enables the official API path for non-media HTTP chat.
