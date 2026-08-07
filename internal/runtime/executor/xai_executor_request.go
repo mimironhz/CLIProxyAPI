@@ -730,10 +730,11 @@ func xaiToolChoiceMatchesAvailable(choice gjson.Result, available map[xaiToolCho
 	return ok
 }
 
-// applyXAIViewImageToolAlias exposes Codex Desktop's image viewer under the
-// native name Grok reliably selects in long tool-heavy sessions. The alias is
-// deliberately exact and collision-free so a client-defined read_file tool is
-// never shadowed or rewritten.
+// applyXAIViewImageToolAlias exposes Codex Desktop's image viewer under
+// inspect_image, a name Grok selects reliably for visual inspection without the
+// general-file-reader pull of read_file. The alias is deliberately exact and
+// collision-free so a client-defined inspect_image tool is never shadowed or
+// rewritten.
 func applyXAIViewImageToolAlias(body []byte) ([]byte, bool) {
 	if !gjson.ValidBytes(body) {
 		return body, false
@@ -742,7 +743,7 @@ func applyXAIViewImageToolAlias(body []byte) ([]byte, bool) {
 	if !tools.IsArray() {
 		return body, false
 	}
-	if xaiInputHasUnnamespacedToolCall(body, xaiReadFileToolName) {
+	if xaiInputHasUnnamespacedToolCall(body, xaiInspectImageToolName) {
 		return body, false
 	}
 
@@ -750,7 +751,7 @@ func applyXAIViewImageToolAlias(body []byte) ([]byte, bool) {
 	viewImageCount := 0
 	for index, tool := range tools.Array() {
 		switch strings.TrimSpace(tool.Get("name").String()) {
-		case xaiReadFileToolName:
+		case xaiInspectImageToolName:
 			return body, false
 		case xaiViewImageToolName:
 			viewImageCount++
@@ -764,11 +765,11 @@ func applyXAIViewImageToolAlias(body []byte) ([]byte, bool) {
 	}
 
 	original := body
-	updated, errSet := sjson.SetBytes(body, fmt.Sprintf("tools.%d.name", viewImageIndex), xaiReadFileToolName)
+	updated, errSet := sjson.SetBytes(body, fmt.Sprintf("tools.%d.name", viewImageIndex), xaiInspectImageToolName)
 	if errSet != nil {
 		return original, false
 	}
-	updated, ok := rewriteXAIToolChoiceFunctionName(updated, xaiViewImageToolName, xaiReadFileToolName)
+	updated, ok := rewriteXAIToolChoiceFunctionName(updated, xaiViewImageToolName, xaiInspectImageToolName)
 	if !ok {
 		return original, false
 	}
@@ -897,7 +898,7 @@ func rewriteXAIToolChoiceFunctionNameAtPath(body []byte, path, fromName, toName 
 // with the aliased declaration. Function outputs reference call IDs only, so
 // they require no rewrite.
 func rewriteXAIViewImageInputCalls(body []byte) ([]byte, bool) {
-	return rewriteXAIInputFunctionCallName(body, xaiViewImageToolName, xaiReadFileToolName)
+	return rewriteXAIInputFunctionCallName(body, xaiViewImageToolName, xaiInspectImageToolName)
 }
 
 func rewriteXAIInputFunctionCallName(body []byte, fromName, toName string) ([]byte, bool) {
@@ -928,7 +929,7 @@ func xaiViewImageClientTranscriptRequest(body []byte, enabled bool) []byte {
 	if !enabled {
 		return body
 	}
-	restored, ok := rewriteXAIInputFunctionCallName(body, xaiReadFileToolName, xaiViewImageToolName)
+	restored, ok := rewriteXAIInputFunctionCallName(body, xaiInspectImageToolName, xaiViewImageToolName)
 	if !ok {
 		return body
 	}

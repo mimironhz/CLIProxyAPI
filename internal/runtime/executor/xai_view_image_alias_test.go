@@ -40,10 +40,10 @@ func TestPrepareXAIResponsesAliasesCapturedCodexViewImageContract(t *testing.T) 
 	if !prepared.viewImageToolAlias {
 		t.Fatal("captured Codex view_image contract did not activate the alias")
 	}
-	if got := countXAITestTools(prepared.body, xaiReadFileToolName); got != 1 {
-		t.Fatalf("prepared read_file count = %d, want 1; body=%s", got, prepared.body)
+	if got := countXAITestTools(prepared.body, xaiInspectImageToolName); got != 1 {
+		t.Fatalf("prepared inspect_image count = %d, want 1; body=%s", got, prepared.body)
 	}
-	alias := findXAITestTool(prepared.body, xaiReadFileToolName)
+	alias := findXAITestTool(prepared.body, xaiInspectImageToolName)
 	if got := alias.Get("parameters.required.0").String(); got != "path" {
 		t.Fatalf("alias required key = %q, want path; tool=%s", got, alias.Raw)
 	}
@@ -81,17 +81,17 @@ func TestApplyXAIViewImageToolAliasRewritesOnlyNames(t *testing.T) {
 		t.Fatal("rewriteXAIViewImageInputCalls() failed")
 	}
 
-	if got := gjson.GetBytes(aliased, "tools.1.name").String(); got != xaiReadFileToolName {
-		t.Fatalf("tools.1.name = %q, want %q; body=%s", got, xaiReadFileToolName, aliased)
+	if got := gjson.GetBytes(aliased, "tools.1.name").String(); got != xaiInspectImageToolName {
+		t.Fatalf("tools.1.name = %q, want %q; body=%s", got, xaiInspectImageToolName, aliased)
 	}
-	if got := gjson.GetBytes(aliased, "tool_choice.tools.0.name").String(); got != xaiReadFileToolName {
-		t.Fatalf("allowed tool name = %q, want %q; body=%s", got, xaiReadFileToolName, aliased)
+	if got := gjson.GetBytes(aliased, "tool_choice.tools.0.name").String(); got != xaiInspectImageToolName {
+		t.Fatalf("allowed tool name = %q, want %q; body=%s", got, xaiInspectImageToolName, aliased)
 	}
 	if got := gjson.GetBytes(aliased, "tool_choice.tools.1.name").String(); got != "exec_command" {
 		t.Fatalf("unrelated allowed tool name = %q, want exec_command", got)
 	}
-	if got := gjson.GetBytes(aliased, "input.1.name").String(); got != xaiReadFileToolName {
-		t.Fatalf("historical call name = %q, want %q", got, xaiReadFileToolName)
+	if got := gjson.GetBytes(aliased, "input.1.name").String(); got != xaiInspectImageToolName {
+		t.Fatalf("historical call name = %q, want %q", got, xaiInspectImageToolName)
 	}
 	if got := gjson.GetBytes(aliased, "input.1.arguments").String(); got != `{"path":"/tmp/test.png","detail":"high"}` {
 		t.Fatalf("historical arguments changed: %q", got)
@@ -120,8 +120,8 @@ func TestApplyXAIViewImageToolAliasRewritesForcedChoice(t *testing.T) {
 	if !enabled {
 		t.Fatal("alias not enabled")
 	}
-	if got := gjson.GetBytes(aliased, "tool_choice.name").String(); got != xaiReadFileToolName {
-		t.Fatalf("tool_choice.name = %q, want %q", got, xaiReadFileToolName)
+	if got := gjson.GetBytes(aliased, "tool_choice.name").String(); got != xaiInspectImageToolName {
+		t.Fatalf("tool_choice.name = %q, want %q", got, xaiInspectImageToolName)
 	}
 }
 
@@ -129,15 +129,15 @@ func TestApplyXAIViewImageToolAliasCollisionGuards(t *testing.T) {
 	viewImageTool := testXAICodexViewImageTool(t)
 	readFileTool := mustMarshalXAITestJSON(t, map[string]any{
 		"type":       "function",
-		"name":       xaiReadFileToolName,
+		"name":       xaiInspectImageToolName,
 		"parameters": map[string]any{"type": "object"},
 	})
 	tests := map[string][]byte{
-		"declared read_file": mustMarshalXAITestJSON(t, map[string]any{
+		"declared inspect_image": mustMarshalXAITestJSON(t, map[string]any{
 			"tools": []any{json.RawMessage(viewImageTool), json.RawMessage(readFileTool)},
 		}),
-		"historical read_file": testXAIViewImageRequest(t, []any{
-			map[string]any{"type": "function_call", "name": xaiReadFileToolName, "call_id": "old", "arguments": `{}`},
+		"historical inspect_image": testXAIViewImageRequest(t, []any{
+			map[string]any{"type": "function_call", "name": xaiInspectImageToolName, "call_id": "old", "arguments": `{}`},
 		}),
 		"duplicate view_image": mustMarshalXAITestJSON(t, map[string]any{
 			"tools": []any{json.RawMessage(viewImageTool), json.RawMessage(viewImageTool)},
@@ -161,7 +161,7 @@ func TestApplyXAIViewImageToolAliasCollisionGuards(t *testing.T) {
 }
 
 func TestPrepareXAIResponsesSkipsViewImageAliasForToolSearchReadFileCollision(t *testing.T) {
-	body := []byte(`{"model":"grok-4.5","tools":[],"input":[{"type":"tool_search_output","tools":[{"type":"function","name":"read_file","description":"Client reader","parameters":{"type":"object","properties":{}}}]}]}`)
+	body := []byte(`{"model":"grok-4.5","tools":[],"input":[{"type":"tool_search_output","tools":[{"type":"function","name":"inspect_image","description":"Client reader","parameters":{"type":"object","properties":{}}}]}]}`)
 	var errSet error
 	body, errSet = sjson.SetRawBytes(body, "tools.-1", []byte(capturedXAICodexViewImageToolJSON))
 	if errSet != nil {
@@ -177,19 +177,19 @@ func TestPrepareXAIResponsesSkipsViewImageAliasForToolSearchReadFileCollision(t 
 		t.Fatalf("prepareResponsesRequest() error = %v", errPrepare)
 	}
 	if prepared.viewImageToolAlias {
-		t.Fatal("tool_search-loaded read_file collision unexpectedly activated alias")
+		t.Fatal("tool_search-loaded inspect_image collision unexpectedly activated alias")
 	}
 	if got := countXAITestTools(prepared.body, xaiViewImageToolName); got != 1 {
 		t.Fatalf("prepared view_image count = %d, want 1; body=%s", got, prepared.body)
 	}
-	if got := countXAITestTools(prepared.body, xaiReadFileToolName); got != 1 {
-		t.Fatalf("prepared read_file count = %d, want 1; body=%s", got, prepared.body)
+	if got := countXAITestTools(prepared.body, xaiInspectImageToolName); got != 1 {
+		t.Fatalf("prepared inspect_image count = %d, want 1; body=%s", got, prepared.body)
 	}
 }
 
 func TestXAIViewImageClientTranscriptRequestKeepsReplayAliasable(t *testing.T) {
 	aliasedRequest := testXAIViewImageRequest(t, []any{
-		map[string]any{"type": "function_call", "name": xaiReadFileToolName, "call_id": "call_image", "arguments": `{"path":"/tmp/test.png"}`},
+		map[string]any{"type": "function_call", "name": xaiInspectImageToolName, "call_id": "call_image", "arguments": `{"path":"/tmp/test.png"}`},
 		map[string]any{"type": "function_call_output", "call_id": "call_image", "output": "ok"},
 	})
 	clientRequest := xaiViewImageClientTranscriptRequest(aliasedRequest, true)
@@ -214,8 +214,8 @@ func TestXAIViewImageClientTranscriptRequestKeepsReplayAliasable(t *testing.T) {
 	if !prepared.viewImageToolAlias {
 		t.Fatal("replayed client transcript disabled its own alias")
 	}
-	if got := gjson.GetBytes(prepared.body, "input.0.name").String(); got != xaiReadFileToolName {
-		t.Fatalf("replayed upstream call name = %q, want %q", got, xaiReadFileToolName)
+	if got := gjson.GetBytes(prepared.body, "input.0.name").String(); got != xaiInspectImageToolName {
+		t.Fatalf("replayed upstream call name = %q, want %q", got, xaiInspectImageToolName)
 	}
 }
 
@@ -224,14 +224,14 @@ func TestRestoreXAIViewImageToolAlias(t *testing.T) {
 	event := mustMarshalXAITestJSON(t, map[string]any{
 		"type": "response.completed",
 		"response": map[string]any{
-			"tool_choice": map[string]any{"type": "function", "name": xaiReadFileToolName},
+			"tool_choice": map[string]any{"type": "function", "name": xaiInspectImageToolName},
 			"tools": []any{map[string]any{
-				"type": "function", "name": xaiReadFileToolName,
+				"type": "function", "name": xaiInspectImageToolName,
 				"description": xaiViewImageDescription,
 				"parameters":  gjson.ParseBytes(testXAICodexViewImageTool(t)).Get("parameters").Value(),
 			}},
 			"output": []any{
-				map[string]any{"type": "function_call", "name": xaiReadFileToolName, "call_id": "call_image", "arguments": arguments},
+				map[string]any{"type": "function_call", "name": xaiInspectImageToolName, "call_id": "call_image", "arguments": arguments},
 				map[string]any{"type": "function_call", "name": "exec_command", "call_id": "call_exec", "arguments": `{"cmd":"pwd"}`},
 			},
 		},
@@ -257,11 +257,11 @@ func TestRestoreXAIViewImageToolAlias(t *testing.T) {
 		t.Fatalf("disabled restore changed event: %s", got)
 	}
 
-	added := []byte(`{"type":"response.output_item.added","item":{"type":"function_call","name":"read_file","arguments":""}}`)
+	added := []byte(`{"type":"response.output_item.added","item":{"type":"function_call","name":"inspect_image","arguments":""}}`)
 	if got := gjson.GetBytes(restoreXAIViewImageToolAlias(added, true), "item.name").String(); got != xaiViewImageToolName {
 		t.Fatalf("added item name = %q, want %q", got, xaiViewImageToolName)
 	}
-	direct := []byte(`{"output":[{"type":"function_call","name":"read_file","arguments":"{\"path\":\"/tmp/test.png\"}"}]}`)
+	direct := []byte(`{"output":[{"type":"function_call","name":"inspect_image","arguments":"{\"path\":\"/tmp/test.png\"}"}]}`)
 	if got := gjson.GetBytes(restoreXAIViewImageToolAlias(direct, true), "output.0.name").String(); got != xaiViewImageToolName {
 		t.Fatalf("direct output call name = %q, want %q", got, xaiViewImageToolName)
 	}
@@ -269,7 +269,7 @@ func TestRestoreXAIViewImageToolAlias(t *testing.T) {
 	if got := restoreXAIViewImageToolAlias(delta, true); !bytes.Equal(got, delta) {
 		t.Fatalf("argument delta changed: got=%s want=%s", got, delta)
 	}
-	custom := []byte(`{"type":"response.output_item.done","item":{"type":"custom_tool_call","name":"read_file","input":"raw"}}`)
+	custom := []byte(`{"type":"response.output_item.done","item":{"type":"custom_tool_call","name":"inspect_image","input":"raw"}}`)
 	if got := restoreXAIViewImageToolAlias(custom, true); !bytes.Equal(got, custom) {
 		t.Fatalf("custom tool call changed: got=%s want=%s", got, custom)
 	}
@@ -287,12 +287,12 @@ func TestXAIExecutorViewImageAliasRoundTripStream(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		arguments := `{"path":"/tmp/test.png","detail":"high"}`
 		_, _ = fmt.Fprintln(w, `event: response.output_item.added`)
-		_, _ = fmt.Fprintln(w, `data: {"type":"response.output_item.added","output_index":0,"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"read_file","arguments":"","status":"in_progress"}}`)
+		_, _ = fmt.Fprintln(w, `data: {"type":"response.output_item.added","output_index":0,"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"inspect_image","arguments":"","status":"in_progress"}}`)
 		_, _ = fmt.Fprintln(w)
 		_, _ = fmt.Fprintln(w, `event: response.function_call_arguments.delta`)
 		_, _ = fmt.Fprintf(w, "data: %s\n\n", mustMarshalXAITestJSON(t, map[string]any{"type": "response.function_call_arguments.delta", "output_index": 0, "item_id": "fc_1", "delta": arguments}))
 		_, _ = fmt.Fprintln(w, `event: response.output_item.done`)
-		_, _ = fmt.Fprintf(w, "data: %s\n\n", mustMarshalXAITestJSON(t, map[string]any{"type": "response.output_item.done", "output_index": 0, "item": map[string]any{"id": "fc_1", "type": "function_call", "call_id": "call_1", "name": xaiReadFileToolName, "arguments": arguments, "status": "completed"}}))
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", mustMarshalXAITestJSON(t, map[string]any{"type": "response.output_item.done", "output_index": 0, "item": map[string]any{"id": "fc_1", "type": "function_call", "call_id": "call_1", "name": xaiInspectImageToolName, "arguments": arguments, "status": "completed"}}))
 		_, _ = fmt.Fprintln(w, `event: response.completed`)
 		_, _ = fmt.Fprintln(w, `data: {"type":"response.completed","response":{"id":"resp_1","object":"response","status":"completed","model":"grok-4.5","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`)
 		_, _ = fmt.Fprintln(w)
@@ -321,19 +321,19 @@ func TestXAIExecutorViewImageAliasRoundTripStream(t *testing.T) {
 		stream.Write(chunk.Payload)
 		stream.WriteByte('\n')
 	}
-	if got := countXAITestTools(upstreamBody, xaiReadFileToolName); got != 1 {
-		t.Fatalf("upstream read_file count = %d, want 1; body=%s", got, upstreamBody)
+	if got := countXAITestTools(upstreamBody, xaiInspectImageToolName); got != 1 {
+		t.Fatalf("upstream inspect_image count = %d, want 1; body=%s", got, upstreamBody)
 	}
 	if got := countXAITestTools(upstreamBody, xaiViewImageToolName); got != 0 {
 		t.Fatalf("upstream view_image count = %d, want 0; body=%s", got, upstreamBody)
 	}
-	upstreamAlias := findXAITestTool(upstreamBody, xaiReadFileToolName)
+	upstreamAlias := findXAITestTool(upstreamBody, xaiInspectImageToolName)
 	if !jsonEqualXAITest(upstreamAlias.Get("parameters").Raw, gjson.GetBytes(testXAICodexViewImageTool(t), "parameters").Raw) {
 		t.Fatalf("upstream alias parameters changed: %s", upstreamAlias.Raw)
 	}
 
 	streamText := stream.String()
-	if strings.Contains(streamText, `"name":"read_file"`) {
+	if strings.Contains(streamText, `"name":"inspect_image"`) {
 		t.Fatalf("upstream alias leaked downstream: %s", streamText)
 	}
 	if !strings.Contains(streamText, `"name":"view_image"`) {
@@ -354,7 +354,7 @@ func TestXAIExecutorViewImageAliasRoundTripNonStream(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = fmt.Fprintln(w, `data: {"type":"response.output_item.done","output_index":0,"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"read_file","arguments":"{\"path\":\"/tmp/test.png\",\"detail\":\"original\"}","status":"completed"}}`)
+		_, _ = fmt.Fprintln(w, `data: {"type":"response.output_item.done","output_index":0,"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"inspect_image","arguments":"{\"path\":\"/tmp/test.png\",\"detail\":\"original\"}","status":"completed"}}`)
 		_, _ = fmt.Fprintln(w)
 		completed := mustMarshalXAITestJSON(t, map[string]any{
 			"type": "response.completed",
@@ -381,10 +381,10 @@ func TestXAIExecutorViewImageAliasRoundTripNonStream(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
-	if got := countXAITestTools(upstreamBody, xaiReadFileToolName); got != 1 {
-		t.Fatalf("upstream read_file count = %d, want 1; body=%s", got, upstreamBody)
+	if got := countXAITestTools(upstreamBody, xaiInspectImageToolName); got != 1 {
+		t.Fatalf("upstream inspect_image count = %d, want 1; body=%s", got, upstreamBody)
 	}
-	if strings.Contains(string(response.Payload), `"name":"read_file"`) {
+	if strings.Contains(string(response.Payload), `"name":"inspect_image"`) {
 		t.Fatalf("upstream alias leaked downstream: %s", response.Payload)
 	}
 	if !strings.Contains(string(response.Payload), `"name":"view_image"`) {

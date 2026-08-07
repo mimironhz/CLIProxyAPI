@@ -341,7 +341,7 @@ func restoreXAIViewImageToolAlias(data []byte, enabled bool) []byte {
 			path := fmt.Sprintf("%s.%d", arrayPath, index)
 			tool := gjson.GetBytes(data, path)
 			if tool.Get("type").String() != xaiFunctionToolType ||
-				tool.Get("name").String() != xaiReadFileToolName {
+				tool.Get("name").String() != xaiInspectImageToolName {
 				continue
 			}
 			updated, errSet := sjson.SetBytes(data, path+".name", xaiViewImageToolName)
@@ -352,7 +352,7 @@ func restoreXAIViewImageToolAlias(data []byte, enabled bool) []byte {
 		}
 	}
 	for _, choicePath := range []string{"response.tool_choice", "tool_choice"} {
-		data, ok = rewriteXAIToolChoiceFunctionNameAtPath(data, choicePath, xaiReadFileToolName, xaiViewImageToolName)
+		data, ok = rewriteXAIToolChoiceFunctionNameAtPath(data, choicePath, xaiInspectImageToolName, xaiViewImageToolName)
 		if !ok {
 			return original
 		}
@@ -364,7 +364,7 @@ func rewriteXAIViewImageFunctionCallAtPath(data []byte, path string) ([]byte, bo
 	item := gjson.GetBytes(data, path)
 	if !item.Exists() || item.Get("type").String() != "function_call" ||
 		strings.TrimSpace(item.Get("namespace").String()) != "" ||
-		item.Get("name").String() != xaiReadFileToolName {
+		item.Get("name").String() != xaiInspectImageToolName {
 		return data, true
 	}
 	updated, errSet := sjson.SetBytes(data, path+".name", xaiViewImageToolName)

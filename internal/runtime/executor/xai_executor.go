@@ -28,7 +28,7 @@ const (
 	xaiWebSearchToolType          = "web_search"
 	xaiXSearchToolType            = "x_search"
 	xaiViewImageToolName          = "view_image"
-	xaiReadFileToolName           = "read_file"
+	xaiInspectImageToolName       = "inspect_image"
 	xaiViewImageDescription       = "View a local image file from the filesystem when visual inspection is needed. Use this for images already available on disk."
 	xaiViewImagePathDescription   = "Local filesystem path to an image file."
 	xaiViewImageDetailDescription = "Image detail level. Defaults to `high`; use `original` to preserve exact resolution."
