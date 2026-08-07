@@ -17,61 +17,151 @@ remains active, it exposes the Desktop bearer-validation boundary to OrbStack.
 ## Cutover candidate
 
 Use the exact private deployment directory recorded in the handoff manifest.
-The current Root-only bundle contains one versioned binary, a mode-`0600` config
-and `.env`, one inactive launchd plist, immutable dependency/rollback references,
-and verification evidence. It contains no live logs. Verify every SHA-256 in
-`manifest.sha256` before loading a job. Do not rebuild or edit an artifact in
-place; create a new versioned directory instead.
+Verify every SHA-256 in `manifest.sha256` before loading a job. Do not rebuild
+or edit an artifact in place; create a new versioned directory instead.
 
-Frozen Root-only readable-logging candidate:
+### Current handoff (Relay-only): xAI `view_image` → `inspect_image`
+
+Frozen Relay-only candidate:
+
+```text
+/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260807T031713Z-90e19091
+```
+
+Scope:
+
+- **Restart only** `com.user.cliproxy-relay`
+- **Do not touch** `com.user.cliproxy-root` or `com.user.cliproxy-orbstack-relay-v2`
+- Live Root remains `20260805T052624Z-b6ff2fbc` (multi-agent v2 advertisement)
+- Rollback Relay is `20260731T093906Z-d12d4033` (previous live Relay)
+
+Change:
+
+- Codex Desktop's local image tool is still named `view_image` on the client
+- For Grok/xAI upstream only, the proxy aliases it to `inspect_image` (was `read_file`)
+- Responses restore `inspect_image` back to `view_image` so Desktop executes the real tool
+- `relay.yaml` is carried forward unchanged from the previous live Relay bundle
+
+Defect this fixes:
+
+With the old alias target `read_file`, Grok treated the image tool as a general
+file reader in tool-heavy sessions. Desktop then executed `view_image` on
+`.md`/`.ts` paths and showed broken **Inspected image** cards (task
+`019fda1e-35ab-7630-a941-fd6f826e2f3e`). A live `grok-4.5` probe showed
+`inspect_image` selects for PNG inspection without that misuse pattern, while
+bare `view_image` without an alias is still unreliable.
+
+### Relay-only activation (run from external Terminal)
+
+Do **not** run this from a Codex task whose traffic traverses the serving proxy.
+Activate only after the preparing task has finished and you have verified the
+candidate hashes.
+
+```bash
+RELAY_CANDIDATE=/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260807T031713Z-90e19091
+RELAY_ROLLBACK=/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260731T093906Z-d12d4033
+ROOT_LIVE=/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260805T052624Z-b6ff2fbc
+```
+
+1. Verify the candidate and immutable references:
+
+   ```bash
+   (cd "$RELAY_CANDIDATE" && shasum -a 256 -c manifest.sha256)
+   (cd "$RELAY_ROLLBACK" && shasum -a 256 -c manifest.sha256)
+   # Root is not restarted; confirm the live Root binary still matches the pin.
+   shasum -a 256 "$ROOT_LIVE/bin/root-proxy" "$RELAY_CANDIDATE/bin/root-proxy"
+   ```
+
+   Expect the two `root-proxy` hashes to be identical
+   (`b6ff2fbcb5473773f7d3eb0507049ce343a6624af9eaecc64b45b00ab35c46b0`).
+
+2. Record pre-cutover PIDs and listeners. Require Root on `127.0.0.1:8317`, Relay
+   on `127.0.0.1:8318`, and the only bridge on `192.168.139.3:8318`:
+
+   ```bash
+   lsof -nP -iTCP@127.0.0.1:8317 -sTCP:LISTEN
+   lsof -nP -iTCP@127.0.0.1:8318 -sTCP:LISTEN
+   lsof -nP -iTCP@192.168.139.3:8318 -sTCP:LISTEN
+   ps -p "$(lsof -nP -iTCP@127.0.0.1:8317 -sTCP:LISTEN -t)" -o pid=,command=
+   ps -p "$(lsof -nP -iTCP@127.0.0.1:8318 -sTCP:LISTEN -t)" -o pid=,command=
+   ```
+
+3. Replace only Relay:
+
+   ```bash
+   ROOT_PID=$(lsof -nP -iTCP@127.0.0.1:8317 -sTCP:LISTEN -t)
+   BRIDGE_PID=$(lsof -nP -iTCP@192.168.139.3:8318 -sTCP:LISTEN -t)
+   launchctl bootout "gui/$(id -u)/com.user.cliproxy-relay"
+   test -z "$(lsof -nP -iTCP@127.0.0.1:8318 -sTCP:LISTEN)"
+   install -m 600 "$RELAY_CANDIDATE/launchd/com.user.cliproxy-relay.plist" \
+     "$HOME/Library/LaunchAgents/com.user.cliproxy-relay.plist"
+   launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.user.cliproxy-relay.plist"
+   ```
+
+4. Verify identity and topology:
+
+   ```bash
+   # New Relay binary/config
+   shasum -a 256 "$(plutil -extract ProgramArguments.0 raw -o - "$HOME/Library/LaunchAgents/com.user.cliproxy-relay.plist")"
+   # Expect: 75bc1116f02f4a3aaef730ec3fbb37c3f8b027042c21cb0cdb9a218acd7f2d40
+
+   # Root + bridge PIDs must be unchanged
+   test "$(lsof -nP -iTCP@127.0.0.1:8317 -sTCP:LISTEN -t)" = "$ROOT_PID"
+   test "$(lsof -nP -iTCP@192.168.139.3:8318 -sTCP:LISTEN -t)" = "$BRIDGE_PID"
+
+   # Catalog through Root (Desktop path)
+   curl -fsS -H 'Authorization: Bearer desktop-preflight' \
+     'http://127.0.0.1:8317/v1/models?client_version=0.146.0' \
+     | jq -r '.models[].slug'
+
+   # Direct Relay smoke: grok-4.5 must complete
+   set -a; . "$ROOT_LIVE/root/.env"; set +a
+   curl -fsSN -H "Authorization: Bearer $CPA_RELAY_API_KEY" \
+     -H 'Content-Type: application/json' \
+     --data '{"model":"grok-4.5","stream":true,"input":"Reply exactly RELAY_READY_OK."}' \
+     http://127.0.0.1:8318/v1/responses | rg -q '"type":"response.completed"'
+   ```
+
+5. Alias acceptance (Desktop or authenticated Relay):
+
+   - On a `grok-4.5` Desktop turn, ask the agent to visually inspect a real local
+     PNG with `view_image`.
+   - Confirm the client still records the tool name as `view_image` (restore path).
+   - Optional deep check with temporary `request-log: true` on Relay: upstream
+     tools array should show `inspect_image`, never `read_file` for this alias.
+   - Regression: ask the agent to open a `SKILL.md` / source file. It should use
+     shell/`exec_command` (or another text path), **not** `view_image`.
+
+6. If Relay verification fails, roll back Relay only:
+
+   ```bash
+   launchctl bootout "gui/$(id -u)/com.user.cliproxy-relay"
+   install -m 600 "$RELAY_ROLLBACK/launchd/com.user.cliproxy-relay.plist" \
+     "$HOME/Library/LaunchAgents/com.user.cliproxy-relay.plist"
+   launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.user.cliproxy-relay.plist"
+   ```
+
+   Reverify the rollback Relay binary hash
+   (`8e3ebb12efe844ec2dfd5edbefbec87c0ba311961932c4fcf890f16994645426`) and that
+   Root/bridge PIDs never changed.
+
+### Previous Root-only multi-agent v2 candidate (already live)
+
+```text
+/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260805T052624Z-b6ff2fbc
+```
+
+This Root-only bundle remains the live Root process. It is not part of the
+Relay activation above; it is listed so rollback and dependency pins stay
+discoverable.
+
+### Historical Root-only readable-logging candidate
 
 ```text
 /Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260730T070219Z-c7a1cca9
 ```
 
-This bundle changes Root only. It contains no Relay binary, config, credential,
-or mutable auth state. It pins the running Relay dependency
-`20260730T063922Z-33d64b1e` and the Root rollback
-`20260730T051458Z-30d98ff9` by immutable manifest and artifact hashes. At the
-time of writing, Root still serves from the rollback candidate, while Relay and
-the OrbStack bridge remain live and must not be restarted for this upgrade.
-
-The pinned Relay dependency added `remote-management` to `relay.yaml`. Without a
-management secret the API routes are never registered — `internal/api/server.go`
-only calls `registerManagementRoutes()` when
-`cfg.RemoteManagement.SecretKey != "" || MANAGEMENT_PASSWORD || --tui`. Because
-`/management.html` is served unconditionally, the symptom of omitting it is a
-control panel that loads and then fails login with `HTTP 404: Management API not
-found`. Root exposes no management surface at all, so `8318` is the only host
-for it. It also repoints `auth-dir` into its own directory so the superseded
-bundle is not mutated by credential refreshes.
-
-**`allow-remote: false` does not confine management to this host.** The OrbStack
-socat bridge terminates the VM's connection and opens a fresh loopback one, so
-the Relay sees every bridged request as `127.0.0.1` and treats it as a local
-client. Verified: with the management key, `/v0/management/config` returns `200`
-from the OrbStack VM. Management is therefore reachable from any OrbStack VM and
-is guarded only by the bcrypt secret. This was accepted knowingly. Two
-consequences follow. The secret is the entire boundary, so it must stay strong
-and out of the VM's reach. And `AuthenticateManagementKey` bans by client IP
-after 5 failures for 30 minutes, so bridged brute-force attempts are attributed
-to `127.0.0.1` and will lock out local administration too. To get a genuinely
-loopback-only window, boot out `com.user.cliproxy-orbstack-relay-v2` first.
-
-The generated password is stored mode `0600`, outside the tracked manifest, at
-`relay/management-password.txt`. Move it into a password manager and remove the
-file. Note that `relay/auth/kimi-apikey.json` is manifest-tracked but mutable at
-runtime; a credential refresh will make `manifest.sha256` report it as changed,
-which is expected drift rather than tampering.
-
-The Root-only candidate retains native application, request-access, and
-stock-request-response logs and changes their payload policy from base64-only
-v1 to readable-auto v2. Active and rotated files live outside the frozen
-bundle under `/Users/dwolf/.local/state/cliproxyapi/root/logs`: `root.log`,
-`access.ndjson`, and `stock-traffic.ndjson`. The latter contains complete stock
-conversation/tool payloads and must be treated as sensitive. Root never sends a
-direct Relay request or response body to that sink; history replayed later as
-part of a stock request is, correctly, part of the stock request capture.
+Preserved for history. Do not use it as the current handoff target.
 
 ## Stable log and state layout
 
@@ -117,7 +207,7 @@ activation below applies to bundles staged before this change.
 The production catalog intentionally contains:
 
 - stock: `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`
-- Relay: `deepseek-v4-flash`
+- Relay: `deepseek-v4-flash`, `grok-4.5`
 
 `deepseek-v4-pro` was removed from both `root.yaml` and `relay.yaml` on
 2026-07-31 because DeepSeek's Responses API does not serve it: the request is
@@ -146,10 +236,9 @@ restoring both `routing.relay-models` and `routing.relay-model-providers` in
 `root.yaml`. Any Desktop thread still pinned to `kimi-k3` cannot be resumed
 while the exclusion stands.
 
-`grok-4.5` is implemented by the routing layer but is excluded from the first
-cutover catalog because the current xAI account returns HTTP `402` with an
-exhausted usage balance. Add it only after an authenticated direct Relay smoke
-completes successfully.
+`grok-4.5` is live on the Relay arm via xAI OAuth. It is no longer excluded
+from the production catalog. Image-generation Grok models remain excluded under
+`oauth-excluded-models.xai`.
 
 The Root config uses `websocket.mode: http-fallback`. The installed Codex client
 attempts WebSocket, accepts Root's authenticated HTTP `426`, and switches the
@@ -162,7 +251,11 @@ full history across stock and Relay. A genuine context-window downshift on a
 very large thread can still require provider-bound compaction and must start a
 new chain.
 
-## Root-only readable logging activation
+## Historical: Root-only readable logging activation
+
+Preserved as the completed Root logging cutover. Do not run it for the
+current Relay `inspect_image` handoff.
+
 
 Run this only from an external Terminal after the Codex task that prepared the
 candidate has durably completed. Do not run it in-band through the serving Root.
