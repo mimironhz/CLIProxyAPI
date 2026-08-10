@@ -31,6 +31,7 @@ type bridgeOptions struct {
 	relayModels      []string
 	relayProviders   map[string]string
 	fastModels       map[string]struct{}
+	relayAgents      bool
 	resolver         *routeResolver
 	discovery        *relayDiscovery
 	maxMessageBytes  int64
@@ -50,6 +51,7 @@ type websocketBridge struct {
 	relayURL          string
 	relayAPIKey       string
 	fastModels        map[string]struct{}
+	relayAgents       bool
 	maxMessage        int64
 	maxPending        int
 	dialOfficial      websocketDialFunc
@@ -212,6 +214,7 @@ func newWebsocketBridge(options bridgeOptions) (*websocketBridge, error) {
 		relayURL:          options.relayURL,
 		relayAPIKey:       strings.TrimSpace(options.relayAPIKey),
 		fastModels:        options.fastModels,
+		relayAgents:       options.relayAgents,
 		maxMessage:        options.maxMessageBytes,
 		maxPending:        options.maxPendingRoutes,
 		dialOfficial:      options.dialOfficial,
@@ -356,7 +359,8 @@ func (b *websocketBridge) ServeHTTP(response http.ResponseWriter, request *http.
 	}
 	upstreamPayload := firstPayload
 	if selected == routeOfficial {
-		upstreamPayload, errEnvelope = prepareOfficialPayload(firstPayload)
+		upstreamPayload = normalizeRelayMultiAgentParentPayload(firstPayload, b.relayAgents)
+		upstreamPayload, errEnvelope = prepareOfficialPayload(upstreamPayload)
 		if errEnvelope == nil {
 			// The first message is always a response.create, so it is a turn.
 			upstreamPayload, errEnvelope = applyOfficialFastServiceTier(upstreamPayload, model, b.fastModels)
@@ -720,7 +724,8 @@ func (b *websocketBridge) runController(
 				}
 			}
 			if state.route == routeOfficial {
-				upstreamPayload, errInspect = prepareOfficialPayload(result.payload)
+				upstreamPayload = normalizeRelayMultiAgentParentPayload(result.payload, b.relayAgents)
+				upstreamPayload, errInspect = prepareOfficialPayload(upstreamPayload)
 				if errInspect == nil && isCreate {
 					upstreamPayload, errInspect = applyOfficialFastServiceTier(upstreamPayload, nextModel, b.fastModels)
 				}
@@ -867,7 +872,8 @@ func (b *websocketBridge) performHandoff(
 		}
 	}
 	if nextRoute == routeOfficial {
-		payload, errRoute = prepareOfficialPayload(request.payload)
+		payload = normalizeRelayMultiAgentParentPayload(request.payload, b.relayAgents)
+		payload, errRoute = prepareOfficialPayload(payload)
 		if errRoute == nil {
 			// A handoff only ever carries the response.create that changed target.
 			payload, errRoute = applyOfficialFastServiceTier(payload, request.envelope.model, b.fastModels)

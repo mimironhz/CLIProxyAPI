@@ -121,8 +121,11 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	// functions before translation; the response path converts the model's call
 	// back into a tool_search_call item.
 	originalPayload := helps.PrepareResponsesToolSearch(bytes.Clone(originalPayloadSource))
+	originalPayload = prepareDeepSeekCodexInput(baseURL, originalPayload)
 	originalTranslated := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, opts.Stream)
-	translated := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, helps.PrepareResponsesToolSearch(bytes.Clone(req.Payload)), opts.Stream)
+	requestPayload := helps.PrepareResponsesToolSearch(bytes.Clone(req.Payload))
+	requestPayload = prepareDeepSeekCodexInput(baseURL, requestPayload)
+	translated := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, requestPayload, opts.Stream)
 
 	translated, err = helps.ApplyRequestThinking(translated, req, opts, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -351,8 +354,11 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	// See Execute: the hosted tool_search shim must be flattened before the
 	// request is translated.
 	originalPayload := helps.PrepareResponsesToolSearch(bytes.Clone(originalPayloadSource))
+	originalPayload = prepareDeepSeekCodexInput(baseURL, originalPayload)
 	originalTranslated := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, true)
-	translated := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, helps.PrepareResponsesToolSearch(bytes.Clone(req.Payload)), true)
+	requestPayload := helps.PrepareResponsesToolSearch(bytes.Clone(req.Payload))
+	requestPayload = prepareDeepSeekCodexInput(baseURL, requestPayload)
+	translated := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, requestPayload, true)
 
 	translated, err = helps.ApplyRequestThinking(translated, req, opts, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -835,6 +841,18 @@ func (e *OpenAICompatExecutor) usesResponsesAPI(auth *cliproxyauth.Auth, from, r
 		return false
 	}
 	return responseFormat == responses || sdktranslator.HasResponseTransformer(responseFormat, responses)
+}
+
+// prepareDeepSeekCodexInput adapts only the Codex delegation fields DeepSeek
+// cannot consume. It runs before protocol translation so Chat Completions does
+// not silently discard agent_message, while the broader optimization remains
+// opt-in and opaque encrypted task parts are never exposed as text.
+func prepareDeepSeekCodexInput(baseURL string, payload []byte) []byte {
+	if !helps.IsDeepSeekBaseURL(baseURL) {
+		return payload
+	}
+	payload = helps.NormalizeCodexDelegationMessageSchema(payload)
+	return helps.NormalizeCodexAgentMessageInput(payload)
 }
 
 // streamResponsesArgs carries the per-request state the Responses stream loop

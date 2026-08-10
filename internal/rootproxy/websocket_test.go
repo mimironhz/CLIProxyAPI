@@ -146,6 +146,38 @@ func TestWebsocketBridgeRoutesStockAndRelayWithCredentialIsolation(t *testing.T)
 	}
 }
 
+func TestWebsocketBridgeForwardsPlaintextCollaborationMessageSchemasToOfficial(t *testing.T) {
+	stockCapture := make(chan capturedMessage, 1)
+	relayCapture := make(chan capturedMessage, 1)
+	var stockConnections atomic.Int32
+	var relayConnections atomic.Int32
+	stockServer := newEchoWebsocketServer(t, &stockConnections, stockCapture)
+	relayServer := newEchoWebsocketServer(t, &relayConnections, relayCapture)
+	bridge := newTestBridge(t, websocketURL(stockServer.URL), websocketURL(relayServer.URL), func(options *bridgeOptions) {
+		options.relayAgents = true
+	})
+	rootServer := httptest.NewServer(bridge)
+	t.Cleanup(rootServer.Close)
+
+	connection := dialRootWebsocket(t, rootServer.URL, "/v1/responses", desktopHTTPHeaders())
+	defer func() { _ = connection.Close() }()
+	payload := []byte(`{"type":"response.create","model":"gpt-stock","input":[],"tools":[{"type":"namespace","name":"collaboration","tools":[{"type":"function","name":"spawn_agent","parameters":{"properties":{"message":{"type":"string","encrypted":true}}}},{"type":"function","name":"followup_task","parameters":{"properties":{"message":{"type":"string","encrypted":true}}}},{"type":"function","name":"send_message","parameters":{"properties":{"message":{"type":"string","encrypted":true}}}}]},{"type":"namespace","name":"mail","tools":[{"type":"function","name":"send_message","parameters":{"properties":{"message":{"type":"string","encrypted":true}}}}]}]}`)
+	if errWrite := connection.WriteMessage(websocket.TextMessage, payload); errWrite != nil {
+		t.Fatalf("write first message: %v", errWrite)
+	}
+
+	captured := receiveCapture(t, stockCapture)
+	assertDelegationMessageSchemaRewrite(t, captured.payload)
+	messageType, echoed, errRead := connection.ReadMessage()
+	if errRead != nil {
+		t.Fatalf("read rewritten echo: %v", errRead)
+	}
+	if messageType != websocket.TextMessage {
+		t.Fatalf("echo message type = %d, want text", messageType)
+	}
+	assertDelegationMessageSchemaRewrite(t, echoed)
+}
+
 func TestWebsocketBridgeRejectsInvalidFirstMessagesWithoutDialing(t *testing.T) {
 	var officialDials atomic.Int32
 	var relayDials atomic.Int32

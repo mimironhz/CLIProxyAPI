@@ -198,6 +198,35 @@ func TestHTTPBridgeRoutesSSEWithRawBodiesAndCredentialIsolation(t *testing.T) {
 	}
 }
 
+func TestHTTPBridgeForwardsPlaintextCollaborationMessageSchemasToOfficial(t *testing.T) {
+	officialCapture := make(chan capturedHTTPRequest, 1)
+	officialServer := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		captureHTTPRequest(t, request, officialCapture)
+		response.Header().Set("Content-Type", "text/event-stream")
+		_, _ = response.Write([]byte("data: done\n\n"))
+	}))
+	t.Cleanup(officialServer.Close)
+	relayServer := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(relayServer.Close)
+
+	bridge := newTestHTTPBridge(t, officialServer, relayServer, func(options *httpBridgeOptions) {
+		options.relayAgents = true
+	})
+	rootServer := newTestHTTPRootServer(t, bridge)
+	payload := []byte(`{"model":"gpt-stock","stream":true,"input":[],"tools":[{"type":"namespace","name":"collaboration","tools":[{"type":"function","name":"spawn_agent","parameters":{"properties":{"message":{"type":"string","encrypted":true}}}},{"type":"function","name":"followup_task","parameters":{"properties":{"message":{"type":"string","encrypted":true}}}},{"type":"function","name":"send_message","parameters":{"properties":{"message":{"type":"string","encrypted":true}}}}]},{"type":"namespace","name":"mail","tools":[{"type":"function","name":"send_message","parameters":{"properties":{"message":{"type":"string","encrypted":true}}}}]}]}`)
+	response := performRootPOST(t, rootServer.URL+"/v1/responses", encodeZstd(t, payload), "zstd", desktopHTTPHeaders())
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", response.StatusCode)
+	}
+	_ = readAndClose(t, response)
+
+	request := receiveWithTimeout(t, officialCapture)
+	if request.encoding != "" {
+		t.Fatalf("rewritten official request encoding = %q, want empty", request.encoding)
+	}
+	assertDelegationMessageSchemaRewrite(t, request.body)
+}
+
 func TestHTTPBridgeSanitizesOfficialSSEReplayState(t *testing.T) {
 	officialCapture := make(chan capturedHTTPRequest, 1)
 	officialServer := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
@@ -838,4 +867,20 @@ func encodeZstd(t *testing.T, payload []byte) []byte {
 		t.Fatalf("close zstd writer: %v", errClose)
 	}
 	return encoded.Bytes()
+}
+
+func assertDelegationMessageSchemaRewrite(t *testing.T, payload []byte) {
+	t.Helper()
+	for _, path := range []string{
+		"tools.0.tools.0.parameters.properties.message.encrypted",
+		"tools.0.tools.1.parameters.properties.message.encrypted",
+		"tools.0.tools.2.parameters.properties.message.encrypted",
+	} {
+		if gjson.GetBytes(payload, path).Exists() {
+			t.Fatalf("collaboration message encryption marker remains at %s: %s", path, payload)
+		}
+	}
+	if encrypted := gjson.GetBytes(payload, "tools.1.tools.0.parameters.properties.message.encrypted").Bool(); !encrypted {
+		t.Fatalf("unrelated send_message schema changed: %s", payload)
+	}
 }

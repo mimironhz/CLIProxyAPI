@@ -21,6 +21,18 @@ func RewriteCodexMultiAgentV2Input(ctx context.Context, headers http.Header, pay
 	return multiagentv2.RewriteCodexMultiAgentV2Input(ctx, headers, payload, cfg)
 }
 
+// NormalizeCodexAgentMessageInput converts Codex-only agent_message input into
+// standard Responses API messages for incompatible upstreams.
+func NormalizeCodexAgentMessageInput(payload []byte) []byte {
+	return multiagentv2.NormalizeCodexAgentMessageInput(payload)
+}
+
+// NormalizeCodexDelegationMessageSchema prevents delegated message text from
+// being sealed for incompatible worker upstreams.
+func NormalizeCodexDelegationMessageSchema(payload []byte) []byte {
+	return multiagentv2.NormalizeCodexDelegationMessageSchema(payload)
+}
+
 // TranslateRequestWithCodexMultiAgentV2 normalizes official Codex multi-agent
 // input before translating it to a non-Codex target protocol.
 func TranslateRequestWithCodexMultiAgentV2(ctx context.Context, headers http.Header, cfg *config.Config, from, to sdktranslator.Format, model string, payload []byte, stream bool) []byte {

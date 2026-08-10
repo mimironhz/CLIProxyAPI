@@ -130,7 +130,8 @@ func codexSpawnAgentTestPayload() []byte {
 			"recipient":"/root/worker",
 			"content":[
 				{"type":"input_text","text":"Payload:\n"},
-				{"type":"encrypted_content","encrypted_content":"delegated task"}
+				{"type":"input_text","text":"delegated task"},
+				{"type":"encrypted_content","encrypted_content":"opaque-agent-message-ciphertext"}
 			],
 			"internal_chat_message_metadata_passthrough":{"turn_id":"turn_1"}
 		}]
@@ -168,12 +169,12 @@ func assertCodexSpawnAgentRequestMessage(t *testing.T, payload []byte, enabled b
 		if message.Get("content.1.type").String() != "input_text" || message.Get("content.1.text").String() != "delegated task" {
 			t.Fatalf("Codex executor did not normalize agent message content: %s", payload)
 		}
-		if message.Get("content.1.encrypted_content").Exists() {
-			t.Fatalf("Codex executor preserved encrypted_content: %s", payload)
+		if message.Get("content.#").Int() != 2 || strings.Contains(string(payload), "opaque-agent-message-ciphertext") {
+			t.Fatalf("Codex executor exposed or preserved opaque encrypted_content: %s", payload)
 		}
 		return
 	}
-	if message.Get("content.1.type").String() != "encrypted_content" || message.Get("content.1.encrypted_content").String() != "delegated task" {
+	if message.Get("content.2.type").String() != "encrypted_content" || message.Get("content.2.encrypted_content").String() != "opaque-agent-message-ciphertext" {
 		t.Fatalf("disabled optimization changed agent message content: %s", payload)
 	}
 }

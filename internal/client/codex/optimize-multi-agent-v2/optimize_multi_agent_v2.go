@@ -54,7 +54,31 @@ func RewriteCodexMultiAgentV2Input(ctx context.Context, headers http.Header, pay
 	if !codexMultiAgentV2Enabled(ctx, headers, cfg) {
 		return payload
 	}
+	return NormalizeCodexAgentMessageInput(payload)
+}
+
+// NormalizeCodexAgentMessageInput converts Codex-only agent_message input into
+// standard Responses API messages for upstreams that do not support that item.
+// Opaque encrypted parts are removed rather than exposed as model-visible text.
+func NormalizeCodexAgentMessageInput(payload []byte) []byte {
 	return rewriteCodexAgentMessageInput(payload)
+}
+
+// NormalizeCodexDelegationMessageSchema prevents Codex from sealing delegated
+// message text before it is sent to an upstream that cannot decrypt it. This
+// only removes the message property's encryption marker from collaboration
+// delivery tools; descriptions, namespaces, model lists, and every other tool
+// field are preserved.
+func NormalizeCodexDelegationMessageSchema(payload []byte) []byte {
+	updated := payload
+	for _, toolPath := range codexDelegationMessageToolPaths(payload) {
+		var errDelete error
+		updated, errDelete = sjson.DeleteBytes(updated, toolPath+".parameters.properties.message.encrypted")
+		if errDelete != nil {
+			return payload
+		}
+	}
+	return updated
 }
 
 // TranslateRequestWithCodexMultiAgentV2 normalizes official Codex multi-agent
@@ -72,7 +96,7 @@ func OptimizeCodexMultiAgentV2Request(ctx context.Context, headers http.Header, 
 	if !codexMultiAgentV2Enabled(ctx, headers, cfg) {
 		return payload, false
 	}
-	updated := rewriteCodexAgentMessageContent(payload)
+	updated := stripCodexAgentMessageEncryptedContent(payload)
 	toolPaths := codexSpawnAgentToolPaths(updated)
 	if len(toolPaths) == 0 || hasCodexOptimizedCollaborationConflict(updated) {
 		return updated, false
@@ -413,14 +437,8 @@ func rewriteCodexSpawnAgentTools(payload []byte, toolPaths []string, models []co
 				}
 			}
 		}
-
-		var errDelete error
-		updated, errDelete = sjson.DeleteBytes(updated, toolPath+".parameters.properties.message.encrypted")
-		if errDelete != nil {
-			return payload
-		}
 	}
-	return updated
+	return NormalizeCodexDelegationMessageSchema(updated)
 }
 
 func hasCodexOptimizedCollaborationConflict(payload []byte) bool {
@@ -547,7 +565,7 @@ func rewriteCodexAgentMessageInput(payload []byte) []byte {
 		return payload
 	}
 
-	updated := rewriteCodexAgentMessageContent(payload)
+	updated := stripCodexAgentMessageEncryptedContent(payload)
 	for itemIndex, item := range input.Array() {
 		if strings.TrimSpace(item.Get("type").String()) != "agent_message" {
 			continue
@@ -566,7 +584,7 @@ func rewriteCodexAgentMessageInput(payload []byte) []byte {
 	return updated
 }
 
-func rewriteCodexAgentMessageContent(payload []byte) []byte {
+func stripCodexAgentMessageEncryptedContent(payload []byte) []byte {
 	input := gjson.GetBytes(payload, "input")
 	if !input.IsArray() {
 		return payload
@@ -581,26 +599,16 @@ func rewriteCodexAgentMessageContent(payload []byte) []byte {
 		if !content.IsArray() {
 			continue
 		}
-		for partIndex, part := range content.Array() {
+		parts := content.Array()
+		for partIndex := len(parts) - 1; partIndex >= 0; partIndex-- {
+			part := parts[partIndex]
 			if strings.TrimSpace(part.Get("type").String()) != "encrypted_content" {
 				continue
 			}
-			encryptedContent := part.Get("encrypted_content")
-			if encryptedContent.Type != gjson.String {
-				continue
-			}
 			partPath := fmt.Sprintf("input.%d.content.%d", itemIndex, partIndex)
-			var errSet error
-			updated, errSet = sjson.SetBytes(updated, partPath+".type", "input_text")
-			if errSet != nil {
-				return payload
-			}
-			updated, errSet = sjson.SetBytes(updated, partPath+".text", encryptedContent.String())
-			if errSet != nil {
-				return payload
-			}
-			updated, errSet = sjson.DeleteBytes(updated, partPath+".encrypted_content")
-			if errSet != nil {
+			var errDelete error
+			updated, errDelete = sjson.DeleteBytes(updated, partPath)
+			if errDelete != nil {
 				return payload
 			}
 		}
@@ -638,6 +646,57 @@ func collectCodexSpawnAgentToolPaths(tools gjson.Result, path string, paths *[]s
 			collectCodexSpawnAgentToolPaths(tool.Get("tools"), toolPath+".tools", paths)
 		}
 	}
+}
+
+func codexDelegationMessageToolPaths(payload []byte) []string {
+	paths := make([]string, 0, 3)
+	collectCodexDelegationMessageToolPaths(gjson.GetBytes(payload, "tools"), "tools", false, &paths)
+
+	input := gjson.GetBytes(payload, "input")
+	if input.IsArray() {
+		for index, item := range input.Array() {
+			if strings.TrimSpace(item.Get("type").String()) != "additional_tools" {
+				continue
+			}
+			collectCodexDelegationMessageToolPaths(item.Get("tools"), fmt.Sprintf("input.%d.tools", index), false, &paths)
+		}
+	}
+	return paths
+}
+
+func collectCodexDelegationMessageToolPaths(tools gjson.Result, path string, inCollaboration bool, paths *[]string) {
+	if !tools.IsArray() {
+		return
+	}
+	for index, tool := range tools.Array() {
+		toolPath := fmt.Sprintf("%s.%d", path, index)
+		toolType := strings.TrimSpace(tool.Get("type").String())
+		toolName := strings.TrimSpace(tool.Get("name").String())
+		if toolType == "function" && codexDelegationMessageTool(toolName, tool.Get("namespace").String(), inCollaboration) {
+			*paths = append(*paths, toolPath)
+		}
+		if toolType == "namespace" {
+			nestedCollaboration := inCollaboration || toolName == codexCollaborationNamespace || toolName == codexOptimizedCollaborationNamespace
+			collectCodexDelegationMessageToolPaths(tool.Get("tools"), toolPath+".tools", nestedCollaboration, paths)
+		}
+	}
+}
+
+func codexDelegationMessageTool(name, namespace string, inCollaboration bool) bool {
+	if name == "spawn_agent" {
+		return true
+	}
+	namespace = strings.TrimSpace(namespace)
+	if namespace == codexCollaborationNamespace || namespace == codexOptimizedCollaborationNamespace || inCollaboration {
+		return name == "followup_task" || name == "send_message"
+	}
+	for _, prefix := range []string{codexCollaborationNamespace + "__", codexOptimizedCollaborationNamespace + "__"} {
+		if strings.HasPrefix(name, prefix) {
+			name = strings.TrimPrefix(name, prefix)
+			return name == "followup_task" || name == "send_message"
+		}
+	}
+	return false
 }
 
 func formatCodexSpawnAgentModels(models []codexSpawnAgentModel) string {

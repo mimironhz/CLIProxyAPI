@@ -276,6 +276,37 @@ func TestRewriteCodexSpawnAgentDescriptionLeavesPayloadWithoutToolUnchanged(t *t
 	}
 }
 
+func TestNormalizeCodexDelegationMessageSchema(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{
+		"tools":[
+			{"type":"namespace","name":"collaboration","tools":[
+				{"type":"function","name":"spawn_agent","parameters":{"properties":{"message":{"type":"string","encrypted":true}}}},
+				{"type":"function","name":"followup_task","parameters":{"properties":{"message":{"type":"string","encrypted":true}}}},
+				{"type":"function","name":"send_message","parameters":{"properties":{"message":{"type":"string","encrypted":true}}}}
+			]},
+			{"type":"namespace","name":"mail","tools":[{"type":"function","name":"send_message","parameters":{"properties":{"message":{"type":"string","encrypted":true}}}}]}
+		],
+		"input":[{"type":"additional_tools","tools":[{"type":"function","name":"collaboration__followup_task","parameters":{"properties":{"message":{"type":"string","encrypted":true}}}}]}]
+	}`)
+	got := NormalizeCodexDelegationMessageSchema(payload)
+
+	for _, path := range []string{
+		"tools.0.tools.0.parameters.properties.message.encrypted",
+		"tools.0.tools.1.parameters.properties.message.encrypted",
+		"tools.0.tools.2.parameters.properties.message.encrypted",
+		"input.0.tools.0.parameters.properties.message.encrypted",
+	} {
+		if gjson.GetBytes(got, path).Exists() {
+			t.Fatalf("collaboration message encryption marker remains at %s: %s", path, got)
+		}
+	}
+	if encrypted := gjson.GetBytes(got, "tools.1.tools.0.parameters.properties.message.encrypted").Bool(); !encrypted {
+		t.Fatalf("unrelated send_message schema changed: %s", got)
+	}
+}
+
 func TestRewriteCodexSpawnAgentDescriptionEnabledOptimizesTool(t *testing.T) {
 	modelID := "codex-spawn-agent-test-model"
 	clientID := "codex-spawn-agent-test-client"
@@ -309,7 +340,7 @@ func TestRewriteCodexSpawnAgentDescriptionEnabledOptimizesTool(t *testing.T) {
 	}
 }
 
-func TestOptimizeCodexMultiAgentV2RequestNormalizesAgentMessageContentOnly(t *testing.T) {
+func TestOptimizeCodexMultiAgentV2RequestDoesNotExposeEncryptedAgentMessageContent(t *testing.T) {
 	t.Parallel()
 
 	payload := []byte(`{"input":[{"type":"agent_message","id":"amsg_1","author":"/root","recipient":"/root/worker","content":[{"type":"input_text","text":"Payload:\n"},{"type":"encrypted_content","encrypted_content":"delegated task"}],"internal_chat_message_metadata_passthrough":{"turn_id":"turn_1"}}]}`)
@@ -323,11 +354,11 @@ func TestOptimizeCodexMultiAgentV2RequestNormalizesAgentMessageContentOnly(t *te
 	if message.Get("type").String() != "agent_message" || message.Get("role").Exists() {
 		t.Fatalf("outer agent message changed: %s", got)
 	}
-	if message.Get("content.1.type").String() != "input_text" || message.Get("content.1.text").String() != "delegated task" {
-		t.Fatalf("encrypted content was not normalized: %s", got)
+	if count := message.Get("content.#").Int(); count != 1 {
+		t.Fatalf("encrypted content was not removed: %s", got)
 	}
-	if message.Get("content.1.encrypted_content").Exists() {
-		t.Fatalf("encrypted_content was preserved: %s", got)
+	if strings.Contains(string(got), "delegated task") {
+		t.Fatalf("encrypted content was exposed as text: %s", got)
 	}
 	if message.Get("author").String() != "/root" || message.Get("recipient").String() != "/root/worker" || message.Get("internal_chat_message_metadata_passthrough.turn_id").String() != "turn_1" {
 		t.Fatalf("agent message metadata changed: %s", got)
@@ -398,7 +429,7 @@ func TestRewriteCodexMultiAgentV2InputRewritesAgentMessage(t *testing.T) {
 		"recipient":"/root/arithmetic_problem",
 		"content":[
 			{"type":"input_text","text":"Message Type: NEW_TASK\nTask name: /root/arithmetic_problem\nSender: /root\nPayload:\n"},
-			{"type":"encrypted_content","encrypted_content":"请出一道四则运算题，并给出答案。全程使用简体中文，题目简洁。"}
+			{"type":"input_text","text":"请出一道四则运算题，并给出答案。全程使用简体中文，题目简洁。"}
 		],
 		"internal_chat_message_metadata_passthrough":{"turn_id":"019f92ae-7eae-7371-957e-8f6f734edddc"}
 	}]}`)
@@ -418,9 +449,6 @@ func TestRewriteCodexMultiAgentV2InputRewritesAgentMessage(t *testing.T) {
 	if text := gjson.GetBytes(got, "input.0.content.1.text").String(); text != "请出一道四则运算题，并给出答案。全程使用简体中文，题目简洁。" {
 		t.Fatalf("content[1].text = %q; payload=%s", text, got)
 	}
-	if encrypted := gjson.GetBytes(got, "input.0.content.1.encrypted_content"); encrypted.Exists() {
-		t.Fatalf("content[1].encrypted_content was preserved: %s", got)
-	}
 	if author := gjson.GetBytes(got, "input.0.author").String(); author != "/root" {
 		t.Fatalf("author = %q, want /root", author)
 	}
@@ -432,7 +460,7 @@ func TestRewriteCodexMultiAgentV2InputRewritesAgentMessage(t *testing.T) {
 func TestRewriteCodexMultiAgentV2InputConditions(t *testing.T) {
 	t.Parallel()
 
-	payload := []byte(`{"input":[{"type":"agent_message","content":[{"type":"encrypted_content","encrypted_content":"task"}]}]}`)
+	payload := []byte(`{"input":[{"type":"agent_message","content":[{"type":"input_text","text":"task"}]}]}`)
 	tests := []struct {
 		name      string
 		cfg       *config.Config
@@ -480,7 +508,7 @@ func TestRewriteCodexMultiAgentV2InputConditions(t *testing.T) {
 }
 
 func TestTranslateRequestWithCodexMultiAgentV2Conditions(t *testing.T) {
-	payload := []byte(`{"model":"test-model","input":[{"type":"agent_message","content":[{"type":"encrypted_content","encrypted_content":"task"}]}]}`)
+	payload := []byte(`{"model":"test-model","input":[{"type":"agent_message","content":[{"type":"input_text","text":"task"}]}]}`)
 	enabledCfg := &config.Config{Codex: config.CodexConfig{OptimizeMultiAgentV2: true}}
 	eligibleHeaders := http.Header{"User-Agent": []string{"Codex Desktop/0.146.0-alpha.3"}}
 

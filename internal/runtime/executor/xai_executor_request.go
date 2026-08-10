@@ -111,7 +111,11 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")
 	body, _ = sjson.DeleteBytes(body, "stream_options")
-	body = helps.RewriteCodexMultiAgentV2Input(ctx, opts.Headers, body, e.cfg)
+	// agent_message is a Codex-only input item. Grok's Responses decoder rejects
+	// the whole request when it reaches xAI, regardless of optional multi-agent
+	// optimization settings.
+	body = helps.NormalizeCodexDelegationMessageSchema(body)
+	body = helps.NormalizeCodexAgentMessageInput(body)
 	namespaceTools := collectXAINamespaceToolRefs(body)
 	// Collect before normalizeXAITools flattens namespace wrappers so keys match
 	// the post-restore (namespace, short-name) shape used by the response filter.
