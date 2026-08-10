@@ -7,7 +7,7 @@ umask 077
 script_name=${0:t}
 
 usage() {
-  print -u2 -r -- "Usage: $script_name --candidate DIR --root-rollback DIR --relay-rollback DIR [--preflight | --activate | --rollback]"
+  print -u2 -r -- "Usage: $script_name --candidate DIR --root-rollback DIR --relay-rollback DIR [--preflight | --activate | --rollback | --activate-root | --rollback-root]"
 }
 
 mode=
@@ -32,7 +32,7 @@ while (( $# > 0 )); do
       relay_rollback=$2
       shift 2
       ;;
-    --preflight|--activate|--rollback)
+    --preflight|--activate|--rollback|--activate-root|--rollback-root)
       [[ -z "$mode" ]] || { print -u2 -r -- "Specify exactly one operation."; usage; exit 2; }
       mode=$1
       shift
@@ -265,6 +265,15 @@ rollback_both() {
   [[ "$(job_program "$relay_label")" == "$relay_rollback/bin/cli-proxy-api-relay" ]]
 }
 
+rollback_root() {
+  print -r -- "$(timestamp) rolling back Root"
+  stop_job "$root_label" || true
+  install -m 600 "$root_rollback/launchd/com.user.cliproxy-root.plist" "$root_plist" || return 1
+  bootstrap_job "$root_label" "$root_plist" || return 1
+  wait_health http://127.0.0.1:8317/healthz || return 1
+  [[ "$(job_program "$root_label")" == "$root_rollback/bin/root-proxy" ]]
+}
+
 write_status() {
   local result=$1
   local detail=$2
@@ -300,6 +309,8 @@ case "$mode" in
     ;;
   --activate)
     ;;
+  --activate-root)
+    ;;
   --rollback)
     if ! verify_bundle_files || ! verify_manifests; then
       write_status rollback_preflight_failed "No services changed."
@@ -312,11 +323,41 @@ case "$mode" in
     write_status rollback_failed "Manual rollback did not fully recover."
     exit 1
     ;;
+  --rollback-root)
+    if ! verify_bundle_files || ! verify_manifests; then
+      write_status rollback_preflight_failed "No services changed."
+      exit 1
+    fi
+    if rollback_root; then
+      write_status root_rolled_back "Manual Root rollback completed; Relay and bridge unchanged."
+      exit 0
+    fi
+    write_status root_rollback_failed "Manual Root rollback did not fully recover."
+    exit 1
+    ;;
 esac
 
 bridge_pid_before=$(listener_pid "$bridge_address")
+relay_pid_before=$(listener_pid 127.0.0.1:8318)
+relay_program_before=$(job_program "$relay_label")
 if ! preflight; then
   write_status preflight_failed "No services changed."
+  exit 1
+fi
+
+if [[ "$mode" == --activate-root ]]; then
+  if switch_root && [[ "$(listener_pid 127.0.0.1:8318)" == "$relay_pid_before" ]] && [[ "$(job_program "$relay_label")" == "$relay_program_before" ]] && [[ "$(listener_pid "$bridge_address")" == "$bridge_pid_before" ]]; then
+    write_status root_activated "Root activated; Relay and bridge unchanged."
+    print -r -- "$(timestamp) Root activation completed"
+    exit 0
+  fi
+  if rollback_root; then
+    write_status root_rolled_back "Root activation failed; Root restored automatically and Relay was not changed."
+    print -u2 -r -- "$(timestamp) Root activation failed and rollback completed"
+    exit 1
+  fi
+  write_status root_rollback_failed "Root activation failed and automatic Root rollback did not fully recover."
+  print -u2 -r -- "$(timestamp) Root activation and rollback both failed"
   exit 1
 fi
 
