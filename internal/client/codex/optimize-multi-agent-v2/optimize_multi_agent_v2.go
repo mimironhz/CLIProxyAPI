@@ -68,7 +68,31 @@ func RewriteCodexMultiAgentV2Input(ctx context.Context, headers http.Header, pay
 	if !codexMultiAgentV2Enabled(ctx, headers, cfg) {
 		return payload
 	}
+	return NormalizeCodexAgentMessageInput(payload)
+}
+
+// NormalizeCodexAgentMessageInput converts Codex-only agent_message input into
+// standard Responses API messages for upstreams that do not support that item.
+// Opaque encrypted parts are removed rather than exposed as model-visible text.
+func NormalizeCodexAgentMessageInput(payload []byte) []byte {
 	return rewriteCodexAgentMessageInput(payload)
+}
+
+// NormalizeCodexDelegationMessageSchema prevents Codex from sealing delegated
+// message text before it is sent to an upstream that cannot decrypt it. This
+// only removes the message property's encryption marker from collaboration
+// delivery tools; descriptions, namespaces, model lists, and every other tool
+// field are preserved.
+func NormalizeCodexDelegationMessageSchema(payload []byte) []byte {
+	updated := payload
+	for _, toolPath := range codexDelegationMessageToolPaths(payload) {
+		var errDelete error
+		updated, errDelete = sjson.DeleteBytes(updated, toolPath+".parameters.properties.message.encrypted")
+		if errDelete != nil {
+			return payload
+		}
+	}
+	return updated
 }
 
 // TranslateRequestWithCodexMultiAgentV2 normalizes official Codex multi-agent
@@ -621,7 +645,7 @@ func rewriteCodexCollaborationTools(payload []byte, messageToolPaths, spawnAgent
 			}
 		}
 	}
-	return updated
+	return NormalizeCodexDelegationMessageSchema(updated)
 }
 
 // HasCodexMultiAgentV2NamespaceConflict reports whether the request defines
@@ -754,7 +778,7 @@ func rewriteCodexAgentMessageInput(payload []byte) []byte {
 		return payload
 	}
 
-	updated := rewriteCodexAgentMessageContent(payload)
+	updated := stripCodexAgentMessageEncryptedContent(payload)
 	for itemIndex, item := range input.Array() {
 		if strings.TrimSpace(item.Get("type").String()) != "agent_message" {
 			continue
@@ -773,7 +797,7 @@ func rewriteCodexAgentMessageInput(payload []byte) []byte {
 	return updated
 }
 
-func rewriteCodexAgentMessageContent(payload []byte) []byte {
+func stripCodexAgentMessageEncryptedContent(payload []byte) []byte {
 	input := gjson.GetBytes(payload, "input")
 	if !input.IsArray() {
 		return payload
@@ -788,26 +812,16 @@ func rewriteCodexAgentMessageContent(payload []byte) []byte {
 		if !content.IsArray() {
 			continue
 		}
-		for partIndex, part := range content.Array() {
+		parts := content.Array()
+		for partIndex := len(parts) - 1; partIndex >= 0; partIndex-- {
+			part := parts[partIndex]
 			if strings.TrimSpace(part.Get("type").String()) != "encrypted_content" {
 				continue
 			}
-			encryptedContent := part.Get("encrypted_content")
-			if encryptedContent.Type != gjson.String {
-				continue
-			}
 			partPath := fmt.Sprintf("input.%d.content.%d", itemIndex, partIndex)
-			var errSet error
-			updated, errSet = sjson.SetBytes(updated, partPath+".type", "input_text")
-			if errSet != nil {
-				return payload
-			}
-			updated, errSet = sjson.SetBytes(updated, partPath+".text", encryptedContent.String())
-			if errSet != nil {
-				return payload
-			}
-			updated, errSet = sjson.DeleteBytes(updated, partPath+".encrypted_content")
-			if errSet != nil {
+			var errDelete error
+			updated, errDelete = sjson.DeleteBytes(updated, partPath)
+			if errDelete != nil {
 				return payload
 			}
 		}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	multiagentv2 "github.com/router-for-me/CLIProxyAPI/v7/internal/client/codex/optimize-multi-agent-v2"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -18,6 +19,17 @@ const kimiCompactionPrefix = "kimi-compaction-v1:"
 // officialFastServiceTier is the wire value behind the catalog's "Fast" speed
 // tier, which every stock entry advertises as service_tiers[].id.
 const officialFastServiceTier = "priority"
+
+// normalizeRelayMultiAgentParentPayload keeps delegated message text portable
+// when Root advertises Relay-hosted multi-agent workers. Removing only the
+// collaboration delivery tools' message encryption markers makes the client
+// send child messages as ordinary text; stock-only traffic is unchanged.
+func normalizeRelayMultiAgentParentPayload(payload []byte, enabled bool) []byte {
+	if !enabled {
+		return payload
+	}
+	return multiagentv2.NormalizeCodexDelegationMessageSchema(payload)
+}
 
 func payloadContainsCompaction(payload []byte) bool {
 	return payloadContainsInputType(payload, "compaction")

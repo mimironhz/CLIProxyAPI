@@ -36,6 +36,7 @@ type httpBridgeOptions struct {
 	relayModels     []string
 	relayProviders  map[string]string
 	fastModels      map[string]struct{}
+	relayAgents     bool
 	resolver        *routeResolver
 	discovery       *relayDiscovery
 	maxRequestBody  int64
@@ -53,6 +54,7 @@ type httpBridge struct {
 	relayBaseURL    string
 	relayAPIKey     string
 	fastModels      map[string]struct{}
+	relayAgents     bool
 	maxRequestBody  int64
 	allowedOrigins  map[string]struct{}
 	officialClient  *http.Client
@@ -138,6 +140,7 @@ func newHTTPBridge(options httpBridgeOptions) (*httpBridge, error) {
 		relayBaseURL:    validatedRelay,
 		relayAPIKey:     relayAPIKey,
 		fastModels:      options.fastModels,
+		relayAgents:     options.relayAgents,
 		maxRequestBody:  options.maxRequestBody,
 		allowedOrigins:  allowedOrigins,
 		officialClient:  officialClient,
@@ -312,7 +315,8 @@ func (b *httpBridge) serve(response http.ResponseWriter, request *http.Request, 
 			return
 		}
 		if selected == routeOfficial {
-			normalizedBody, errPrepare := prepareOfficialPayload(decodedBody)
+			parentBody := normalizeRelayMultiAgentParentPayload(decodedBody, b.relayAgents)
+			normalizedBody, errPrepare := prepareOfficialPayload(parentBody)
 			if errPrepare != nil {
 				writeStockHTTPError(response, exchange, http.StatusBadRequest, "invalid_request_error", errPrepare.Error(), "input", "rejected", "official_payload_invalid")
 				return

@@ -20,12 +20,107 @@ Use the exact private deployment directory recorded in the handoff manifest.
 Verify every SHA-256 in `manifest.sha256` before loading a job. Do not rebuild
 or edit an artifact in place; create a new versioned directory instead.
 
-### Current handoff (Relay-only): xAI `view_image` → `inspect_image`
+### Current handoff: delegated payload compatibility
+
+Frozen but inactive Root + Relay candidate:
+
+```text
+/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810T044233Z-delegation-compat
+```
+
+Scope:
+
+- Restart `com.user.cliproxy-relay` and `com.user.cliproxy-root` together.
+- Do not touch `com.user.cliproxy-orbstack-relay-v2`.
+- Roll back Root to `20260805T052624Z-b6ff2fbc`.
+- Roll back Relay to `20260810T034432Z-398f082c`.
+- Root and Relay configuration files are carried forward byte-for-byte.
+
+Change:
+
+- Root removes only the `message.encrypted` marker from collaboration's
+  `spawn_agent`, `followup_task`, and `send_message` tools when Relay
+  multi-agent workers are advertised. Stock-only multi-agent traffic and
+  unrelated message tools are unchanged.
+- xAI and DeepSeek convert Codex-only `agent_message` into a standard user
+  message without enabling the optional broad multi-agent optimization.
+- Opaque `encrypted_content` is never copied into model-visible text. The
+  parent-side schema change makes new delegated task bodies ordinary
+  `input_text`; unsupported opaque legacy parts are removed.
+
+This pairing is required. Relay alone cannot recover an already sealed task,
+and Root alone would still send `agent_message` to an incompatible worker.
+
+### Root + Relay activation
+
+Run only from an external Terminal after this preparing task has completed.
+Choose a quiet interval with no active delegated turns.
+
+```bash
+CANDIDATE=/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810T044233Z-delegation-compat
+ROOT_ROLLBACK=/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260805T052624Z-b6ff2fbc
+RELAY_ROLLBACK=/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810T034432Z-398f082c
+```
+
+1. Verify all immutable artifacts:
+
+   ```bash
+   (cd "$CANDIDATE" && shasum -a 256 -c manifest.sha256)
+   (cd "$ROOT_ROLLBACK" && shasum -a 256 -c manifest.sha256)
+   (cd "$RELAY_ROLLBACK" && shasum -a 256 -c manifest.sha256)
+   ```
+
+2. Record the bridge identity, stop only Root and Relay, install the candidate
+   jobs, then start Relay before Root:
+
+   ```bash
+   BRIDGE_PID=$(lsof -nP -iTCP@192.168.139.3:8318 -sTCP:LISTEN -t)
+   launchctl bootout "gui/$(id -u)/com.user.cliproxy-root"
+   launchctl bootout "gui/$(id -u)/com.user.cliproxy-relay"
+   install -m 600 "$CANDIDATE/launchd/com.user.cliproxy-root.plist" \
+     "$HOME/Library/LaunchAgents/com.user.cliproxy-root.plist"
+   install -m 600 "$CANDIDATE/launchd/com.user.cliproxy-relay.plist" \
+     "$HOME/Library/LaunchAgents/com.user.cliproxy-relay.plist"
+   launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.user.cliproxy-relay.plist"
+   launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.user.cliproxy-root.plist"
+   ```
+
+3. Verify the installed job targets, both loopback health endpoints, and the
+   unchanged bridge PID:
+
+   ```bash
+   test "$(plutil -extract ProgramArguments.0 raw -o - "$HOME/Library/LaunchAgents/com.user.cliproxy-root.plist")" = "$CANDIDATE/bin/root-proxy"
+   test "$(plutil -extract ProgramArguments.0 raw -o - "$HOME/Library/LaunchAgents/com.user.cliproxy-relay.plist")" = "$CANDIDATE/bin/cli-proxy-api-relay"
+   curl -fsS http://127.0.0.1:8317/healthz | jq -e '.status == "ok"'
+   curl -fsS http://127.0.0.1:8318/healthz | jq -e '.status == "ok"'
+   test "$(lsof -nP -iTCP@192.168.139.3:8318 -sTCP:LISTEN -t)" = "$BRIDGE_PID"
+   ```
+
+4. From Codex Desktop, create a fresh `deepseek-v4-flash/max` subagent with a
+   unique sentinel in a long task body. Require the worker to repeat that
+   sentinel, then send a follow-up with a second sentinel and require that one.
+   Repeat a short delegated probe with `grok-4.5/high`; require completion with
+   no HTTP 422. Do not accept a generic acknowledgement as payload proof.
+
+5. If either probe fails, roll back both jobs:
+
+   ```bash
+   launchctl bootout "gui/$(id -u)/com.user.cliproxy-root"
+   launchctl bootout "gui/$(id -u)/com.user.cliproxy-relay"
+   install -m 600 "$ROOT_ROLLBACK/launchd/com.user.cliproxy-root.plist" \
+     "$HOME/Library/LaunchAgents/com.user.cliproxy-root.plist"
+   install -m 600 "$RELAY_ROLLBACK/launchd/com.user.cliproxy-relay.plist" \
+     "$HOME/Library/LaunchAgents/com.user.cliproxy-relay.plist"
+   launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.user.cliproxy-relay.plist"
+   launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.user.cliproxy-root.plist"
+   ```
+
+### Previous live handoff (Relay-only): xAI `agent_message` compatibility
 
 Frozen Relay-only candidate:
 
 ```text
-/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260807T031713Z-90e19091
+/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810T034432Z-398f082c
 ```
 
 Scope:
@@ -33,33 +128,31 @@ Scope:
 - **Restart only** `com.user.cliproxy-relay`
 - **Do not touch** `com.user.cliproxy-root` or `com.user.cliproxy-orbstack-relay-v2`
 - Live Root remains `20260805T052624Z-b6ff2fbc` (multi-agent v2 advertisement)
-- Rollback Relay is `20260731T093906Z-d12d4033` (previous live Relay)
+- Rollback Relay is `20260807T031713Z-90e19091` (previous live Relay)
 
 Change:
 
-- Codex Desktop's local image tool is still named `view_image` on the client
-- For Grok/xAI upstream only, the proxy aliases it to `inspect_image` (was `read_file`)
-- Responses restore `inspect_image` back to `view_image` so Desktop executes the real tool
+- Codex delegated turns may contain the Codex-only `agent_message` input item
+- For Grok/xAI upstream only, the proxy converts it to a user `message`
+- Nested `encrypted_content` parts become ordinary `input_text`
+- Broader multi-agent optimization remains optional
 - `relay.yaml` is carried forward unchanged from the previous live Relay bundle
 
 Defect this fixes:
 
-With the old alias target `read_file`, Grok treated the image tool as a general
-file reader in tool-heavy sessions. Desktop then executed `view_image` on
-`.md`/`.ts` paths and showed broken **Inspected image** cards (task
-`019fda1e-35ab-7630-a941-fd6f826e2f3e`). A live `grok-4.5` probe showed
-`inspect_image` selects for PNG inspection without that misuse pattern, while
-bare `view_image` without an alias is still unreliable.
+Grok's strict Responses `ModelInput` decoder rejects `agent_message`, returning
+HTTP 422 before inference. The existing compatibility rewrite was gated behind
+`codex.optimize-multi-agent-v2`, so delegated Grok turns failed whenever that
+optional setting was disabled.
 
-### Relay-only activation (run from external Terminal)
+### Previous Relay-only activation (already completed)
 
-Do **not** run this from a Codex task whose traffic traverses the serving proxy.
-Activate only after the preparing task has finished and you have verified the
-candidate hashes.
+Restart only Relay after verifying candidate hashes. Preserve Root and bridge
+process identity throughout.
 
 ```bash
-RELAY_CANDIDATE=/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260807T031713Z-90e19091
-RELAY_ROLLBACK=/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260731T093906Z-d12d4033
+RELAY_CANDIDATE=/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810T034432Z-398f082c
+RELAY_ROLLBACK=/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260807T031713Z-90e19091
 ROOT_LIVE=/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260805T052624Z-b6ff2fbc
 ```
 
@@ -103,7 +196,7 @@ ROOT_LIVE=/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260805T0526
    ```bash
    # New Relay binary/config
    shasum -a 256 "$(plutil -extract ProgramArguments.0 raw -o - "$HOME/Library/LaunchAgents/com.user.cliproxy-relay.plist")"
-   # Expect: 75bc1116f02f4a3aaef730ec3fbb37c3f8b027042c21cb0cdb9a218acd7f2d40
+   # Expect: 2d97b07d2643ec8bb7d78f502f5ffc012e475ec476a331ef86da1ce922336602
 
    # Root + bridge PIDs must be unchanged
    test "$(lsof -nP -iTCP@127.0.0.1:8317 -sTCP:LISTEN -t)" = "$ROOT_PID"
@@ -122,15 +215,13 @@ ROOT_LIVE=/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260805T0526
      http://127.0.0.1:8318/v1/responses | rg -q '"type":"response.completed"'
    ```
 
-5. Alias acceptance (Desktop or authenticated Relay):
+5. Delegation acceptance:
 
-   - On a `grok-4.5` Desktop turn, ask the agent to visually inspect a real local
-     PNG with `view_image`.
-   - Confirm the client still records the tool name as `view_image` (restore path).
-   - Optional deep check with temporary `request-log: true` on Relay: upstream
-     tools array should show `inspect_image`, never `read_file` for this alias.
-   - Regression: ask the agent to open a `SKILL.md` / source file. It should use
-     shell/`exec_command` (or another text path), **not** `view_image`.
+   - Send a `grok-4.5` delegated turn containing `agent_message` through Root.
+   - Require `response.completed` and no HTTP 422.
+   - Check the Relay request log structurally: upstream input must contain a user
+     `message` with `input_text`, never `agent_message` or nested
+     `encrypted_content`.
 
 6. If Relay verification fails, roll back Relay only:
 
@@ -142,7 +233,7 @@ ROOT_LIVE=/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260805T0526
    ```
 
    Reverify the rollback Relay binary hash
-   (`8e3ebb12efe844ec2dfd5edbefbec87c0ba311961932c4fcf890f16994645426`) and that
+   (`75bc1116f02f4a3aaef730ec3fbb37c3f8b027042c21cb0cdb9a218acd7f2d40`) and that
    Root/bridge PIDs never changed.
 
 ### Previous Root-only multi-agent v2 candidate (already live)

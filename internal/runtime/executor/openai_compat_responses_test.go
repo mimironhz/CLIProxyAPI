@@ -2,9 +2,11 @@ package executor
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -97,6 +99,193 @@ func TestOpenAICompatExecutorNormalizesResponsesToolSchemas(t *testing.T) {
 	}
 	if !parameters.Get("oneOf").IsArray() {
 		t.Errorf("upstream lost the original union: %s", string(gotBody))
+	}
+}
+
+func TestOpenAICompatExecutorStreamsDeepSeekDelegatedAgentMessageAsUserInput(t *testing.T) {
+	var gotBody []byte
+	var gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		var errRead error
+		gotBody, errRead = io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Errorf("read request body: %v", errRead)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"sequence_number\":1,\"response\":{\"id\":\"resp_delegate\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"id\":\"m1\",\"status\":\"completed\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"payload received\"}]}],\"usage\":{\"input_tokens\":2048,\"output_tokens\":2,\"total_tokens\":2050}}}\n\n"))
+	}))
+	defer server.Close()
+
+	envelope := "Message Type: NEW_TASK\nTask name: /root/phase2_service_fallback\nSender: /root\nPayload:\n"
+	taskBody := "BEGIN_DELEGATED_TASK\n" + strings.Repeat(
+		"Inspect the bounded service lane, preserve unrelated work, record structural evidence, and report the exact verification result.\n",
+		96,
+	) + "END_DELEGATED_TASK"
+	payload, errMarshal := json.Marshal(map[string]any{
+		"model":  "deepseek-v4-flash",
+		"stream": true,
+		"input": []any{
+			map[string]any{"type": "message", "role": "user", "content": []any{map[string]any{"type": "input_text", "text": "existing conversation"}}},
+			map[string]any{"type": "reasoning", "encrypted_content": "provider-opaque-reasoning"},
+			map[string]any{
+				"type":      "agent_message",
+				"id":        "amsg_delegate_fixture",
+				"author":    "/root",
+				"recipient": "/root/phase2_service_fallback",
+				"content": []any{
+					map[string]any{"type": "input_text", "text": envelope},
+					map[string]any{"type": "input_text", "text": taskBody},
+					map[string]any{"type": "encrypted_content", "encrypted_content": "opaque-agent-message-ciphertext"},
+				},
+				"internal_chat_message_metadata_passthrough": map[string]any{"turn_id": "turn_delegate_fixture"},
+			},
+		},
+	})
+	if errMarshal != nil {
+		t.Fatalf("marshal delegated request fixture: %v", errMarshal)
+	}
+
+	// Keep the optional broad optimization disabled. The compatibility boundary
+	// must still make this exact delegated turn visible to DeepSeek.
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := responsesAuth("http://api.deepseek.com/v1")
+	auth.ProxyURL = server.URL
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "deepseek-v4-flash",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream error: %v", chunk.Err)
+		}
+	}
+
+	if gotPath != "/v1/responses" {
+		t.Fatalf("upstream path = %q, want /v1/responses", gotPath)
+	}
+	message := gjson.GetBytes(gotBody, "input.2")
+	if got := message.Get("type").String(); got != "message" {
+		t.Fatalf("delegated item type = %q, want message", got)
+	}
+	if got := message.Get("role").String(); got != "user" {
+		t.Fatalf("delegated item role = %q, want user", got)
+	}
+	if got := message.Get("content.0.text").String(); got != envelope {
+		t.Fatalf("delegation envelope changed: got length %d, want %d", len(got), len(envelope))
+	}
+	if got := message.Get("content.1.text").String(); got != taskBody {
+		t.Fatalf("delegated task changed: got length %d, want %d", len(got), len(taskBody))
+	}
+	if got := message.Get("content.1.type").String(); got != "input_text" {
+		t.Fatalf("delegated task content type = %q, want input_text", got)
+	}
+	if got := message.Get("content.#").Int(); got != 2 {
+		t.Fatalf("delegated content parts = %d, want 2", got)
+	}
+	if strings.Contains(string(gotBody), "opaque-agent-message-ciphertext") {
+		t.Fatal("opaque encrypted_content was copied into the outbound DeepSeek request")
+	}
+}
+
+func TestPrepareDeepSeekCodexInputScope(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{"input":[{"type":"agent_message","content":[{"type":"input_text","text":"task"},{"type":"encrypted_content","encrypted_content":"opaque"}]}],"tools":[{"type":"namespace","name":"collaboration","tools":[{"type":"function","name":"spawn_agent","description":"unchanged","parameters":{"properties":{"message":{"type":"string","encrypted":true}}}},{"type":"function","name":"followup_task","parameters":{"properties":{"message":{"type":"string","encrypted":true}}}},{"type":"function","name":"send_message","parameters":{"properties":{"message":{"type":"string","encrypted":true}}}}]}]}`)
+	for _, tt := range []struct {
+		name     string
+		baseURL  string
+		wantType string
+	}{
+		{name: "DeepSeek", baseURL: "https://api.deepseek.com/v1", wantType: "message"},
+		{name: "other provider", baseURL: "https://example.com/v1", wantType: "agent_message"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := prepareDeepSeekCodexInput(tt.baseURL, payload)
+			if gotType := gjson.GetBytes(got, "input.0.type").String(); gotType != tt.wantType {
+				t.Fatalf("input type = %q, want %q; payload=%s", gotType, tt.wantType, got)
+			}
+			if tt.wantType == "message" {
+				if gjson.GetBytes(got, "input.0.content.#").Int() != 1 || strings.Contains(string(got), "opaque") {
+					t.Fatalf("DeepSeek child input exposed opaque content: %s", got)
+				}
+				for _, path := range []string{
+					"tools.0.tools.0.parameters.properties.message.encrypted",
+					"tools.0.tools.1.parameters.properties.message.encrypted",
+					"tools.0.tools.2.parameters.properties.message.encrypted",
+				} {
+					if gjson.GetBytes(got, path).Exists() {
+						t.Fatalf("DeepSeek parent schema retained encryption marker at %s: %s", path, got)
+					}
+				}
+			} else if string(got) != string(payload) {
+				t.Fatalf("unrelated provider payload changed: %s", got)
+			}
+		})
+	}
+}
+
+func TestOpenAICompatExecutorDeepSeekDelegatedPayloadIntegration(t *testing.T) {
+	apiKey := strings.TrimSpace(os.Getenv("CLIPROXY_DEEPSEEK_E2E_API_KEY"))
+	if apiKey == "" {
+		t.Skip("CLIPROXY_DEEPSEEK_E2E_API_KEY is unset")
+	}
+
+	const sentinel = "DEEPSEEK_DELEGATION_PAYLOAD_VISIBLE_7F3A9C"
+	envelope := "Message Type: NEW_TASK\nTask name: /root/deepseek_payload_probe\nSender: /root\nPayload:\n"
+	taskBody := "BEGIN_DELEGATED_TASK\n" + strings.Repeat(
+		"This is retained context for a delegated worker payload visibility probe. Read every line before answering.\n",
+		48,
+	) + "Reply with exactly this token and no other text: " + sentinel + "\nEND_DELEGATED_TASK"
+	payload, errMarshal := json.Marshal(map[string]any{
+		"model":  "deepseek-v4-flash",
+		"stream": true,
+		"input": []any{map[string]any{
+			"type":      "agent_message",
+			"id":        "amsg_deepseek_e2e_probe",
+			"author":    "/root",
+			"recipient": "/root/deepseek_payload_probe",
+			"content": []any{
+				map[string]any{"type": "input_text", "text": envelope},
+				map[string]any{"type": "input_text", "text": taskBody},
+			},
+			"internal_chat_message_metadata_passthrough": map[string]any{"turn_id": "turn_deepseek_e2e_probe"},
+		}},
+	})
+	if errMarshal != nil {
+		t.Fatalf("marshal delegated request: %v", errMarshal)
+	}
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := responsesAuth("https://api.deepseek.com/v1")
+	auth.Attributes["api_key"] = apiKey
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "deepseek-v4-flash",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	var output strings.Builder
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream error: %v", chunk.Err)
+		}
+		output.Write(chunk.Payload)
+	}
+	if !strings.Contains(output.String(), sentinel) {
+		t.Fatalf("DeepSeek response did not contain delegated payload sentinel; response bytes=%d", output.Len())
 	}
 }
 

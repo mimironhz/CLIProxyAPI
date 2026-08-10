@@ -491,6 +491,7 @@ func (c *Config) bridgeOptions() bridgeOptions {
 		relayModels:      append([]string(nil), c.Routing.RelayModels...),
 		relayProviders:   cloneStringMap(c.Routing.RelayModelProviders),
 		fastModels:       cloneModelSet(c.fastModels),
+		relayAgents:      c.Routing.MultiAgentV2Relay.All || len(c.multiAgentV2RelayModels) > 0,
 		maxMessageBytes:  c.Websocket.MaxMessageBytes,
 		maxPendingRoutes: c.Websocket.MaxPendingRoutes,
 		allowedOrigins:   append([]string(nil), c.Websocket.AllowedOrigins...),
@@ -505,6 +506,7 @@ func (c *Config) httpBridgeOptions() httpBridgeOptions {
 		relayModels:    append([]string(nil), c.Routing.RelayModels...),
 		relayProviders: cloneStringMap(c.Routing.RelayModelProviders),
 		fastModels:     cloneModelSet(c.fastModels),
+		relayAgents:    c.Routing.MultiAgentV2Relay.All || len(c.multiAgentV2RelayModels) > 0,
 		maxRequestBody: c.HTTP.MaxRequestBodyBytes,
 		allowedOrigins: append([]string(nil), c.Websocket.AllowedOrigins...),
 	}

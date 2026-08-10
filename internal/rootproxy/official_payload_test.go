@@ -30,6 +30,43 @@ func validKimiCompactionForRootTest(summary string) string {
 	return kimiCompactionPrefix + base64.StdEncoding.EncodeToString([]byte(summary))
 }
 
+func TestNormalizeRelayMultiAgentParentPayloadRemovesOnlyCollaborationMessageEncryption(t *testing.T) {
+	payload := []byte(`{
+		"tools":[{"type":"namespace","name":"collaboration","description":"unchanged namespace","tools":[
+			{"type":"function","name":"spawn_agent","description":"unchanged spawn description","parameters":{"type":"object","properties":{"message":{"type":"string","encrypted":true},"task_name":{"type":"string"}}}},
+			{"type":"function","name":"followup_task","parameters":{"type":"object","properties":{"message":{"type":"string","encrypted":true}}}},
+			{"type":"function","name":"send_message","parameters":{"type":"object","properties":{"message":{"type":"string","encrypted":true}}}}
+		]},{"type":"namespace","name":"notifications","tools":[
+			{"type":"function","name":"send_message","parameters":{"type":"object","properties":{"message":{"type":"string","encrypted":true}}}}
+		]}]
+	}`)
+
+	disabled := normalizeRelayMultiAgentParentPayload(payload, false)
+	if !bytes.Equal(disabled, payload) {
+		t.Fatalf("disabled Relay multi-agent shaping changed payload: %s", disabled)
+	}
+
+	got := normalizeRelayMultiAgentParentPayload(payload, true)
+	if gjson.GetBytes(got, "tools.0.tools.0.parameters.properties.message.encrypted").Exists() {
+		t.Fatalf("spawn_agent message encryption marker remains: %s", got)
+	}
+	if gjson.GetBytes(got, "tools.0.tools.1.parameters.properties.message.encrypted").Exists() {
+		t.Fatalf("followup_task message encryption marker remains: %s", got)
+	}
+	if gjson.GetBytes(got, "tools.0.tools.2.parameters.properties.message.encrypted").Exists() {
+		t.Fatalf("send_message message encryption marker remains: %s", got)
+	}
+	if encrypted := gjson.GetBytes(got, "tools.1.tools.0.parameters.properties.message.encrypted").Bool(); !encrypted {
+		t.Fatalf("unrelated send_message encryption marker changed: %s", got)
+	}
+	if description := gjson.GetBytes(got, "tools.0.tools.0.description").String(); description != "unchanged spawn description" {
+		t.Fatalf("spawn_agent description = %q", description)
+	}
+	if namespace := gjson.GetBytes(got, "tools.0.name").String(); namespace != "collaboration" {
+		t.Fatalf("namespace = %q, want collaboration", namespace)
+	}
+}
+
 func TestPrepareOfficialPayloadOrdinaryRequestPreservesBytes(t *testing.T) {
 	payload := []byte(" { \"model\" : \"gpt-stock\", \"input\" : [ { \"type\" : \"message\", \"role\" : \"user\", \"content\" : \"hello\" } ] } \n")
 	got, errPrepare := prepareOfficialPayload(payload)
