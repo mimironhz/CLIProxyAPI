@@ -20,9 +20,32 @@ Use the exact private deployment directory recorded in the handoff manifest.
 Verify every SHA-256 in `manifest.sha256` before loading a job. Do not rebuild
 or edit an artifact in place; create a new versioned directory instead.
 
-### Current handoff: official subagent plaintext compatibility
+### Current Root deployment: diagnostic capture disabled
 
-Frozen but inactive paired candidate:
+Root-only bundle activated on 2026-08-10:
+
+```text
+/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810T095458Z-root-debug-off
+```
+
+Relay remains on:
+
+```text
+/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810T093216Z-official-agent-message-safe-v2
+```
+
+Root already used the info log level (`debug: false`). This deployment also
+turns off complete stock request/response payload capture with
+`stock-request-response-log: false`, while retaining the metadata-only access
+log. It was activated with the repository helper's `--activate-root` mode,
+which verified that Relay PID `45527` and bridge PID `4462` did not change.
+
+The live verification request advanced `access.ndjson` while
+`stock-traffic.ndjson` retained the same byte size and modification time.
+
+### Deployed compatibility base: official subagent plaintext
+
+Activated paired compatibility candidate:
 
 ```text
 /Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810T093216Z-official-agent-message-safe-v2
