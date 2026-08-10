@@ -101,13 +101,14 @@ type websocketReadResult struct {
 }
 
 type websocketControllerState struct {
-	route            route
-	relayProvider    relayProvider
-	model            string
-	peer             *websocketPeer
-	generation       uint64
-	outstandingTurns int
-	stockExchanges   []*stockExchange
+	route                  route
+	relayProvider          relayProvider
+	model                  string
+	peer                   *websocketPeer
+	generation             uint64
+	outstandingTurns       int
+	restoreDelegationTurns []bool
+	stockExchanges         []*stockExchange
 }
 
 type pendingRouteSwitch struct {
@@ -358,8 +359,9 @@ func (b *websocketBridge) ServeHTTP(response http.ResponseWriter, request *http.
 		}
 	}
 	upstreamPayload := firstPayload
+	restoreDelegationNamespace := false
 	if selected == routeOfficial {
-		upstreamPayload = normalizeRelayMultiAgentParentPayload(firstPayload, b.relayAgents)
+		upstreamPayload, restoreDelegationNamespace = normalizeRelayMultiAgentParentPayload(firstPayload, b.relayAgents)
 		upstreamPayload, errEnvelope = prepareOfficialPayload(upstreamPayload)
 		if errEnvelope == nil {
 			// The first message is always a response.create, so it is a turn.
@@ -429,14 +431,19 @@ func (b *websocketBridge) ServeHTTP(response http.ResponseWriter, request *http.
 	registrationPending = false
 
 	log.WithFields(log.Fields{"provider": selected.String(), "relay_provider": selectedRelayProvider, "model": model}).Info("root proxy websocket route selected")
+	var restoreDelegationTurns []bool
+	if selected == routeOfficial {
+		restoreDelegationTurns = []bool{restoreDelegationNamespace}
+	}
 	b.runController(sessionContext, session, request.Header.Clone(), websocketControllerState{
-		route:            selected,
-		relayProvider:    selectedRelayProvider,
-		model:            model,
-		peer:             upstreamPeer,
-		generation:       1,
-		outstandingTurns: 1,
-		stockExchanges:   stockExchanges,
+		route:                  selected,
+		relayProvider:          selectedRelayProvider,
+		model:                  model,
+		peer:                   upstreamPeer,
+		generation:             1,
+		outstandingTurns:       1,
+		restoreDelegationTurns: restoreDelegationTurns,
+		stockExchanges:         stockExchanges,
 	}, downstreamResults, upstreamResults, &readers)
 }
 
@@ -703,6 +710,7 @@ func (b *websocketBridge) runController(
 			}
 
 			upstreamPayload := result.payload
+			restoreDelegationNamespace := false
 			var requestExchange *stockExchange
 			if state.route == routeOfficial {
 				if isCreate {
@@ -724,7 +732,7 @@ func (b *websocketBridge) runController(
 				}
 			}
 			if state.route == routeOfficial {
-				upstreamPayload = normalizeRelayMultiAgentParentPayload(result.payload, b.relayAgents)
+				upstreamPayload, restoreDelegationNamespace = normalizeRelayMultiAgentParentPayload(result.payload, b.relayAgents)
 				upstreamPayload, errInspect = prepareOfficialPayload(upstreamPayload)
 				if errInspect == nil && isCreate {
 					upstreamPayload, errInspect = applyOfficialFastServiceTier(upstreamPayload, nextModel, b.fastModels)
@@ -752,6 +760,7 @@ func (b *websocketBridge) runController(
 			}
 			if isCreate {
 				state.outstandingTurns++
+				state.restoreDelegationTurns = append(state.restoreDelegationTurns, restoreDelegationNamespace)
 				state.model = nextModel
 				state.relayProvider = nextRelayProvider
 				updateAccessSelection(ctx, "websocket", "responses", state.route, nextModel)
@@ -774,16 +783,19 @@ func (b *websocketBridge) runController(
 				b.terminateForReadResult(session, result)
 				return
 			}
+			downstreamPayload := result.payload
 			if state.route == routeOfficial {
 				recordWebsocketPayload(firstStockExchange(&state), "response", "official_to_root", "received", result.messageType, result.payload)
+				restoreDelegationNamespace := len(state.restoreDelegationTurns) > 0 && state.restoreDelegationTurns[0]
+				downstreamPayload = restoreRelayMultiAgentResponse(downstreamPayload, restoreDelegationNamespace)
 			}
-			if errWrite := session.downstream.writeMessage(result.messageType, result.payload); errWrite != nil {
+			if errWrite := session.downstream.writeMessage(result.messageType, downstreamPayload); errWrite != nil {
 				if !b.terminateFromBufferedDownstream(session, downstreamResults) {
 					session.forceClose()
 				}
 				return
 			}
-			addAccessResponseBytes(ctx, len(result.payload))
+			addAccessResponseBytes(ctx, len(downstreamPayload))
 			if upstreamEventIsError(result.payload) {
 				finishFirstStockExchange(&state, "failed", true, "upstream_error_event")
 				setAccessOutcome(ctx, "failed", "upstream_error_event", websocket.CloseNormalClosure)
@@ -800,6 +812,9 @@ func (b *websocketBridge) runController(
 			}
 			if state.outstandingTurns > 0 {
 				state.outstandingTurns--
+			}
+			if len(state.restoreDelegationTurns) > 0 {
+				state.restoreDelegationTurns = state.restoreDelegationTurns[1:]
 			}
 			if pending == nil || state.outstandingTurns > 0 {
 				continue
@@ -858,6 +873,7 @@ func (b *websocketBridge) performHandoff(
 		return false
 	}
 	payload := request.payload
+	restoreDelegationNamespace := false
 	if payloadContainsCompaction(request.payload) {
 		written := b.writeNonPortableStateError(session)
 		if candidateExchange != nil && written {
@@ -872,7 +888,7 @@ func (b *websocketBridge) performHandoff(
 		}
 	}
 	if nextRoute == routeOfficial {
-		payload = normalizeRelayMultiAgentParentPayload(request.payload, b.relayAgents)
+		payload, restoreDelegationNamespace = normalizeRelayMultiAgentParentPayload(request.payload, b.relayAgents)
 		payload, errRoute = prepareOfficialPayload(payload)
 		if errRoute == nil {
 			// A handoff only ever carries the response.create that changed target.
@@ -942,6 +958,10 @@ func (b *websocketBridge) performHandoff(
 	state.model = request.envelope.model
 	state.peer = candidate
 	state.outstandingTurns = 1
+	state.restoreDelegationTurns = nil
+	if nextRoute == routeOfficial {
+		state.restoreDelegationTurns = []bool{restoreDelegationNamespace}
+	}
 	if candidateExchange != nil {
 		state.stockExchanges = append(state.stockExchanges, candidateExchange)
 		exchangeTransferred = true

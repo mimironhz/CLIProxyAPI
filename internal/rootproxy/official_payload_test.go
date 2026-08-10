@@ -30,7 +30,7 @@ func validKimiCompactionForRootTest(summary string) string {
 	return kimiCompactionPrefix + base64.StdEncoding.EncodeToString([]byte(summary))
 }
 
-func TestNormalizeRelayMultiAgentParentPayloadRemovesOnlyCollaborationMessageEncryption(t *testing.T) {
+func TestNormalizeRelayMultiAgentParentPayloadAliasesCollaborationBeforeRemovingEncryption(t *testing.T) {
 	payload := []byte(`{
 		"tools":[{"type":"namespace","name":"collaboration","description":"unchanged namespace","tools":[
 			{"type":"function","name":"spawn_agent","description":"unchanged spawn description","parameters":{"type":"object","properties":{"message":{"type":"string","encrypted":true},"task_name":{"type":"string"}}}},
@@ -41,12 +41,21 @@ func TestNormalizeRelayMultiAgentParentPayloadRemovesOnlyCollaborationMessageEnc
 		]}]
 	}`)
 
-	disabled := normalizeRelayMultiAgentParentPayload(payload, false)
+	disabled, disabledOptimized := normalizeRelayMultiAgentParentPayload(payload, false)
+	if disabledOptimized {
+		t.Fatal("disabled Relay multi-agent shaping reported an optimized namespace")
+	}
 	if !bytes.Equal(disabled, payload) {
 		t.Fatalf("disabled Relay multi-agent shaping changed payload: %s", disabled)
 	}
 
-	got := normalizeRelayMultiAgentParentPayload(payload, true)
+	got, optimized := normalizeRelayMultiAgentParentPayload(payload, true)
+	if !optimized {
+		t.Fatal("Relay multi-agent shaping did not alias the collaboration namespace")
+	}
+	if namespace := gjson.GetBytes(got, "tools.0.name").String(); namespace != "collaboration-optimize" {
+		t.Fatalf("collaboration namespace = %q, want collaboration-optimize: %s", namespace, got)
+	}
 	if gjson.GetBytes(got, "tools.0.tools.0.parameters.properties.message.encrypted").Exists() {
 		t.Fatalf("spawn_agent message encryption marker remains: %s", got)
 	}
@@ -62,8 +71,8 @@ func TestNormalizeRelayMultiAgentParentPayloadRemovesOnlyCollaborationMessageEnc
 	if description := gjson.GetBytes(got, "tools.0.tools.0.description").String(); description != "unchanged spawn description" {
 		t.Fatalf("spawn_agent description = %q", description)
 	}
-	if namespace := gjson.GetBytes(got, "tools.0.name").String(); namespace != "collaboration" {
-		t.Fatalf("namespace = %q, want collaboration", namespace)
+	if description := gjson.GetBytes(got, "tools.0.description").String(); description != "unchanged namespace" {
+		t.Fatalf("namespace description = %q, want unchanged namespace", description)
 	}
 }
 

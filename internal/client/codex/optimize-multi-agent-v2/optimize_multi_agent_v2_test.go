@@ -1,6 +1,7 @@
 package multiagentv2
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"net/http/httptest"
@@ -304,6 +305,60 @@ func TestNormalizeCodexDelegationMessageSchema(t *testing.T) {
 	}
 	if encrypted := gjson.GetBytes(got, "tools.1.tools.0.parameters.properties.message.encrypted").Bool(); !encrypted {
 		t.Fatalf("unrelated send_message schema changed: %s", got)
+	}
+}
+
+func TestPrepareCodexRelayDelegationRequest(t *testing.T) {
+	t.Parallel()
+
+	t.Run("followup-only reserved namespace", func(t *testing.T) {
+		payload := []byte(`{"tools":[{"type":"namespace","name":"collaboration","description":"unchanged namespace","tools":[{"type":"function","name":"followup_task","description":"unchanged followup","parameters":{"properties":{"message":{"type":"string","encrypted":true}}}},{"type":"function","name":"send_message","parameters":{"properties":{"message":{"type":"string","encrypted":true}}}}]}]}`)
+		got, optimized := PrepareCodexRelayDelegationRequest(payload)
+		if !optimized {
+			t.Fatal("followup-only collaboration namespace was not optimized")
+		}
+		if namespace := gjson.GetBytes(got, "tools.0.name").String(); namespace != codexOptimizedCollaborationNamespace {
+			t.Fatalf("namespace = %q, want %q: %s", namespace, codexOptimizedCollaborationNamespace, got)
+		}
+		for _, path := range []string{
+			"tools.0.tools.0.parameters.properties.message.encrypted",
+			"tools.0.tools.1.parameters.properties.message.encrypted",
+		} {
+			if gjson.GetBytes(got, path).Exists() {
+				t.Fatalf("encryption marker remains at %s: %s", path, got)
+			}
+		}
+		if description := gjson.GetBytes(got, "tools.0.tools.0.description").String(); description != "unchanged followup" {
+			t.Fatalf("followup description changed: %q", description)
+		}
+	})
+
+	for _, tt := range []struct {
+		name    string
+		payload []byte
+	}{
+		{
+			name:    "namespace collision",
+			payload: []byte(`{"tools":[{"type":"namespace","name":"collaboration","tools":[{"type":"function","name":"spawn_agent","parameters":{"properties":{"message":{"encrypted":true}}}}]},{"type":"namespace","name":"collaboration-optimize","tools":[]}]}`),
+		},
+		{
+			name:    "unrelated namespace",
+			payload: []byte(`{"tools":[{"type":"namespace","name":"mail","tools":[{"type":"function","name":"send_message","parameters":{"properties":{"message":{"encrypted":true}}}}]}]}`),
+		},
+		{
+			name:    "unnamespaced spawn",
+			payload: []byte(`{"tools":[{"type":"function","name":"spawn_agent","parameters":{"properties":{"message":{"encrypted":true}}}}]}`),
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, optimized := PrepareCodexRelayDelegationRequest(tt.payload)
+			if optimized {
+				t.Fatal("payload unexpectedly optimized")
+			}
+			if !bytes.Equal(got, tt.payload) {
+				t.Fatalf("unmapped payload changed: %s", got)
+			}
+		})
 	}
 }
 

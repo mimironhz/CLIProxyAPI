@@ -1,6 +1,7 @@
 package rootproxy
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -308,6 +309,7 @@ func (b *httpBridge) serve(response http.ResponseWriter, request *http.Request, 
 
 	forwardBody := rawBody
 	forwardEncoding := contentEncoding
+	restoreDelegationNamespace := false
 	switch endpoint {
 	case httpEndpointResponses:
 		if !stream.present || stream.isNull || !stream.value {
@@ -315,7 +317,8 @@ func (b *httpBridge) serve(response http.ResponseWriter, request *http.Request, 
 			return
 		}
 		if selected == routeOfficial {
-			parentBody := normalizeRelayMultiAgentParentPayload(decodedBody, b.relayAgents)
+			parentBody := decodedBody
+			parentBody, restoreDelegationNamespace = normalizeRelayMultiAgentParentPayload(parentBody, b.relayAgents)
 			normalizedBody, errPrepare := prepareOfficialPayload(parentBody)
 			if errPrepare != nil {
 				writeStockHTTPError(response, exchange, http.StatusBadRequest, "invalid_request_error", errPrepare.Error(), "input", "rejected", "official_payload_invalid")
@@ -372,7 +375,7 @@ func (b *httpBridge) serve(response http.ResponseWriter, request *http.Request, 
 			"content_encoding": forwardEncoding,
 		})
 	}
-	b.forward(response, request, selected, endpoint, forwardBody, forwardEncoding, exchange)
+	b.forward(response, request, selected, endpoint, forwardBody, forwardEncoding, restoreDelegationNamespace, exchange)
 }
 
 func (b *httpBridge) originAllowed(headers http.Header) bool {
@@ -520,7 +523,7 @@ func inspectHTTPStream(payload []byte) (optionalBool, error) {
 	return stream, nil
 }
 
-func (b *httpBridge) forward(response http.ResponseWriter, inbound *http.Request, selected route, endpoint httpEndpoint, body []byte, contentEncoding string, exchange *stockExchange) {
+func (b *httpBridge) forward(response http.ResponseWriter, inbound *http.Request, selected route, endpoint httpEndpoint, body []byte, contentEncoding string, restoreDelegationNamespace bool, exchange *stockExchange) {
 	headers, errHeaders := buildUpstreamHeaders(inbound.Header, selected, b.relayAPIKey)
 	if errHeaders != nil {
 		setAccessOutcome(inbound.Context(), "failed", "upstream_headers_unavailable", 0)
@@ -589,7 +592,7 @@ func (b *httpBridge) forward(response http.ResponseWriter, inbound *http.Request
 	copyHTTPResponseHeaders(response.Header(), upstreamResponse.Header)
 	response.WriteHeader(upstreamResponse.StatusCode)
 	responseContentEncoding := strings.Join(headerValuesCaseInsensitive(upstreamResponse.Header, "Content-Encoding"), ",")
-	copyResult := b.copyResponseBody(response, upstreamResponse.Body, streamResponse, responseContentEncoding, exchange)
+	copyResult := b.copyResponseBody(response, upstreamResponse.Body, streamResponse, responseContentEncoding, restoreDelegationNamespace, exchange)
 	if copyResult.complete {
 		exchange.finish(capturedHTTPOutcome(upstreamResponse.StatusCode), true, "")
 		return
@@ -619,7 +622,11 @@ type responseCopyResult struct {
 	downstreamFailure bool
 }
 
-func (b *httpBridge) copyResponseBody(response http.ResponseWriter, body io.Reader, flush bool, contentEncoding string, exchange *stockExchange) responseCopyResult {
+func (b *httpBridge) copyResponseBody(response http.ResponseWriter, body io.Reader, flush bool, contentEncoding string, restoreDelegationNamespace bool, exchange *stockExchange) responseCopyResult {
+	responseEncoding := strings.ToLower(strings.TrimSpace(contentEncoding))
+	if restoreDelegationNamespace && flush && (responseEncoding == "" || responseEncoding == "identity") {
+		return b.copyRestoredSSEResponseBody(response, body, exchange)
+	}
 	buffer := make([]byte, 32<<10)
 	flusher, canFlush := response.(http.Flusher)
 	sequence := 0
@@ -647,6 +654,80 @@ func (b *httpBridge) copyResponseBody(response http.ResponseWriter, body io.Read
 			return responseCopyResult{complete: true}
 		}
 	}
+}
+
+func (b *httpBridge) copyRestoredSSEResponseBody(response http.ResponseWriter, body io.Reader, exchange *stockExchange) responseCopyResult {
+	scanner := bufio.NewScanner(body)
+	scanner.Buffer(make([]byte, 64<<10), 52_428_800)
+	scanner.Split(splitSSELines)
+	flusher, canFlush := response.(http.Flusher)
+	sequence := 0
+	for scanner.Scan() {
+		line := bytes.Clone(scanner.Bytes())
+		sequence++
+		exchange.recordPayload("response_chunk", "official_to_root", line, map[string]any{
+			"chunk":            sequence,
+			"content_encoding": "",
+		})
+		restored := restoreRelayMultiAgentSSELine(line)
+		written, errWrite := response.Write(restored)
+		if errWrite != nil || written != len(restored) {
+			return responseCopyResult{downstreamFailure: true}
+		}
+		if canFlush {
+			flusher.Flush()
+		}
+	}
+	if errScan := scanner.Err(); errScan != nil {
+		log.WithError(errScan).Debug("root proxy HTTP upstream stream ended")
+		return responseCopyResult{}
+	}
+	return responseCopyResult{complete: true}
+}
+
+func splitSSELines(data []byte, atEOF bool) (advance int, token []byte, err error) {
+	if index := bytes.IndexByte(data, '\n'); index >= 0 {
+		return index + 1, data[:index+1], nil
+	}
+	if atEOF && len(data) > 0 {
+		return len(data), data, nil
+	}
+	return 0, nil, nil
+}
+
+func restoreRelayMultiAgentSSELine(line []byte) []byte {
+	content := line
+	lineEnding := []byte(nil)
+	switch {
+	case bytes.HasSuffix(content, []byte("\r\n")):
+		content = content[:len(content)-2]
+		lineEnding = []byte("\r\n")
+	case bytes.HasSuffix(content, []byte("\n")):
+		content = content[:len(content)-1]
+		lineEnding = []byte("\n")
+	}
+	if !bytes.HasPrefix(content, []byte("data:")) {
+		return line
+	}
+	payloadStart := len("data:")
+	for payloadStart < len(content) && (content[payloadStart] == ' ' || content[payloadStart] == '\t') {
+		payloadStart++
+	}
+	payloadEnd := len(content)
+	for payloadEnd > payloadStart && (content[payloadEnd-1] == ' ' || content[payloadEnd-1] == '\t') {
+		payloadEnd--
+	}
+	payload := content[payloadStart:payloadEnd]
+	restored := restoreRelayMultiAgentResponse(payload, true)
+	if bytes.Equal(restored, payload) {
+		return line
+	}
+	output := make([]byte, 0, len(line)-len(payload)+len(restored))
+	output = append(output, content[:payloadStart]...)
+	output = append(output, restored...)
+	output = append(output, content[payloadEnd:]...)
+	output = append(output, lineEnding...)
+	return output
 }
 
 func copyHTTPResponseHeaders(target, source http.Header) {

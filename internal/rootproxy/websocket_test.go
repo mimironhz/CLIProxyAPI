@@ -147,13 +147,37 @@ func TestWebsocketBridgeRoutesStockAndRelayWithCredentialIsolation(t *testing.T)
 }
 
 func TestWebsocketBridgeForwardsPlaintextCollaborationMessageSchemasToOfficial(t *testing.T) {
-	stockCapture := make(chan capturedMessage, 1)
-	relayCapture := make(chan capturedMessage, 1)
-	var stockConnections atomic.Int32
-	var relayConnections atomic.Int32
-	stockServer := newEchoWebsocketServer(t, &stockConnections, stockCapture)
-	relayServer := newEchoWebsocketServer(t, &relayConnections, relayCapture)
-	bridge := newTestBridge(t, websocketURL(stockServer.URL), websocketURL(relayServer.URL), func(options *bridgeOptions) {
+	stockCapture := make(chan capturedMessage, 3)
+	stockServer := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		connection, errUpgrade := testUpgrader().Upgrade(response, request, nil)
+		if errUpgrade != nil {
+			t.Errorf("upgrade mapped upstream: %v", errUpgrade)
+			return
+		}
+		defer func() { _ = connection.Close() }()
+		for index := 0; index < 3; index++ {
+			messageType, payload, errRead := connection.ReadMessage()
+			if errRead != nil {
+				t.Errorf("read mapped upstream request %d: %v", index, errRead)
+				return
+			}
+			stockCapture <- capturedMessage{messageType: messageType, payload: append([]byte(nil), payload...)}
+			call := []byte(`{"type":"response.output_item.done","item":{"type":"function_call","namespace":"collaboration-optimize","name":"followup_task","arguments":"{\"opaque\":\"collaboration-optimize\"}"}}`)
+			if index == 1 {
+				call = []byte(`{"type":"response.output_item.done","item":{"type":"function_call","name":"collaboration-optimize__send_message","arguments":"{}"}}`)
+			}
+			if errWrite := connection.WriteMessage(messageType, call); errWrite != nil {
+				t.Errorf("write mapped upstream call %d: %v", index, errWrite)
+				return
+			}
+			if errWrite := connection.WriteMessage(messageType, []byte(`{"type":"response.completed"}`)); errWrite != nil {
+				t.Errorf("write mapped upstream terminal %d: %v", index, errWrite)
+				return
+			}
+		}
+	}))
+	t.Cleanup(stockServer.Close)
+	bridge := newTestBridge(t, websocketURL(stockServer.URL), websocketURL(stockServer.URL), func(options *bridgeOptions) {
 		options.relayAgents = true
 	})
 	rootServer := httptest.NewServer(bridge)
@@ -161,21 +185,62 @@ func TestWebsocketBridgeForwardsPlaintextCollaborationMessageSchemasToOfficial(t
 
 	connection := dialRootWebsocket(t, rootServer.URL, "/v1/responses", desktopHTTPHeaders())
 	defer func() { _ = connection.Close() }()
-	payload := []byte(`{"type":"response.create","model":"gpt-stock","input":[],"tools":[{"type":"namespace","name":"collaboration","tools":[{"type":"function","name":"spawn_agent","parameters":{"properties":{"message":{"type":"string","encrypted":true}}}},{"type":"function","name":"followup_task","parameters":{"properties":{"message":{"type":"string","encrypted":true}}}},{"type":"function","name":"send_message","parameters":{"properties":{"message":{"type":"string","encrypted":true}}}}]},{"type":"namespace","name":"mail","tools":[{"type":"function","name":"send_message","parameters":{"properties":{"message":{"type":"string","encrypted":true}}}}]}]}`)
-	if errWrite := connection.WriteMessage(websocket.TextMessage, payload); errWrite != nil {
-		t.Fatalf("write first message: %v", errWrite)
+	turns := []struct {
+		payload        []byte
+		wantName       string
+		wantNamespace  string
+		wantOptimized  bool
+		wantOpaqueArgs bool
+	}{
+		{
+			payload:        []byte(`{"type":"response.create","model":"gpt-stock","input":[],"tools":[{"type":"namespace","name":"collaboration","tools":[{"type":"function","name":"spawn_agent","parameters":{"properties":{"message":{"type":"string","encrypted":true}}}},{"type":"function","name":"followup_task","parameters":{"properties":{"message":{"type":"string","encrypted":true}}}},{"type":"function","name":"send_message","parameters":{"properties":{"message":{"type":"string","encrypted":true}}}}]},{"type":"namespace","name":"mail","tools":[{"type":"function","name":"send_message","parameters":{"properties":{"message":{"type":"string","encrypted":true}}}}]}]}`),
+			wantName:       "followup_task",
+			wantNamespace:  "collaboration",
+			wantOptimized:  true,
+			wantOpaqueArgs: true,
+		},
+		{
+			payload:       []byte(`{"type":"response.create","model":"gpt-stock","input":[],"tools":[{"type":"namespace","name":"collaboration","tools":[{"type":"function","name":"followup_task","parameters":{"properties":{"message":{"type":"string","encrypted":true}}}},{"type":"function","name":"send_message","parameters":{"properties":{"message":{"type":"string","encrypted":true}}}}]}]}`),
+			wantName:      "collaboration__send_message",
+			wantOptimized: true,
+		},
+		{
+			payload:       []byte(`{"type":"response.create","model":"gpt-stock","input":[],"tools":[{"type":"namespace","name":"collaboration","tools":[{"type":"function","name":"followup_task","parameters":{"properties":{"message":{"type":"string","encrypted":true}}}}]},{"type":"namespace","name":"collaboration-optimize","tools":[]}]}`),
+			wantName:      "followup_task",
+			wantNamespace: "collaboration-optimize",
+		},
 	}
-
-	captured := receiveCapture(t, stockCapture)
-	assertDelegationMessageSchemaRewrite(t, captured.payload)
-	messageType, echoed, errRead := connection.ReadMessage()
-	if errRead != nil {
-		t.Fatalf("read rewritten echo: %v", errRead)
+	for index, turn := range turns {
+		if errWrite := connection.WriteMessage(websocket.TextMessage, turn.payload); errWrite != nil {
+			t.Fatalf("write turn %d: %v", index, errWrite)
+		}
+		captured := receiveCapture(t, stockCapture)
+		if turn.wantOptimized {
+			assertDelegationMessageSchemaRewrite(t, captured.payload)
+		} else if !bytes.Equal(captured.payload, turn.payload) {
+			t.Fatalf("unmapped collision turn changed: %s", captured.payload)
+		}
+		messageType, call, errRead := connection.ReadMessage()
+		if errRead != nil {
+			t.Fatalf("read turn %d call: %v", index, errRead)
+		}
+		if messageType != websocket.TextMessage {
+			t.Fatalf("turn %d call message type = %d, want text", index, messageType)
+		}
+		item := gjson.GetBytes(call, "item")
+		if name := item.Get("name").String(); name != turn.wantName {
+			t.Fatalf("turn %d client tool name = %q, want %q: %s", index, name, turn.wantName, call)
+		}
+		if namespace := item.Get("namespace").String(); namespace != turn.wantNamespace {
+			t.Fatalf("turn %d client namespace = %q, want %q: %s", index, namespace, turn.wantNamespace, call)
+		}
+		if turn.wantOpaqueArgs && !strings.Contains(item.Get("arguments").String(), "collaboration-optimize") {
+			t.Fatalf("turn %d opaque arguments changed: %s", index, call)
+		}
+		if _, _, errRead = connection.ReadMessage(); errRead != nil {
+			t.Fatalf("read turn %d terminal: %v", index, errRead)
+		}
 	}
-	if messageType != websocket.TextMessage {
-		t.Fatalf("echo message type = %d, want text", messageType)
-	}
-	assertDelegationMessageSchemaRewrite(t, echoed)
 }
 
 func TestWebsocketBridgeRejectsInvalidFirstMessagesWithoutDialing(t *testing.T) {
