@@ -846,7 +846,8 @@ func (e *OpenAICompatExecutor) usesResponsesAPI(auth *cliproxyauth.Auth, from, r
 // prepareDeepSeekCodexInput adapts only the Codex delegation fields DeepSeek
 // cannot consume. It runs before protocol translation so Chat Completions does
 // not silently discard agent_message, while the broader optimization remains
-// opt-in and opaque encrypted task parts are never exposed as text.
+// opt-in. Plaintext parts mislabeled by Codex are restored only under the
+// verified delivery shape; opaque encrypted task parts are never exposed.
 func prepareDeepSeekCodexInput(baseURL string, payload []byte) []byte {
 	if !helps.IsDeepSeekBaseURL(baseURL) {
 		return payload

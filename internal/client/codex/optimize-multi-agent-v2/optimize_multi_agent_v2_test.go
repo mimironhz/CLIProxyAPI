@@ -3,6 +3,7 @@ package multiagentv2
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -448,7 +449,8 @@ Preserve the complete task body and repeat DEEPSEEK_INITIAL_20260810T0542Z_7K9M2
 END_DELEGATED_TASK
   </input>
 </codex_delegation>`
-	payload := []byte(fmt.Sprintf(`{"input":[{"type":"agent_message","id":"amsg_live","author":"/root","recipient":"/root/live_probe","content":[{"type":"input_text","text":"Message Type: NEW_TASK\nTask name: /root/live_probe\nSender: /root\nPayload:\n"},{"type":"encrypted_content","encrypted_content":%q},{"type":"encrypted_content","encrypted_content":"Z0FBQUFBQm9wYXF1ZS1jaXBoZXJ0ZXh0"}]}]}`, delegation))
+	opaque := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x00, 0xff, 0x81, 0x42}, 48))
+	payload := []byte(fmt.Sprintf(`{"input":[{"type":"agent_message","id":"amsg_live","author":"/root","recipient":"/root/live_probe","content":[{"type":"input_text","text":"Message Type: NEW_TASK\nTask name: /root/live_probe\nSender: /root\nPayload:\n"},{"type":"encrypted_content","encrypted_content":%q},{"type":"encrypted_content","encrypted_content":%q}]}]}`, delegation, opaque))
 
 	got := NormalizeCodexAgentMessageInput(payload)
 	message := gjson.GetBytes(got, "input.0")
@@ -468,8 +470,59 @@ END_DELEGATED_TASK
 	if gotText := promoted.Get("text").String(); gotText != delegation {
 		t.Fatalf("promoted text changed: got length %d, want %d", len(gotText), len(delegation))
 	}
-	if promoted.Get("encrypted_content").Exists() || strings.Contains(string(got), "Z0FBQUFBQm9wYXF1ZS1jaXBoZXJ0ZXh0") {
+	if promoted.Get("encrypted_content").Exists() || strings.Contains(string(got), opaque) {
 		t.Fatalf("encrypted content remained visible: %s", got)
+	}
+}
+
+func TestNormalizeCodexAgentMessageInputPromotesPlaintextFollowupWithDeliveryEnvelope(t *testing.T) {
+	t.Parallel()
+
+	envelope := "Message Type: NEW_TASK\nTask name: /root/deepseek_live_visibility_v2\nSender: /root\nPayload:\n"
+	followup := "This is the same-worker follow-up delivery proof. Reply exactly DEEPSEEK_FOLLOWUP_20260810T0606Z_Q2W7C."
+	payload := []byte(fmt.Sprintf(`{"input":[{"type":"agent_message","id":"amsg_followup","author":"/root","recipient":"/root/deepseek_live_visibility_v2","content":[{"type":"input_text","text":%q},{"type":"encrypted_content","encrypted_content":%q}]}]}`, envelope, followup))
+
+	got := NormalizeCodexAgentMessageInput(payload)
+	message := gjson.GetBytes(got, "input.0")
+	if gotType := message.Get("type").String(); gotType != "message" {
+		t.Fatalf("type = %q, want message; payload=%s", gotType, got)
+	}
+	if gotRole := message.Get("role").String(); gotRole != "user" {
+		t.Fatalf("role = %q, want user; payload=%s", gotRole, got)
+	}
+	if gotCount := message.Get("content.#").Int(); gotCount != 2 {
+		t.Fatalf("content count = %d, want 2; payload=%s", gotCount, got)
+	}
+	if gotText := message.Get("content.1.text").String(); gotText != followup {
+		t.Fatalf("follow-up changed: got %q, want %q", gotText, followup)
+	}
+	if message.Get("content.1.encrypted_content").Exists() {
+		t.Fatalf("follow-up retained encrypted_content: %s", got)
+	}
+}
+
+func TestNormalizeCodexAgentMessageInputDoesNotPromoteOpaqueContentWithDeliveryEnvelope(t *testing.T) {
+	t.Parallel()
+
+	envelope := "Message Type: NEW_TASK\nTask name: /root/deepseek_live_visibility_v2\nSender: /root\nPayload:\n"
+	opaque := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x00, 0xff, 0x81, 0x42}, 48))
+	payload := []byte(fmt.Sprintf(`{"input":[{"type":"agent_message","content":[{"type":"input_text","text":%q},{"type":"encrypted_content","encrypted_content":%q},{"type":"encrypted_content","encrypted_content":"gAAAAAopaque"}]}]}`, envelope, opaque))
+
+	got := NormalizeCodexAgentMessageInput(payload)
+	if count := gjson.GetBytes(got, "input.0.content.#").Int(); count != 1 {
+		t.Fatalf("content count = %d, want 1; payload=%s", count, got)
+	}
+	if strings.Contains(string(got), opaque) || strings.Contains(string(got), "gAAAAAopaque") {
+		t.Fatalf("opaque content was exposed: %s", got)
+	}
+	if isCodexPlaintextAgentMessageContent("printable\x01control") {
+		t.Fatal("control-bearing content was accepted as plaintext")
+	}
+	if isCodexAgentMessageDeliveryEnvelope("Message Type: NEW_TASK\nTask name: worker\nSender: /root\nPayload:\n") {
+		t.Fatal("non-canonical task path was accepted as a delivery envelope")
+	}
+	if !isCodexAgentMessageDeliveryEnvelope("Message Type: MESSAGE\nTask name: /root/worker\nSender: /root/coordinator\nPayload:\n") {
+		t.Fatal("canonical send_message delivery envelope was rejected")
 	}
 }
 

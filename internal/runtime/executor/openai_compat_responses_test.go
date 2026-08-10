@@ -1,7 +1,9 @@
 package executor
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -126,6 +128,8 @@ func TestOpenAICompatExecutorStreamsDeepSeekDelegatedAgentMessageAsUserInput(t *
 		"  <source_thread_id>019fe9b7-a4c3-7820-be88-ec9e4f83b85d</source_thread_id>\n" +
 		"  <input>\n" + taskBody + "\n  </input>\n" +
 		"</codex_delegation>"
+	followupBody := "This is the same-worker follow-up delivery proof. Reply exactly DEEPSEEK_FOLLOWUP_VISIBLE_20260810."
+	opaqueAgentContent := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x00, 0xff, 0x81, 0x42}, 48))
 	payload, errMarshal := json.Marshal(map[string]any{
 		"model":  "deepseek-v4-flash",
 		"stream": true,
@@ -140,9 +144,20 @@ func TestOpenAICompatExecutorStreamsDeepSeekDelegatedAgentMessageAsUserInput(t *
 				"content": []any{
 					map[string]any{"type": "input_text", "text": envelope},
 					map[string]any{"type": "encrypted_content", "encrypted_content": delegation},
-					map[string]any{"type": "encrypted_content", "encrypted_content": "opaque-agent-message-ciphertext"},
+					map[string]any{"type": "encrypted_content", "encrypted_content": opaqueAgentContent},
 				},
 				"internal_chat_message_metadata_passthrough": map[string]any{"turn_id": "turn_delegate_fixture"},
+			},
+			map[string]any{
+				"type":      "agent_message",
+				"id":        "amsg_followup_fixture",
+				"author":    "/root",
+				"recipient": "/root/phase2_service_fallback",
+				"content": []any{
+					map[string]any{"type": "input_text", "text": envelope},
+					map[string]any{"type": "encrypted_content", "encrypted_content": followupBody},
+				},
+				"internal_chat_message_metadata_passthrough": map[string]any{"turn_id": "turn_followup_fixture"},
 			},
 		},
 	})
@@ -193,8 +208,21 @@ func TestOpenAICompatExecutorStreamsDeepSeekDelegatedAgentMessageAsUserInput(t *
 	if got := message.Get("content.#").Int(); got != 2 {
 		t.Fatalf("delegated content parts = %d, want 2", got)
 	}
-	if strings.Contains(string(gotBody), "opaque-agent-message-ciphertext") {
+	if strings.Contains(string(gotBody), opaqueAgentContent) {
 		t.Fatal("opaque encrypted_content was copied into the outbound DeepSeek request")
+	}
+	followup := gjson.GetBytes(gotBody, "input.3")
+	if got := followup.Get("type").String(); got != "message" {
+		t.Fatalf("follow-up item type = %q, want message", got)
+	}
+	if got := followup.Get("role").String(); got != "user" {
+		t.Fatalf("follow-up role = %q, want user", got)
+	}
+	if got := followup.Get("content.1.type").String(); got != "input_text" {
+		t.Fatalf("follow-up content type = %q, want input_text", got)
+	}
+	if got := followup.Get("content.1.text").String(); got != followupBody {
+		t.Fatalf("follow-up changed: got %q, want %q", got, followupBody)
 	}
 }
 
@@ -242,16 +270,17 @@ func TestOpenAICompatExecutorDeepSeekDelegatedPayloadIntegration(t *testing.T) {
 		t.Skip("CLIPROXY_DEEPSEEK_E2E_API_KEY is unset")
 	}
 
-	const sentinel = "DEEPSEEK_DELEGATION_PAYLOAD_VISIBLE_7F3A9C"
+	const sentinel = "DEEPSEEK_FOLLOWUP_PAYLOAD_VISIBLE_7F3A9C"
 	envelope := "Message Type: NEW_TASK\nTask name: /root/deepseek_payload_probe\nSender: /root\nPayload:\n"
 	taskBody := "BEGIN_DELEGATED_TASK\n" + strings.Repeat(
 		"This is retained context for a delegated worker payload visibility probe. Read every line before answering.\n",
 		48,
-	) + "Reply with exactly this token and no other text: " + sentinel + "\nEND_DELEGATED_TASK"
+	) + "Retain this initial task context for the next message.\nEND_DELEGATED_TASK"
 	delegation := "<codex_delegation>\n" +
 		"  <source_thread_id>019fe9b7-a4c3-7820-be88-ec9e4f83b85d</source_thread_id>\n" +
 		"  <input>\n" + taskBody + "\n  </input>\n" +
 		"</codex_delegation>"
+	opaqueAgentContent := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x00, 0xff, 0x81, 0x42}, 48))
 	payload, errMarshal := json.Marshal(map[string]any{
 		"model":  "deepseek-v4-flash",
 		"stream": true,
@@ -263,9 +292,19 @@ func TestOpenAICompatExecutorDeepSeekDelegatedPayloadIntegration(t *testing.T) {
 			"content": []any{
 				map[string]any{"type": "input_text", "text": envelope},
 				map[string]any{"type": "encrypted_content", "encrypted_content": delegation},
-				map[string]any{"type": "encrypted_content", "encrypted_content": "opaque-agent-message-ciphertext"},
+				map[string]any{"type": "encrypted_content", "encrypted_content": opaqueAgentContent},
 			},
 			"internal_chat_message_metadata_passthrough": map[string]any{"turn_id": "turn_deepseek_e2e_probe"},
+		}, map[string]any{
+			"type":      "agent_message",
+			"id":        "amsg_deepseek_e2e_followup",
+			"author":    "/root",
+			"recipient": "/root/deepseek_payload_probe",
+			"content": []any{
+				map[string]any{"type": "input_text", "text": envelope},
+				map[string]any{"type": "encrypted_content", "encrypted_content": "This is the follow-up payload. Reply with exactly this token and no other text: " + sentinel},
+			},
+			"internal_chat_message_metadata_passthrough": map[string]any{"turn_id": "turn_deepseek_e2e_followup"},
 		}},
 	})
 	if errMarshal != nil {

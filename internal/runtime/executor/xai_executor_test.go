@@ -352,6 +352,7 @@ func TestXAIExecutorPrepareResponsesRequestRewritesCodexAgentMessageWithoutOptim
 GROK_DELEGATION_VISIBLE_20260810
   </input>
 </codex_delegation>`
+	opaqueAgentContent := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x00, 0xff, 0x81, 0x42}, 48))
 	payload := []byte(fmt.Sprintf(`{
 		"model":"grok-4.5",
 		"input":[{
@@ -362,11 +363,11 @@ GROK_DELEGATION_VISIBLE_20260810
 			"content":[
 				{"type":"input_text","text":"Message Type: NEW_TASK\nTask name: /root/arithmetic_question\nSender: /root\nPayload:\n"},
 				{"type":"encrypted_content","encrypted_content":%q},
-				{"type":"encrypted_content","encrypted_content":"opaque-agent-message-ciphertext"}
+				{"type":"encrypted_content","encrypted_content":%q}
 			],
 			"internal_chat_message_metadata_passthrough":{"turn_id":"019f92c3-6772-7213-8aac-8bd154d528f1"}
 		}]
-	}`, delegation))
+	}`, delegation, opaqueAgentContent))
 	prepared, errPrepare := exec.prepareResponsesRequest(context.Background(), cliproxyexecutor.Request{
 		Model:   "grok-4.5",
 		Payload: payload,
@@ -388,7 +389,7 @@ GROK_DELEGATION_VISIBLE_20260810
 	if text := message.Get("content.1.text").String(); text != delegation {
 		t.Fatalf("content[1].text changed: got length %d, want %d; body=%s", len(text), len(delegation), prepared.body)
 	}
-	if message.Get("content.#").Int() != 2 || strings.Contains(string(prepared.body), "opaque-agent-message-ciphertext") {
+	if message.Get("content.#").Int() != 2 || strings.Contains(string(prepared.body), opaqueAgentContent) {
 		t.Fatalf("opaque encrypted_content was exposed or preserved: %s", prepared.body)
 	}
 	if message.Get("id").String() != "amsg_019f92c3-6d77-7880-a6e4-f920867dc6a0" || message.Get("author").String() != "/root" || message.Get("recipient").String() != "/root/arithmetic_question" {

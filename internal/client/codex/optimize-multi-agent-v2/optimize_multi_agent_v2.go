@@ -3,12 +3,15 @@ package multiagentv2
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
 	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -59,10 +62,11 @@ func RewriteCodexMultiAgentV2Input(ctx context.Context, headers http.Header, pay
 
 // NormalizeCodexAgentMessageInput converts Codex-only agent_message input into
 // standard Responses API messages for upstreams that do not support that item.
-// Codex may label a plaintext delegation envelope as encrypted_content even
-// when the collaboration tool call carried ordinary text. Those narrowly
-// identified envelopes are restored as input_text; every other encrypted part
-// is removed rather than exposed as model-visible text.
+// Codex may label plaintext delegation and follow-up content as
+// encrypted_content even when the collaboration tool call carried ordinary
+// text. Structured delegation envelopes and text-safe parts paired with the
+// exact Codex delivery envelope are restored as input_text; every other
+// encrypted part is removed rather than exposed as model-visible text.
 func NormalizeCodexAgentMessageInput(payload []byte) []byte {
 	return rewriteCodexAgentMessageInput(payload)
 }
@@ -618,6 +622,7 @@ func normalizeCodexAgentMessageContent(payload []byte) []byte {
 		if !content.IsArray() {
 			continue
 		}
+		hasDeliveryEnvelope := hasCodexAgentMessageDeliveryEnvelope(content)
 		parts := content.Array()
 		normalizedParts := make([]json.RawMessage, 0, len(parts))
 		changed := false
@@ -628,7 +633,9 @@ func normalizeCodexAgentMessageContent(payload []byte) []byte {
 			}
 			changed = true
 			delegation := part.Get("encrypted_content")
-			if delegation.Type != gjson.String || !isCodexPlaintextDelegationEnvelope(delegation.String()) {
+			if delegation.Type != gjson.String ||
+				(!isCodexPlaintextDelegationEnvelope(delegation.String()) &&
+					!(hasDeliveryEnvelope && isCodexPlaintextAgentMessageContent(delegation.String()))) {
 				continue
 			}
 			converted, errSet := sjson.SetBytes([]byte(part.Raw), "type", "input_text")
@@ -660,6 +667,86 @@ func normalizeCodexAgentMessageContent(payload []byte) []byte {
 		}
 	}
 	return updated
+}
+
+func hasCodexAgentMessageDeliveryEnvelope(content gjson.Result) bool {
+	for _, part := range content.Array() {
+		if strings.TrimSpace(part.Get("type").String()) != "input_text" || part.Get("text").Type != gjson.String {
+			continue
+		}
+		if isCodexAgentMessageDeliveryEnvelope(part.Get("text").String()) {
+			return true
+		}
+	}
+	return false
+}
+
+func isCodexAgentMessageDeliveryEnvelope(value string) bool {
+	normalized := strings.ReplaceAll(value, "\r\n", "\n")
+	lines := strings.Split(normalized, "\n")
+	if len(lines) == 5 && lines[4] == "" {
+		lines = lines[:4]
+	}
+	if len(lines) != 4 || (lines[0] != "Message Type: NEW_TASK" && lines[0] != "Message Type: MESSAGE") || lines[3] != "Payload:" {
+		return false
+	}
+	const (
+		taskPrefix   = "Task name: "
+		senderPrefix = "Sender: "
+	)
+	if !strings.HasPrefix(lines[1], taskPrefix) || !strings.HasPrefix(lines[2], senderPrefix) {
+		return false
+	}
+	return isCodexAgentPath(strings.TrimPrefix(lines[1], taskPrefix)) && isCodexAgentPath(strings.TrimPrefix(lines[2], senderPrefix))
+}
+
+func isCodexAgentPath(value string) bool {
+	if value != "/root" && (!strings.HasPrefix(value, "/root/") || strings.HasSuffix(value, "/") || strings.Contains(value, "//")) {
+		return false
+	}
+	for _, char := range value {
+		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9') || char == '/' || char == '_' || char == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func isCodexPlaintextAgentMessageContent(value string) bool {
+	if strings.TrimSpace(value) == "" || !utf8.ValidString(value) || strings.ContainsRune(value, '\x00') {
+		return false
+	}
+	for _, char := range value {
+		if unicode.IsControl(char) && char != '\n' && char != '\r' && char != '\t' {
+			return false
+		}
+	}
+	trimmed := strings.TrimSpace(value)
+	for _, prefix := range []string{"gAAAAA", "kimi-compaction-v1:", "deepseek-reasoning-v1:"} {
+		if strings.HasPrefix(trimmed, prefix) {
+			return false
+		}
+	}
+	return !isLongCodexOpaqueEncoding(trimmed)
+}
+
+func isLongCodexOpaqueEncoding(value string) bool {
+	const minOpaqueEncodedLength = 128
+	if len(value) < minOpaqueEncodedLength || strings.IndexFunc(value, unicode.IsSpace) >= 0 {
+		return false
+	}
+	for _, encoding := range []*base64.Encoding{
+		base64.RawURLEncoding,
+		base64.URLEncoding,
+		base64.RawStdEncoding,
+		base64.StdEncoding,
+	} {
+		if decoded, err := encoding.DecodeString(value); err == nil && len(decoded) >= 64 {
+			return true
+		}
+	}
+	return false
 }
 
 func isCodexPlaintextDelegationEnvelope(value string) bool {
