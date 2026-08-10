@@ -20,9 +20,9 @@ Use the exact private deployment directory recorded in the handoff manifest.
 Verify every SHA-256 in `manifest.sha256` before loading a job. Do not rebuild
 or edit an artifact in place; create a new versioned directory instead.
 
-### Current handoff: delegated payload compatibility
+### Current deployment: delegated payload compatibility
 
-Frozen but inactive Root + Relay candidate:
+Activated and verified Root + Relay candidate as of 2026-08-10:
 
 ```text
 /Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810T061815Z-followup-plaintext-safe
@@ -60,7 +60,9 @@ and Root alone would still send `agent_message` to an incompatible worker.
 
 ### Root + Relay activation
 
-Run only from an external Terminal after this preparing task has completed.
+The reusable external helper is stored in this repository at
+`scripts/root-relay-cutover.zsh`. Run it only from an external Terminal after
+the preparing task has completed.
 Never invoke `launchctl bootout` for Root from a Codex task routed through Root:
 that necessarily disconnects the task's own `/v1/responses` stream. The bundled
 helper waits for launchd's asynchronous removal transaction, retries transient
@@ -72,6 +74,7 @@ delegated turns.
 CANDIDATE=/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810T061815Z-followup-plaintext-safe
 ROOT_ROLLBACK=/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260805T052624Z-b6ff2fbc
 RELAY_ROLLBACK=/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810T034432Z-398f082c
+HELPER=/Users/dwolf/Projects/CLIProxyAPI-mimironhz/scripts/root-relay-cutover.zsh
 ```
 
 1. Verify all immutable artifacts:
@@ -86,14 +89,22 @@ RELAY_ROLLBACK=/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810
    requires the expected rollback baseline, and does not change services:
 
    ```bash
-   "$CANDIDATE/activation/activate.zsh" --preflight
+   "$HELPER" \
+     --candidate "$CANDIDATE" \
+     --root-rollback "$ROOT_ROLLBACK" \
+     --relay-rollback "$RELAY_ROLLBACK" \
+     --preflight
    ```
 
 3. Run the helper from that external Terminal. It activates and health-checks
    Relay first, then Root, and leaves the bridge untouched:
 
    ```bash
-   "$CANDIDATE/activation/activate.zsh" --activate
+   "$HELPER" \
+     --candidate "$CANDIDATE" \
+     --root-rollback "$ROOT_ROLLBACK" \
+     --relay-rollback "$RELAY_ROLLBACK" \
+     --activate
    ```
 
 4. Verify the installed job targets, both loopback health endpoints, and the
@@ -116,8 +127,52 @@ RELAY_ROLLBACK=/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810
 6. If either probe fails, roll back both jobs from the same external Terminal:
 
    ```bash
-   "$CANDIDATE/activation/activate.zsh" --rollback
+   "$HELPER" \
+     --candidate "$CANDIDATE" \
+     --root-rollback "$ROOT_ROLLBACK" \
+     --relay-rollback "$RELAY_ROLLBACK" \
+     --rollback
    ```
+
+The repository helper requires immutable candidate and rollback directories,
+validates all three manifests before changing services, activates Relay before
+Root, preserves the bridge PID, and writes mode-0600 sanitized status metadata
+under `~/.local/state/cliproxyapi/root-relay-cutover/activation-logs`. The
+candidate-bundled helper used for the 2026-08-10 activation had SHA-256
+`8ed4c5eb104063e1cf6a83e1a78e2918cad545bd5598343da4d05c1149a3d226`;
+the repository copy is the maintained source for future candidates.
+
+### Activation record: 2026-08-10
+
+Candidate commit:
+
+```text
+4e72870fa9851ae3db3fa19af187bbfe0564dd02
+```
+
+The external helper activated Relay first and Root second. Relay PID `6583`
+and Root PID `6642` served the candidate while bridge PID `4462` remained
+unchanged. Both health endpoints returned `{"status":"ok"}`.
+
+Live model-visible payload proof:
+
+- DeepSeek initial delegation returned
+  `DEEPSEEK_INITIAL_20260810T0627Z_M6P3K` exactly.
+- The same DeepSeek worker's `followup_task` returned
+  `DEEPSEEK_FOLLOWUP_20260810T0628Z_R9T4V` exactly.
+- A fresh Grok delegation returned `GROK_DELEGATION_20260810T0629Z_B7N2F`
+  exactly with HTTP 200 and no HTTP 422.
+- Sanitized Root access metadata recorded both DeepSeek requests, the Grok
+  request, and recent official `gpt-5.6-sol` traffic with HTTP 200 and upstream
+  200 completion evidence.
+
+No rollback was triggered. These PIDs and health observations are historical
+activation evidence, not invariants for a later cutover.
+
+The repository helper's non-mutating `--preflight` path was exercised at
+2026-08-10T06:40:45Z against the live immutable bundle. It revalidated the
+manifest, both job targets, both health endpoints, and bridge PID, then wrote
+`preflight_passed` with `No services changed.`
 
 ### Rejected candidate: follow-up payload loss
 
