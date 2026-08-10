@@ -25,7 +25,7 @@ or edit an artifact in place; create a new versioned directory instead.
 Frozen but inactive Root + Relay candidate:
 
 ```text
-/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810T051259Z-reserved-schema-safe
+/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810T055724Z-plaintext-delegation-safe
 ```
 
 Scope:
@@ -47,9 +47,12 @@ Change:
   model lists, and opaque tool arguments are unchanged.
 - xAI and DeepSeek convert Codex-only `agent_message` into a standard user
   message without enabling the optional broad multi-agent optimization.
-- Opaque `encrypted_content` is never copied into model-visible text. The
-  parent-side schema change makes new delegated task bodies ordinary
-  `input_text`; unsupported opaque legacy parts are removed.
+- Codex Desktop can still label a plaintext `<codex_delegation>` task envelope
+  as `encrypted_content` after the parent tool call. DeepSeek and xAI promote
+  only a structurally verified envelope with a UUID source thread and non-empty
+  input into model-visible `input_text`. Opaque base64, arbitrary plaintext,
+  malformed envelopes, invalid thread IDs, and unrelated encrypted parts are
+  removed.
 
 This pairing is required. Relay alone cannot recover an already sealed task,
 and Root alone would still send `agent_message` to an incompatible worker.
@@ -57,10 +60,15 @@ and Root alone would still send `agent_message` to an incompatible worker.
 ### Root + Relay activation
 
 Run only from an external Terminal after this preparing task has completed.
-Choose a quiet interval with no active delegated turns.
+Never invoke `launchctl bootout` for Root from a Codex task routed through Root:
+that necessarily disconnects the task's own `/v1/responses` stream. The bundled
+helper waits for launchd's asynchronous removal transaction, retries transient
+bootstrap error 5, and automatically restores both rollback bundles if either
+candidate service fails health. Choose a quiet interval with no active
+delegated turns.
 
 ```bash
-CANDIDATE=/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810T051259Z-reserved-schema-safe
+CANDIDATE=/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810T055724Z-plaintext-delegation-safe
 ROOT_ROLLBACK=/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260805T052624Z-b6ff2fbc
 RELAY_ROLLBACK=/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810T034432Z-398f082c
 ```
@@ -73,22 +81,21 @@ RELAY_ROLLBACK=/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810
    (cd "$RELAY_ROLLBACK" && shasum -a 256 -c manifest.sha256)
    ```
 
-2. Record the bridge identity, stop only Root and Relay, install the candidate
-   jobs, then start Relay before Root:
+2. Preflight the external activation helper. It validates all three manifests,
+   requires the expected rollback baseline, and does not change services:
 
    ```bash
-   BRIDGE_PID=$(lsof -nP -iTCP@192.168.139.3:8318 -sTCP:LISTEN -t)
-   launchctl bootout "gui/$(id -u)/com.user.cliproxy-root"
-   launchctl bootout "gui/$(id -u)/com.user.cliproxy-relay"
-   install -m 600 "$CANDIDATE/launchd/com.user.cliproxy-root.plist" \
-     "$HOME/Library/LaunchAgents/com.user.cliproxy-root.plist"
-   install -m 600 "$CANDIDATE/launchd/com.user.cliproxy-relay.plist" \
-     "$HOME/Library/LaunchAgents/com.user.cliproxy-relay.plist"
-   launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.user.cliproxy-relay.plist"
-   launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.user.cliproxy-root.plist"
+   "$CANDIDATE/activation/activate.zsh" --preflight
    ```
 
-3. Verify the installed job targets, both loopback health endpoints, and the
+3. Run the helper from that external Terminal. It activates and health-checks
+   Relay first, then Root, and leaves the bridge untouched:
+
+   ```bash
+   "$CANDIDATE/activation/activate.zsh" --activate
+   ```
+
+4. Verify the installed job targets, both loopback health endpoints, and the
    unchanged bridge PID:
 
    ```bash
@@ -99,24 +106,29 @@ RELAY_ROLLBACK=/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810
    test "$(lsof -nP -iTCP@192.168.139.3:8318 -sTCP:LISTEN -t)" = "$BRIDGE_PID"
    ```
 
-4. From Codex Desktop, create a fresh `deepseek-v4-flash/max` subagent with a
+5. From Codex Desktop, create a fresh `deepseek-v4-flash/max` subagent with a
    unique sentinel in a long task body. Require the worker to repeat that
    sentinel, then send a follow-up with a second sentinel and require that one.
    Repeat a short delegated probe with `grok-4.5/high`; require completion with
    no HTTP 422. Do not accept a generic acknowledgement as payload proof.
 
-5. If either probe fails, roll back both jobs:
+6. If either probe fails, roll back both jobs from the same external Terminal:
 
    ```bash
-   launchctl bootout "gui/$(id -u)/com.user.cliproxy-root"
-   launchctl bootout "gui/$(id -u)/com.user.cliproxy-relay"
-   install -m 600 "$ROOT_ROLLBACK/launchd/com.user.cliproxy-root.plist" \
-     "$HOME/Library/LaunchAgents/com.user.cliproxy-root.plist"
-   install -m 600 "$RELAY_ROLLBACK/launchd/com.user.cliproxy-relay.plist" \
-     "$HOME/Library/LaunchAgents/com.user.cliproxy-relay.plist"
-   launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.user.cliproxy-relay.plist"
-   launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.user.cliproxy-root.plist"
+   "$CANDIDATE/activation/activate.zsh" --rollback
    ```
+
+### Rejected candidate: semantic payload loss
+
+The candidate below passed HTTP health and official reserved-schema validation,
+but a real DeepSeek worker received only the short `Payload:` envelope and
+returned `PAYLOAD_NOT_VISIBLE`. The full task remained in a plaintext
+`<codex_delegation>` part mislabeled as `encrypted_content`. It was rolled back
+on 2026-08-10 and must not be reused:
+
+```text
+/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810T051259Z-reserved-schema-safe
+```
 
 ### Rejected candidate: do not activate
 

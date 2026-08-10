@@ -3,6 +3,7 @@ package multiagentv2
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -431,6 +432,70 @@ func TestOptimizeCodexMultiAgentV2RequestDoesNotExposeEncryptedAgentMessageConte
 			unchanged, _ := OptimizeCodexMultiAgentV2Request(context.Background(), tt.headers, payload, tt.cfg)
 			if string(unchanged) != string(payload) {
 				t.Fatalf("ineligible request changed: %s", unchanged)
+			}
+		})
+	}
+}
+
+func TestNormalizeCodexAgentMessageInputPromotesPlaintextDelegationEnvelope(t *testing.T) {
+	t.Parallel()
+
+	delegation := `<codex_delegation>
+  <source_thread_id>019fe9b7-a4c3-7820-be88-ec9e4f83b85d</source_thread_id>
+  <input>
+BEGIN_DELEGATED_TASK
+Preserve the complete task body and repeat DEEPSEEK_INITIAL_20260810T0542Z_7K9M2.
+END_DELEGATED_TASK
+  </input>
+</codex_delegation>`
+	payload := []byte(fmt.Sprintf(`{"input":[{"type":"agent_message","id":"amsg_live","author":"/root","recipient":"/root/live_probe","content":[{"type":"input_text","text":"Message Type: NEW_TASK\nTask name: /root/live_probe\nSender: /root\nPayload:\n"},{"type":"encrypted_content","encrypted_content":%q},{"type":"encrypted_content","encrypted_content":"Z0FBQUFBQm9wYXF1ZS1jaXBoZXJ0ZXh0"}]}]}`, delegation))
+
+	got := NormalizeCodexAgentMessageInput(payload)
+	message := gjson.GetBytes(got, "input.0")
+	if gotType := message.Get("type").String(); gotType != "message" {
+		t.Fatalf("type = %q, want message; payload=%s", gotType, got)
+	}
+	if gotRole := message.Get("role").String(); gotRole != "user" {
+		t.Fatalf("role = %q, want user; payload=%s", gotRole, got)
+	}
+	if gotCount := message.Get("content.#").Int(); gotCount != 2 {
+		t.Fatalf("content count = %d, want 2; payload=%s", gotCount, got)
+	}
+	promoted := message.Get("content.1")
+	if gotType := promoted.Get("type").String(); gotType != "input_text" {
+		t.Fatalf("promoted type = %q, want input_text; payload=%s", gotType, got)
+	}
+	if gotText := promoted.Get("text").String(); gotText != delegation {
+		t.Fatalf("promoted text changed: got length %d, want %d", len(gotText), len(delegation))
+	}
+	if promoted.Get("encrypted_content").Exists() || strings.Contains(string(got), "Z0FBQUFBQm9wYXF1ZS1jaXBoZXJ0ZXh0") {
+		t.Fatalf("encrypted content remained visible: %s", got)
+	}
+}
+
+func TestNormalizeCodexAgentMessageInputDropsUnverifiedEncryptedContent(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		value string
+	}{
+		{name: "opaque base64", value: "Z0FBQUFBQm9wYXF1ZS1jaXBoZXJ0ZXh0"},
+		{name: "arbitrary plaintext", value: "delegated task"},
+		{name: "missing source", value: "<codex_delegation><input>task</input></codex_delegation>"},
+		{name: "invalid source", value: "<codex_delegation><source_thread_id>not-a-thread</source_thread_id><input>task</input></codex_delegation>"},
+		{name: "empty input", value: "<codex_delegation><source_thread_id>019fe9b7-a4c3-7820-be88-ec9e4f83b85d</source_thread_id><input> </input></codex_delegation>"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			payload := []byte(fmt.Sprintf(`{"input":[{"type":"agent_message","content":[{"type":"input_text","text":"Payload:\n"},{"type":"encrypted_content","encrypted_content":%q}]}]}`, tt.value))
+			got := NormalizeCodexAgentMessageInput(payload)
+			if count := gjson.GetBytes(got, "input.0.content.#").Int(); count != 1 {
+				t.Fatalf("content count = %d, want 1; payload=%s", count, got)
+			}
+			if strings.Contains(string(got), tt.value) {
+				t.Fatalf("unverified content was exposed: %s", got)
 			}
 		})
 	}

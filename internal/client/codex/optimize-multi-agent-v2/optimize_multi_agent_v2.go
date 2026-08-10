@@ -59,7 +59,10 @@ func RewriteCodexMultiAgentV2Input(ctx context.Context, headers http.Header, pay
 
 // NormalizeCodexAgentMessageInput converts Codex-only agent_message input into
 // standard Responses API messages for upstreams that do not support that item.
-// Opaque encrypted parts are removed rather than exposed as model-visible text.
+// Codex may label a plaintext delegation envelope as encrypted_content even
+// when the collaboration tool call carried ordinary text. Those narrowly
+// identified envelopes are restored as input_text; every other encrypted part
+// is removed rather than exposed as model-visible text.
 func NormalizeCodexAgentMessageInput(payload []byte) []byte {
 	return rewriteCodexAgentMessageInput(payload)
 }
@@ -112,7 +115,7 @@ func OptimizeCodexMultiAgentV2Request(ctx context.Context, headers http.Header, 
 	if !codexMultiAgentV2Enabled(ctx, headers, cfg) {
 		return payload, false
 	}
-	updated := stripCodexAgentMessageEncryptedContent(payload)
+	updated := normalizeCodexAgentMessageContent(payload)
 	toolPaths := codexSpawnAgentToolPaths(updated)
 	if len(toolPaths) == 0 || hasCodexOptimizedCollaborationConflict(updated) {
 		return updated, false
@@ -581,7 +584,7 @@ func rewriteCodexAgentMessageInput(payload []byte) []byte {
 		return payload
 	}
 
-	updated := stripCodexAgentMessageEncryptedContent(payload)
+	updated := normalizeCodexAgentMessageContent(payload)
 	for itemIndex, item := range input.Array() {
 		if strings.TrimSpace(item.Get("type").String()) != "agent_message" {
 			continue
@@ -600,7 +603,7 @@ func rewriteCodexAgentMessageInput(payload []byte) []byte {
 	return updated
 }
 
-func stripCodexAgentMessageEncryptedContent(payload []byte) []byte {
+func normalizeCodexAgentMessageContent(payload []byte) []byte {
 	input := gjson.GetBytes(payload, "input")
 	if !input.IsArray() {
 		return payload
@@ -616,20 +619,93 @@ func stripCodexAgentMessageEncryptedContent(payload []byte) []byte {
 			continue
 		}
 		parts := content.Array()
-		for partIndex := len(parts) - 1; partIndex >= 0; partIndex-- {
-			part := parts[partIndex]
+		normalizedParts := make([]json.RawMessage, 0, len(parts))
+		changed := false
+		for _, part := range parts {
 			if strings.TrimSpace(part.Get("type").String()) != "encrypted_content" {
+				normalizedParts = append(normalizedParts, json.RawMessage(part.Raw))
 				continue
 			}
-			partPath := fmt.Sprintf("input.%d.content.%d", itemIndex, partIndex)
-			var errDelete error
-			updated, errDelete = sjson.DeleteBytes(updated, partPath)
-			if errDelete != nil {
+			changed = true
+			delegation := part.Get("encrypted_content")
+			if delegation.Type != gjson.String || !isCodexPlaintextDelegationEnvelope(delegation.String()) {
+				continue
+			}
+			converted, errSet := sjson.SetBytes([]byte(part.Raw), "type", "input_text")
+			if errSet != nil {
 				return payload
 			}
+			converted, errSet = sjson.SetBytes(converted, "text", delegation.String())
+			if errSet != nil {
+				return payload
+			}
+			converted, errSet = sjson.DeleteBytes(converted, "encrypted_content")
+			if errSet != nil {
+				return payload
+			}
+			normalizedParts = append(normalizedParts, json.RawMessage(converted))
+		}
+		if !changed {
+			continue
+		}
+		rawParts, errMarshal := json.Marshal(normalizedParts)
+		if errMarshal != nil {
+			return payload
+		}
+		contentPath := fmt.Sprintf("input.%d.content", itemIndex)
+		var errSet error
+		updated, errSet = sjson.SetRawBytes(updated, contentPath, rawParts)
+		if errSet != nil {
+			return payload
 		}
 	}
 	return updated
+}
+
+func isCodexPlaintextDelegationEnvelope(value string) bool {
+	const (
+		openEnvelope  = "<codex_delegation>"
+		closeEnvelope = "</codex_delegation>"
+		openSource    = "<source_thread_id>"
+		closeSource   = "</source_thread_id>"
+		openInput     = "<input>"
+		closeInput    = "</input>"
+	)
+
+	trimmed := strings.TrimSpace(value)
+	if !strings.HasPrefix(trimmed, openEnvelope) || !strings.HasSuffix(trimmed, closeEnvelope) || strings.ContainsRune(trimmed, '\x00') {
+		return false
+	}
+	body := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(trimmed, openEnvelope), closeEnvelope))
+	sourceStart := strings.Index(body, openSource)
+	sourceEnd := strings.Index(body, closeSource)
+	inputStart := strings.Index(body, openInput)
+	inputEnd := strings.LastIndex(body, closeInput)
+	if sourceStart < 0 || sourceEnd <= sourceStart || inputStart <= sourceEnd || inputEnd <= inputStart {
+		return false
+	}
+	sourceID := strings.TrimSpace(body[sourceStart+len(openSource) : sourceEnd])
+	inputText := strings.TrimSpace(body[inputStart+len(openInput) : inputEnd])
+	return isCodexDelegationThreadID(sourceID) && inputText != ""
+}
+
+func isCodexDelegationThreadID(value string) bool {
+	if len(value) != 36 {
+		return false
+	}
+	for index, char := range value {
+		switch index {
+		case 8, 13, 18, 23:
+			if char != '-' {
+				return false
+			}
+		default:
+			if !((char >= '0' && char <= '9') || (char >= 'a' && char <= 'f') || (char >= 'A' && char <= 'F')) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func codexSpawnAgentToolPaths(payload []byte) []string {

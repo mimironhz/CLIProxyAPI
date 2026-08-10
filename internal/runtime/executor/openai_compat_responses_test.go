@@ -122,6 +122,10 @@ func TestOpenAICompatExecutorStreamsDeepSeekDelegatedAgentMessageAsUserInput(t *
 		"Inspect the bounded service lane, preserve unrelated work, record structural evidence, and report the exact verification result.\n",
 		96,
 	) + "END_DELEGATED_TASK"
+	delegation := "<codex_delegation>\n" +
+		"  <source_thread_id>019fe9b7-a4c3-7820-be88-ec9e4f83b85d</source_thread_id>\n" +
+		"  <input>\n" + taskBody + "\n  </input>\n" +
+		"</codex_delegation>"
 	payload, errMarshal := json.Marshal(map[string]any{
 		"model":  "deepseek-v4-flash",
 		"stream": true,
@@ -135,7 +139,7 @@ func TestOpenAICompatExecutorStreamsDeepSeekDelegatedAgentMessageAsUserInput(t *
 				"recipient": "/root/phase2_service_fallback",
 				"content": []any{
 					map[string]any{"type": "input_text", "text": envelope},
-					map[string]any{"type": "input_text", "text": taskBody},
+					map[string]any{"type": "encrypted_content", "encrypted_content": delegation},
 					map[string]any{"type": "encrypted_content", "encrypted_content": "opaque-agent-message-ciphertext"},
 				},
 				"internal_chat_message_metadata_passthrough": map[string]any{"turn_id": "turn_delegate_fixture"},
@@ -180,8 +184,8 @@ func TestOpenAICompatExecutorStreamsDeepSeekDelegatedAgentMessageAsUserInput(t *
 	if got := message.Get("content.0.text").String(); got != envelope {
 		t.Fatalf("delegation envelope changed: got length %d, want %d", len(got), len(envelope))
 	}
-	if got := message.Get("content.1.text").String(); got != taskBody {
-		t.Fatalf("delegated task changed: got length %d, want %d", len(got), len(taskBody))
+	if got := message.Get("content.1.text").String(); got != delegation {
+		t.Fatalf("delegated task changed: got length %d, want %d", len(got), len(delegation))
 	}
 	if got := message.Get("content.1.type").String(); got != "input_text" {
 		t.Fatalf("delegated task content type = %q, want input_text", got)
@@ -244,6 +248,10 @@ func TestOpenAICompatExecutorDeepSeekDelegatedPayloadIntegration(t *testing.T) {
 		"This is retained context for a delegated worker payload visibility probe. Read every line before answering.\n",
 		48,
 	) + "Reply with exactly this token and no other text: " + sentinel + "\nEND_DELEGATED_TASK"
+	delegation := "<codex_delegation>\n" +
+		"  <source_thread_id>019fe9b7-a4c3-7820-be88-ec9e4f83b85d</source_thread_id>\n" +
+		"  <input>\n" + taskBody + "\n  </input>\n" +
+		"</codex_delegation>"
 	payload, errMarshal := json.Marshal(map[string]any{
 		"model":  "deepseek-v4-flash",
 		"stream": true,
@@ -254,7 +262,8 @@ func TestOpenAICompatExecutorDeepSeekDelegatedPayloadIntegration(t *testing.T) {
 			"recipient": "/root/deepseek_payload_probe",
 			"content": []any{
 				map[string]any{"type": "input_text", "text": envelope},
-				map[string]any{"type": "input_text", "text": taskBody},
+				map[string]any{"type": "encrypted_content", "encrypted_content": delegation},
+				map[string]any{"type": "encrypted_content", "encrypted_content": "opaque-agent-message-ciphertext"},
 			},
 			"internal_chat_message_metadata_passthrough": map[string]any{"turn_id": "turn_deepseek_e2e_probe"},
 		}},
