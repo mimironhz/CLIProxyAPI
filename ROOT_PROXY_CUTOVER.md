@@ -25,7 +25,7 @@ or edit an artifact in place; create a new versioned directory instead.
 Frozen but inactive Root + Relay candidate:
 
 ```text
-/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810T055724Z-plaintext-delegation-safe
+/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810T061815Z-followup-plaintext-safe
 ```
 
 Scope:
@@ -48,11 +48,12 @@ Change:
 - xAI and DeepSeek convert Codex-only `agent_message` into a standard user
   message without enabling the optional broad multi-agent optimization.
 - Codex Desktop can still label a plaintext `<codex_delegation>` task envelope
-  as `encrypted_content` after the parent tool call. DeepSeek and xAI promote
-  only a structurally verified envelope with a UUID source thread and non-empty
-  input into model-visible `input_text`. Opaque base64, arbitrary plaintext,
-  malformed envelopes, invalid thread IDs, and unrelated encrypted parts are
-  removed.
+  or a plaintext follow-up as `encrypted_content` after the parent tool call.
+  DeepSeek and xAI promote only a structurally verified task envelope, or
+  text-safe follow-up content paired with the exact four-line Codex delivery
+  envelope, into model-visible `input_text`. Control-bearing text, known
+  encrypted prefixes, long decodable base64/base64url blobs, malformed delivery
+  envelopes, and unrelated encrypted parts are removed.
 
 This pairing is required. Relay alone cannot recover an already sealed task,
 and Root alone would still send `agent_message` to an incompatible worker.
@@ -68,7 +69,7 @@ candidate service fails health. Choose a quiet interval with no active
 delegated turns.
 
 ```bash
-CANDIDATE=/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810T055724Z-plaintext-delegation-safe
+CANDIDATE=/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810T061815Z-followup-plaintext-safe
 ROOT_ROLLBACK=/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260805T052624Z-b6ff2fbc
 RELAY_ROLLBACK=/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810T034432Z-398f082c
 ```
@@ -118,7 +119,19 @@ RELAY_ROLLBACK=/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810
    "$CANDIDATE/activation/activate.zsh" --rollback
    ```
 
-### Rejected candidate: semantic payload loss
+### Rejected candidate: follow-up payload loss
+
+The candidate below delivered the initial structured task successfully, but the
+same-worker `followup_task` returned `PAYLOAD_NOT_VISIBLE`. The follow-up body
+was ordinary plaintext directly labeled `encrypted_content`, not a structured
+`<codex_delegation>` envelope. It was rolled back on 2026-08-10 and must not be
+reused:
+
+```text
+/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810T055724Z-plaintext-delegation-safe
+```
+
+### Rejected candidate: initial payload loss
 
 The candidate below passed HTTP health and official reserved-schema validation,
 but a real DeepSeek worker received only the short `Payload:` envelope and
