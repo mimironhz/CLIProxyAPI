@@ -71,6 +71,13 @@ func NormalizeCodexAgentMessageInput(payload []byte) []byte {
 	return rewriteCodexAgentMessageInput(payload)
 }
 
+// PromoteCodexPlaintextAgentMessageContent restores verified plaintext parts
+// for official Codex upstreams that support agent_message natively. Opaque
+// encrypted parts are preserved so the official service can decrypt them.
+func PromoteCodexPlaintextAgentMessageContent(payload []byte) []byte {
+	return rewriteCodexAgentMessageContent(payload, true)
+}
+
 // NormalizeCodexDelegationMessageSchema prevents Codex from sealing delegated
 // message text before it is sent to an upstream that cannot decrypt it. This
 // only removes the message property's encryption marker from collaboration
@@ -608,6 +615,10 @@ func rewriteCodexAgentMessageInput(payload []byte) []byte {
 }
 
 func normalizeCodexAgentMessageContent(payload []byte) []byte {
+	return rewriteCodexAgentMessageContent(payload, false)
+}
+
+func rewriteCodexAgentMessageContent(payload []byte, preserveOpaque bool) []byte {
 	input := gjson.GetBytes(payload, "input")
 	if !input.IsArray() {
 		return payload
@@ -631,13 +642,18 @@ func normalizeCodexAgentMessageContent(payload []byte) []byte {
 				normalizedParts = append(normalizedParts, json.RawMessage(part.Raw))
 				continue
 			}
-			changed = true
 			delegation := part.Get("encrypted_content")
 			if delegation.Type != gjson.String ||
 				(!isCodexPlaintextDelegationEnvelope(delegation.String()) &&
 					!(hasDeliveryEnvelope && isCodexPlaintextAgentMessageContent(delegation.String()))) {
+				if preserveOpaque {
+					normalizedParts = append(normalizedParts, json.RawMessage(part.Raw))
+				} else {
+					changed = true
+				}
 				continue
 			}
+			changed = true
 			converted, errSet := sjson.SetBytes([]byte(part.Raw), "type", "input_text")
 			if errSet != nil {
 				return payload

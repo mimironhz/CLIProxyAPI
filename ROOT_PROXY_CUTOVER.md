@@ -20,6 +20,78 @@ Use the exact private deployment directory recorded in the handoff manifest.
 Verify every SHA-256 in `manifest.sha256` before loading a job. Do not rebuild
 or edit an artifact in place; create a new versioned directory instead.
 
+### Current handoff: official subagent plaintext compatibility
+
+Frozen but inactive paired candidate:
+
+```text
+/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810T081331Z-official-agent-message-safe
+```
+
+Scope:
+
+- Restart `com.user.cliproxy-relay` first and `com.user.cliproxy-root` second.
+- Do not touch `com.user.cliproxy-orbstack-relay-v2`.
+- Roll back both jobs to `20260810T061815Z-followup-plaintext-safe`.
+- Root and Relay configuration files are carried forward byte-for-byte.
+
+Failure and change:
+
+- After the delegated-payload cutover, official `gpt-5.6-luna` subagents
+  received a native `agent_message` whose delivery envelope was `input_text`
+  but whose ordinary task body was mislabeled `encrypted_content`. The official
+  service tried to decrypt that plaintext and ended the turn with `Encrypted
+  function output content could not be decrypted or decoded.`
+- Root now promotes only structurally verified plaintext delegation parts to
+  `input_text` before forwarding official HTTP or WebSocket turns. It keeps the
+  outer native `agent_message`, metadata, ordering, and genuine opaque
+  `encrypted_content` unchanged for the official service to decrypt.
+- Relay's xAI/DeepSeek compatibility remains provider-local: it still converts
+  `agent_message` to a user message and removes opaque parts rather than
+  exposing them. Broad optional multi-agent optimization remains disabled.
+
+Run only from an external Terminal during a quiet interval:
+
+```bash
+CANDIDATE=/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810T081331Z-official-agent-message-safe
+ROLLBACK=/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810T061815Z-followup-plaintext-safe
+HELPER=/Users/dwolf/Projects/CLIProxyAPI-mimironhz/scripts/root-relay-cutover.zsh
+
+"$HELPER" \
+  --candidate "$CANDIDATE" \
+  --root-rollback "$ROLLBACK" \
+  --relay-rollback "$ROLLBACK" \
+  --preflight
+
+"$HELPER" \
+  --candidate "$CANDIDATE" \
+  --root-rollback "$ROLLBACK" \
+  --relay-rollback "$ROLLBACK" \
+  --activate
+```
+
+Acceptance requires all of the following:
+
+1. Both health endpoints return `{"status":"ok"}`, both launchd jobs target
+   the candidate, and the OrbStack bridge PID is unchanged.
+2. A fresh `gpt-5.6-luna/max` subagent receives a long initial task and repeats
+   its unique sentinel exactly instead of returning the encrypted-output error.
+3. The same Luna worker receives a `followup_task` sentinel exactly.
+4. Fresh DeepSeek initial and same-worker follow-up sentinels remain visible,
+   and a fresh Grok delegation completes without HTTP 422.
+5. Sanitized Root access metadata shows HTTP 200 and upstream 200 completion
+   for the official and Relay probes.
+
+If any gate fails, roll back both jobs from the same external Terminal:
+
+```bash
+"$HELPER" \
+  --candidate "$CANDIDATE" \
+  --root-rollback "$ROLLBACK" \
+  --relay-rollback "$ROLLBACK" \
+  --rollback
+```
+
 ### Current deployment: delegated payload compatibility
 
 Activated and verified Root + Relay candidate as of 2026-08-10:

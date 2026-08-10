@@ -526,6 +526,47 @@ func TestNormalizeCodexAgentMessageInputDoesNotPromoteOpaqueContentWithDeliveryE
 	}
 }
 
+func TestPromoteCodexPlaintextAgentMessageContentPreservesOpaqueContent(t *testing.T) {
+	t.Parallel()
+
+	envelope := "Message Type: NEW_TASK\nTask name: /root/official_worker\nSender: /root\nPayload:\n"
+	task := "Inspect the assigned files and return the complete bounded result."
+	opaque := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x00, 0xff, 0x81, 0x42}, 48))
+	payload := []byte(fmt.Sprintf(`{"input":[{"type":"agent_message","id":"amsg_official","author":"/root","recipient":"/root/official_worker","content":[{"type":"input_text","text":%q},{"type":"encrypted_content","encrypted_content":%q},{"type":"encrypted_content","encrypted_content":%q}],"internal_chat_message_metadata_passthrough":{"turn_id":"turn_1"}}]}`, envelope, task, opaque))
+
+	got := PromoteCodexPlaintextAgentMessageContent(payload)
+	message := gjson.GetBytes(got, "input.0")
+	if gotType := message.Get("type").String(); gotType != "agent_message" {
+		t.Fatalf("type = %q, want agent_message; payload=%s", gotType, got)
+	}
+	if message.Get("role").Exists() {
+		t.Fatalf("official agent_message gained a role: %s", got)
+	}
+	if gotText := message.Get("content.1.text").String(); gotText != task {
+		t.Fatalf("promoted task = %q, want %q", gotText, task)
+	}
+	if gotType := message.Get("content.1.type").String(); gotType != "input_text" {
+		t.Fatalf("promoted type = %q, want input_text: %s", gotType, got)
+	}
+	if message.Get("content.1.encrypted_content").Exists() {
+		t.Fatalf("promoted task retained encrypted_content: %s", got)
+	}
+	if gotOpaque := message.Get("content.2.encrypted_content").String(); gotOpaque != opaque {
+		t.Fatalf("opaque content changed: got length %d, want %d", len(gotOpaque), len(opaque))
+	}
+	if gotType := message.Get("content.2.type").String(); gotType != "encrypted_content" {
+		t.Fatalf("opaque type = %q, want encrypted_content: %s", gotType, got)
+	}
+	if message.Get("author").String() != "/root" || message.Get("recipient").String() != "/root/official_worker" || message.Get("internal_chat_message_metadata_passthrough.turn_id").String() != "turn_1" {
+		t.Fatalf("agent message metadata changed: %s", got)
+	}
+
+	opaqueOnly := []byte(fmt.Sprintf(`{"input":[{"type":"agent_message","content":[{"type":"input_text","text":"Payload:\n"},{"type":"encrypted_content","encrypted_content":%q}]}]}`, opaque))
+	if unchanged := PromoteCodexPlaintextAgentMessageContent(opaqueOnly); !bytes.Equal(unchanged, opaqueOnly) {
+		t.Fatalf("opaque-only official payload changed: %s", unchanged)
+	}
+}
+
 func TestNormalizeCodexAgentMessageInputDropsUnverifiedEncryptedContent(t *testing.T) {
 	t.Parallel()
 
