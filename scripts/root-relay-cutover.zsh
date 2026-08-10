@@ -78,7 +78,7 @@ bridge_address=${CLIPROXY_BRIDGE_ADDRESS:-192.168.139.3:8318}
 
 verify_commands() {
   local command_name
-  for command_name in awk basename chmod curl date head install jq launchctl lsof mkdir sed shasum sleep tee; do
+  for command_name in awk basename chmod curl date head install jq launchctl lsof mkdir plutil sed shasum sleep tee; do
     command -v "$command_name" >/dev/null || {
       print -u2 -r -- "Required command not found: $command_name"
       return 1
@@ -183,6 +183,40 @@ verify_bundle_files() {
   [[ -f "$relay_rollback/manifest.sha256" ]] || return 1
   [[ -x "$relay_rollback/bin/cli-proxy-api-relay" ]] || return 1
   [[ -f "$relay_rollback/launchd/com.user.cliproxy-relay.plist" ]] || return 1
+  verify_plist_arguments || return 1
+}
+
+verify_plist_arguments() {
+  local candidate_root_args
+  local candidate_relay_args
+  local rollback_root_args
+  local rollback_relay_args
+
+  candidate_root_args=$(plutil -extract ProgramArguments json -o - "$candidate/launchd/com.user.cliproxy-root.plist") || return 1
+  candidate_relay_args=$(plutil -extract ProgramArguments json -o - "$candidate/launchd/com.user.cliproxy-relay.plist") || return 1
+  rollback_root_args=$(plutil -extract ProgramArguments json -o - "$root_rollback/launchd/com.user.cliproxy-root.plist") || return 1
+  rollback_relay_args=$(plutil -extract ProgramArguments json -o - "$relay_rollback/launchd/com.user.cliproxy-relay.plist") || return 1
+
+  jq -e \
+    --arg program "$candidate/bin/root-proxy" \
+    --arg config "$candidate/root/root.yaml" \
+    '. == [$program, "--config", $config]' \
+    >/dev/null <<<"$candidate_root_args" || return 1
+  jq -e \
+    --arg program "$candidate/bin/cli-proxy-api-relay" \
+    --arg config "$candidate/relay/relay.yaml" \
+    '. == [$program, "--config", $config, "--local-model"]' \
+    >/dev/null <<<"$candidate_relay_args" || return 1
+  jq -e \
+    --arg program "$root_rollback/bin/root-proxy" \
+    --arg config "$root_rollback/root/root.yaml" \
+    '. == [$program, "--config", $config]' \
+    >/dev/null <<<"$rollback_root_args" || return 1
+  jq -e \
+    --arg program "$relay_rollback/bin/cli-proxy-api-relay" \
+    --arg config "$relay_rollback/relay/relay.yaml" \
+    '. == [$program, "--config", $config, "--local-model"]' \
+    >/dev/null <<<"$rollback_relay_args"
 }
 
 verify_manifests() {

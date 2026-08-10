@@ -25,7 +25,7 @@ or edit an artifact in place; create a new versioned directory instead.
 Frozen but inactive paired candidate:
 
 ```text
-/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810T081331Z-official-agent-message-safe
+/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810T093216Z-official-agent-message-safe-v2
 ```
 
 Scope:
@@ -34,6 +34,10 @@ Scope:
 - Do not touch `com.user.cliproxy-orbstack-relay-v2`.
 - Roll back both jobs to `20260810T061815Z-followup-plaintext-safe`.
 - Root and Relay configuration files are carried forward byte-for-byte.
+- The first frozen candidate was rejected after Relay failed its health gate:
+  its launchd argument arrays accidentally retained both candidate and rollback
+  paths. Automatic rollback restored both services. This v2 candidate has exact
+  argument arrays, and preflight now rejects any duplicate or reordered entry.
 
 Failure and change:
 
@@ -53,7 +57,7 @@ Failure and change:
 Run only from an external Terminal during a quiet interval:
 
 ```bash
-CANDIDATE=/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810T081331Z-official-agent-message-safe
+CANDIDATE=/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810T093216Z-official-agent-message-safe-v2
 ROLLBACK=/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810T061815Z-followup-plaintext-safe
 HELPER=/Users/dwolf/Projects/CLIProxyAPI-mimironhz/scripts/root-relay-cutover.zsh
 
