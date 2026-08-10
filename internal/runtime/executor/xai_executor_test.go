@@ -345,7 +345,14 @@ func TestXAIExecutorPrepareResponsesRequestRewritesCodexAgentMessageWithoutOptim
 	t.Parallel()
 
 	exec := NewXAIExecutor(&config.Config{})
-	payload := []byte(`{
+	delegation := `<codex_delegation>
+  <source_thread_id>019fe9b7-a4c3-7820-be88-ec9e4f83b85d</source_thread_id>
+  <input>
+请出一道四则运算题。只回复题目本身，不要解答；使用中文。
+GROK_DELEGATION_VISIBLE_20260810
+  </input>
+</codex_delegation>`
+	payload := []byte(fmt.Sprintf(`{
 		"model":"grok-4.5",
 		"input":[{
 			"type":"agent_message",
@@ -354,12 +361,12 @@ func TestXAIExecutorPrepareResponsesRequestRewritesCodexAgentMessageWithoutOptim
 			"recipient":"/root/arithmetic_question",
 			"content":[
 				{"type":"input_text","text":"Message Type: NEW_TASK\nTask name: /root/arithmetic_question\nSender: /root\nPayload:\n"},
-				{"type":"input_text","text":"请出一道四则运算题。只回复题目本身，不要解答；使用中文。"},
+				{"type":"encrypted_content","encrypted_content":%q},
 				{"type":"encrypted_content","encrypted_content":"opaque-agent-message-ciphertext"}
 			],
 			"internal_chat_message_metadata_passthrough":{"turn_id":"019f92c3-6772-7213-8aac-8bd154d528f1"}
 		}]
-	}`)
+	}`, delegation))
 	prepared, errPrepare := exec.prepareResponsesRequest(context.Background(), cliproxyexecutor.Request{
 		Model:   "grok-4.5",
 		Payload: payload,
@@ -378,8 +385,8 @@ func TestXAIExecutorPrepareResponsesRequestRewritesCodexAgentMessageWithoutOptim
 	if message.Get("content.1.type").String() != "input_text" {
 		t.Fatalf("content[1].type = %q, want input_text; body=%s", message.Get("content.1.type").String(), prepared.body)
 	}
-	if text := message.Get("content.1.text").String(); text != "请出一道四则运算题。只回复题目本身，不要解答；使用中文。" {
-		t.Fatalf("content[1].text = %q; body=%s", text, prepared.body)
+	if text := message.Get("content.1.text").String(); text != delegation {
+		t.Fatalf("content[1].text changed: got length %d, want %d; body=%s", len(text), len(delegation), prepared.body)
 	}
 	if message.Get("content.#").Int() != 2 || strings.Contains(string(prepared.body), "opaque-agent-message-ciphertext") {
 		t.Fatalf("opaque encrypted_content was exposed or preserved: %s", prepared.body)
