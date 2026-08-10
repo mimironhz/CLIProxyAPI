@@ -1168,7 +1168,7 @@ func TestRootLoggingFailuresDoNotChangeHTTPOutput(t *testing.T) {
 	}
 	payload := []byte("data: still-forwarded\n\n")
 	recorder := httptest.NewRecorder()
-	result := (&httpBridge{}).copyResponseBody(recorder, bytes.NewReader(payload), true, "", exchange)
+	result := (&httpBridge{}).copyResponseBody(recorder, bytes.NewReader(payload), true, "", false, exchange)
 	if !result.complete || recorder.Body.String() != string(payload) {
 		t.Fatalf("copy with failed logger = %#v body %q", result, recorder.Body.String())
 	}
@@ -1190,7 +1190,7 @@ func TestStockLoggingAutoHTTPResponseChunksRemainExact(t *testing.T) {
 	chunks := [][]byte{{0xe2}, {0x82, 0xac}, []byte("data: readable\n\n")}
 	reader := &fixedChunkReader{chunks: chunks}
 	recorder := httptest.NewRecorder()
-	result := (&httpBridge{}).copyResponseBody(recorder, reader, false, "identity", splitExchange)
+	result := (&httpBridge{}).copyResponseBody(recorder, reader, false, "identity", false, splitExchange)
 	if !result.complete {
 		t.Fatalf("split response copy result = %#v", result)
 	}
@@ -1199,7 +1199,7 @@ func TestStockLoggingAutoHTTPResponseChunksRemainExact(t *testing.T) {
 	encodedExchange := manager.beginStockExchange(context.Background(), routeOfficial, "http", "responses", "gpt-stock")
 	encodedRecorder := httptest.NewRecorder()
 	encodedPayload := []byte("ASCII bytes marked as gzip")
-	encodedResult := (&httpBridge{}).copyResponseBody(encodedRecorder, bytes.NewReader(encodedPayload), false, "gzip", encodedExchange)
+	encodedResult := (&httpBridge{}).copyResponseBody(encodedRecorder, bytes.NewReader(encodedPayload), false, "gzip", false, encodedExchange)
 	if !encodedResult.complete {
 		t.Fatalf("encoded response copy result = %#v", encodedResult)
 	}

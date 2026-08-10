@@ -25,7 +25,7 @@ or edit an artifact in place; create a new versioned directory instead.
 Frozen but inactive Root + Relay candidate:
 
 ```text
-/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810T044233Z-delegation-compat
+/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810T051259Z-reserved-schema-safe
 ```
 
 Scope:
@@ -38,10 +38,13 @@ Scope:
 
 Change:
 
-- Root removes only the `message.encrypted` marker from collaboration's
-  `spawn_agent`, `followup_task`, and `send_message` tools when Relay
-  multi-agent workers are advertised. Stock-only multi-agent traffic and
-  unrelated message tools are unchanged.
+- Root maps the reserved `collaboration` namespace to
+  `collaboration-optimize` before removing the `message.encrypted` marker from
+  `spawn_agent`, `followup_task`, and `send_message`, then restores the original
+  namespace on official HTTP/SSE and WebSocket responses. This avoids official
+  reserved-schema validation while keeping Desktop's tool names unchanged.
+- Stock-only multi-agent traffic, unrelated message tools, tool descriptions,
+  model lists, and opaque tool arguments are unchanged.
 - xAI and DeepSeek convert Codex-only `agent_message` into a standard user
   message without enabling the optional broad multi-agent optimization.
 - Opaque `encrypted_content` is never copied into model-visible text. The
@@ -57,7 +60,7 @@ Run only from an external Terminal after this preparing task has completed.
 Choose a quiet interval with no active delegated turns.
 
 ```bash
-CANDIDATE=/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810T044233Z-delegation-compat
+CANDIDATE=/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810T051259Z-reserved-schema-safe
 ROOT_ROLLBACK=/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260805T052624Z-b6ff2fbc
 RELAY_ROLLBACK=/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810T034432Z-398f082c
 ```
@@ -114,6 +117,21 @@ RELAY_ROLLBACK=/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810
    launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.user.cliproxy-relay.plist"
    launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.user.cliproxy-root.plist"
    ```
+
+### Rejected candidate: do not activate
+
+The candidate below was activated briefly, rejected by the official upstream,
+and rolled back on 2026-08-10. It must not be reused:
+
+```text
+/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810T044233Z-delegation-compat
+```
+
+It removed `message.encrypted` in place from the reserved `collaboration`
+namespace. Official Codex returned HTTP 400 with `Function
+'collaboration.followup_task' is reserved for use by this model and must match
+the configured schema.` Ten consecutive official requests failed with the same
+249-byte response; after paired rollback, official requests returned HTTP 200.
 
 ### Previous live handoff (Relay-only): xAI `agent_message` compatibility
 

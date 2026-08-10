@@ -84,8 +84,12 @@ func NormalizeCodexAgentMessageInput(payload []byte) []byte {
 // delivery tools; descriptions, namespaces, model lists, and every other tool
 // field are preserved.
 func NormalizeCodexDelegationMessageSchema(payload []byte) []byte {
+	return removeCodexToolMessageEncryption(payload, codexDelegationMessageToolPaths(payload))
+}
+
+func removeCodexToolMessageEncryption(payload []byte, toolPaths []string) []byte {
 	updated := payload
-	for _, toolPath := range codexDelegationMessageToolPaths(payload) {
+	for _, toolPath := range toolPaths {
 		var errDelete error
 		updated, errDelete = sjson.DeleteBytes(updated, toolPath+".parameters.properties.message.encrypted")
 		if errDelete != nil {
@@ -93,6 +97,18 @@ func NormalizeCodexDelegationMessageSchema(payload []byte) []byte {
 		}
 	}
 	return updated
+}
+
+// PrepareCodexRelayDelegationRequest moves collaboration delivery tools out of
+// Codex's reserved namespace before removing their encryption markers. The
+// caller must restore the namespace on matching upstream responses.
+func PrepareCodexRelayDelegationRequest(payload []byte) ([]byte, bool) {
+	toolPaths := codexReservedCollaborationDeliveryToolPaths(payload)
+	if len(toolPaths) == 0 || hasCodexOptimizedCollaborationConflict(payload) {
+		return payload, false
+	}
+	updated := removeCodexToolMessageEncryption(payload, toolPaths)
+	return optimizeCodexCollaborationNamespace(updated, toolPaths)
 }
 
 // TranslateRequestWithCodexMultiAgentV2 normalizes official Codex multi-agent

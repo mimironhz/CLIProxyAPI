@@ -21,14 +21,19 @@ const kimiCompactionPrefix = "kimi-compaction-v1:"
 const officialFastServiceTier = "priority"
 
 // normalizeRelayMultiAgentParentPayload keeps delegated message text portable
-// when Root advertises Relay-hosted multi-agent workers. Removing only the
-// collaboration delivery tools' message encryption markers makes the client
-// send child messages as ordinary text; stock-only traffic is unchanged.
-func normalizeRelayMultiAgentParentPayload(payload []byte, enabled bool) []byte {
+// when Root advertises Relay-hosted multi-agent workers. The official service
+// reserves the collaboration schema, so Root moves it to a non-reserved alias
+// before removing delivery-message encryption markers. Responses must restore
+// the client-visible namespace.
+func normalizeRelayMultiAgentParentPayload(payload []byte, enabled bool) ([]byte, bool) {
 	if !enabled {
-		return payload
+		return payload, false
 	}
-	return multiagentv2.NormalizeCodexDelegationMessageSchema(payload)
+	return multiagentv2.PrepareCodexRelayDelegationRequest(payload)
+}
+
+func restoreRelayMultiAgentResponse(payload []byte, optimized bool) []byte {
+	return multiagentv2.RestoreCodexMultiAgentV2Response(payload, optimized)
 }
 
 func payloadContainsCompaction(payload []byte) bool {

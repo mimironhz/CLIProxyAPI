@@ -203,7 +203,7 @@ func TestHTTPBridgeForwardsPlaintextCollaborationMessageSchemasToOfficial(t *tes
 	officialServer := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		captureHTTPRequest(t, request, officialCapture)
 		response.Header().Set("Content-Type", "text/event-stream")
-		_, _ = response.Write([]byte("data: done\n\n"))
+		_, _ = response.Write([]byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"namespace\":\"collaboration-optimize\",\"name\":\"followup_task\",\"arguments\":\"{}\"}}\n\n"))
 	}))
 	t.Cleanup(officialServer.Close)
 	relayServer := httptest.NewServer(http.NotFoundHandler())
@@ -218,13 +218,49 @@ func TestHTTPBridgeForwardsPlaintextCollaborationMessageSchemasToOfficial(t *tes
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", response.StatusCode)
 	}
-	_ = readAndClose(t, response)
+	responseBody := readAndClose(t, response)
+	if !strings.Contains(responseBody, `"namespace":"collaboration"`) || strings.Contains(responseBody, "collaboration-optimize") {
+		t.Fatalf("official response namespace was not restored: %s", responseBody)
+	}
 
 	request := receiveWithTimeout(t, officialCapture)
 	if request.encoding != "" {
 		t.Fatalf("rewritten official request encoding = %q, want empty", request.encoding)
 	}
 	assertDelegationMessageSchemaRewrite(t, request.body)
+}
+
+func TestHTTPBridgeRestoresMappedCollaborationSSEAcrossSplitIdentityChunks(t *testing.T) {
+	first := []byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"namespace\":\"collaboration-optimize\",\"name\":\"followup_task\",\"arguments\":\"{\\\"opaque\\\":\\\"collaboration-optimize\\\"}\"}}\r\n")
+	second := []byte("data:\t{\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"name\":\"collaboration-optimize__send_message\",\"arguments\":\"{}\"}}  \n")
+	suffix := []byte(": keep-alive\r\ndata: [DONE]\n\n")
+	stream := append(append(append([]byte(nil), first...), second...), suffix...)
+	reader := &fixedChunkReader{chunks: [][]byte{
+		stream[:17],
+		stream[17 : len(first)+11],
+		stream[len(first)+11:],
+	}}
+	recorder := httptest.NewRecorder()
+	result := (&httpBridge{}).copyResponseBody(recorder, reader, true, "identity", true, nil)
+	if !result.complete {
+		t.Fatalf("restored response copy result = %#v", result)
+	}
+	got := recorder.Body.Bytes()
+	if !recorder.Flushed {
+		t.Fatal("restored SSE response was not flushed")
+	}
+	if bytes.Count(got, []byte(`"namespace":"collaboration"`)) != 1 {
+		t.Fatalf("short collaboration namespace was not restored: %s", got)
+	}
+	if !bytes.Contains(got, []byte(`"name":"collaboration__send_message"`)) {
+		t.Fatalf("qualified collaboration name was not restored: %s", got)
+	}
+	if !bytes.Contains(got, []byte(`{\"opaque\":\"collaboration-optimize\"}`)) {
+		t.Fatalf("opaque function arguments changed: %s", got)
+	}
+	if !bytes.Contains(got, []byte("\r\n")) || !bytes.HasSuffix(got, suffix) {
+		t.Fatalf("SSE line endings or unmapped suffix changed: %q", got)
+	}
 }
 
 func TestHTTPBridgeSanitizesOfficialSSEReplayState(t *testing.T) {
@@ -871,6 +907,9 @@ func encodeZstd(t *testing.T, payload []byte) []byte {
 
 func assertDelegationMessageSchemaRewrite(t *testing.T, payload []byte) {
 	t.Helper()
+	if namespace := gjson.GetBytes(payload, "tools.0.name").String(); namespace != "collaboration-optimize" {
+		t.Fatalf("collaboration namespace = %q, want collaboration-optimize: %s", namespace, payload)
+	}
 	for _, path := range []string{
 		"tools.0.tools.0.parameters.properties.message.encrypted",
 		"tools.0.tools.1.parameters.properties.message.encrypted",
@@ -880,7 +919,7 @@ func assertDelegationMessageSchemaRewrite(t *testing.T, payload []byte) {
 			t.Fatalf("collaboration message encryption marker remains at %s: %s", path, payload)
 		}
 	}
-	if encrypted := gjson.GetBytes(payload, "tools.1.tools.0.parameters.properties.message.encrypted").Bool(); !encrypted {
+	if encrypted := gjson.GetBytes(payload, "tools.1.tools.0.parameters.properties.message.encrypted"); encrypted.Exists() && !encrypted.Bool() {
 		t.Fatalf("unrelated send_message schema changed: %s", payload)
 	}
 }
