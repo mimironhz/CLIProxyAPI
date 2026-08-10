@@ -230,6 +230,38 @@ func TestHTTPBridgeForwardsPlaintextCollaborationMessageSchemasToOfficial(t *tes
 	assertDelegationMessageSchemaRewrite(t, request.body)
 }
 
+func TestHTTPBridgePromotesPlaintextAgentMessageContentToOfficial(t *testing.T) {
+	officialCapture := make(chan capturedHTTPRequest, 1)
+	officialServer := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		captureHTTPRequest(t, request, officialCapture)
+		response.Header().Set("Content-Type", "text/event-stream")
+		_, _ = response.Write([]byte("data: {\"type\":\"response.completed\"}\n\n"))
+	}))
+	t.Cleanup(officialServer.Close)
+	relayServer := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(relayServer.Close)
+
+	bridge := newTestHTTPBridge(t, officialServer, relayServer, func(options *httpBridgeOptions) {
+		options.relayAgents = true
+	})
+	rootServer := newTestHTTPRootServer(t, bridge)
+	envelope := "Message Type: NEW_TASK\nTask name: /root/official_worker\nSender: /root\nPayload:\n"
+	task := "Complete the delegated browser checks and report the bounded result."
+	opaque := validGPTReasoningEncryptedContentForRootTest()
+	payload := []byte(`{"model":"gpt-stock","stream":true,"input":[{"type":"agent_message","id":"amsg_official","author":"/root","recipient":"/root/official_worker","content":[{"type":"input_text","text":` + string(mustJSON(t, envelope)) + `},{"type":"encrypted_content","encrypted_content":` + string(mustJSON(t, task)) + `},{"type":"encrypted_content","encrypted_content":` + string(mustJSON(t, opaque)) + `}]}]}`)
+	response := performRootPOST(t, rootServer.URL+"/v1/responses", encodeZstd(t, payload), "zstd", desktopHTTPHeaders())
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", response.StatusCode)
+	}
+	_ = readAndClose(t, response)
+
+	request := receiveWithTimeout(t, officialCapture)
+	if request.encoding != "" {
+		t.Fatalf("rewritten official request encoding = %q, want empty", request.encoding)
+	}
+	assertOfficialAgentMessagePlaintextPromotion(t, request.body, task, opaque)
+}
+
 func TestHTTPBridgeRestoresMappedCollaborationSSEAcrossSplitIdentityChunks(t *testing.T) {
 	first := []byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"namespace\":\"collaboration-optimize\",\"name\":\"followup_task\",\"arguments\":\"{\\\"opaque\\\":\\\"collaboration-optimize\\\"}\"}}\r\n")
 	second := []byte("data:\t{\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"name\":\"collaboration-optimize__send_message\",\"arguments\":\"{}\"}}  \n")
@@ -921,5 +953,22 @@ func assertDelegationMessageSchemaRewrite(t *testing.T, payload []byte) {
 	}
 	if encrypted := gjson.GetBytes(payload, "tools.1.tools.0.parameters.properties.message.encrypted"); encrypted.Exists() && !encrypted.Bool() {
 		t.Fatalf("unrelated send_message schema changed: %s", payload)
+	}
+}
+
+func assertOfficialAgentMessagePlaintextPromotion(t *testing.T, payload []byte, task, opaque string) {
+	t.Helper()
+	message := gjson.GetBytes(payload, "input.0")
+	if gotType := message.Get("type").String(); gotType != "agent_message" {
+		t.Fatalf("type = %q, want agent_message: %s", gotType, payload)
+	}
+	if gotTask := message.Get("content.1.text").String(); gotTask != task {
+		t.Fatalf("promoted task = %q, want %q", gotTask, task)
+	}
+	if message.Get("content.1.encrypted_content").Exists() {
+		t.Fatalf("promoted task retained encrypted_content: %s", payload)
+	}
+	if gotOpaque := message.Get("content.2.encrypted_content").String(); gotOpaque != opaque {
+		t.Fatalf("official opaque content changed: got length %d, want %d", len(gotOpaque), len(opaque))
 	}
 }

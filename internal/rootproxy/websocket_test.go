@@ -243,6 +243,48 @@ func TestWebsocketBridgeForwardsPlaintextCollaborationMessageSchemasToOfficial(t
 	}
 }
 
+func TestWebsocketBridgePromotesPlaintextAgentMessageContentToOfficial(t *testing.T) {
+	stockCapture := make(chan capturedMessage, 1)
+	stockServer := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		connection, errUpgrade := testUpgrader().Upgrade(response, request, nil)
+		if errUpgrade != nil {
+			t.Errorf("upgrade official worker upstream: %v", errUpgrade)
+			return
+		}
+		defer func() { _ = connection.Close() }()
+		messageType, payload, errRead := connection.ReadMessage()
+		if errRead != nil {
+			t.Errorf("read official worker request: %v", errRead)
+			return
+		}
+		stockCapture <- capturedMessage{messageType: messageType, payload: append([]byte(nil), payload...)}
+		if errWrite := connection.WriteMessage(messageType, []byte(`{"type":"response.completed"}`)); errWrite != nil {
+			t.Errorf("write official worker terminal: %v", errWrite)
+		}
+	}))
+	t.Cleanup(stockServer.Close)
+	bridge := newTestBridge(t, websocketURL(stockServer.URL), websocketURL(stockServer.URL), func(options *bridgeOptions) {
+		options.relayAgents = true
+	})
+	rootServer := httptest.NewServer(bridge)
+	t.Cleanup(rootServer.Close)
+
+	connection := dialRootWebsocket(t, rootServer.URL, "/v1/responses", desktopHTTPHeaders())
+	defer func() { _ = connection.Close() }()
+	envelope := "Message Type: NEW_TASK\nTask name: /root/official_worker\nSender: /root\nPayload:\n"
+	task := "Complete the delegated browser checks and report the bounded result."
+	opaque := validGPTReasoningEncryptedContentForRootTest()
+	payload := []byte(`{"type":"response.create","model":"gpt-stock","input":[{"type":"agent_message","id":"amsg_official","author":"/root","recipient":"/root/official_worker","content":[{"type":"input_text","text":` + string(mustJSON(t, envelope)) + `},{"type":"encrypted_content","encrypted_content":` + string(mustJSON(t, task)) + `},{"type":"encrypted_content","encrypted_content":` + string(mustJSON(t, opaque)) + `}]}]}`)
+	if errWrite := connection.WriteMessage(websocket.TextMessage, payload); errWrite != nil {
+		t.Fatalf("write official worker turn: %v", errWrite)
+	}
+	captured := receiveCapture(t, stockCapture)
+	assertOfficialAgentMessagePlaintextPromotion(t, captured.payload, task, opaque)
+	if _, _, errRead := connection.ReadMessage(); errRead != nil {
+		t.Fatalf("read official worker terminal: %v", errRead)
+	}
+}
+
 func TestWebsocketBridgeRejectsInvalidFirstMessagesWithoutDialing(t *testing.T) {
 	var officialDials atomic.Int32
 	var relayDials atomic.Int32

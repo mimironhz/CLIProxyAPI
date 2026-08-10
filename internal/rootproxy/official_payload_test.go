@@ -3,11 +3,21 @@ package rootproxy
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"testing"
 
 	"github.com/tidwall/gjson"
 )
+
+func mustJSON(t *testing.T, value string) []byte {
+	t.Helper()
+	encoded, errMarshal := json.Marshal(value)
+	if errMarshal != nil {
+		t.Fatalf("marshal JSON test string: %v", errMarshal)
+	}
+	return encoded
+}
 
 func validGPTReasoningEncryptedContentForRootTest() string {
 	payload := make([]byte, 1+8+16+16+32)
@@ -73,6 +83,36 @@ func TestNormalizeRelayMultiAgentParentPayloadAliasesCollaborationBeforeRemoving
 	}
 	if description := gjson.GetBytes(got, "tools.0.description").String(); description != "unchanged namespace" {
 		t.Fatalf("namespace description = %q, want unchanged namespace", description)
+	}
+}
+
+func TestNormalizeRelayMultiAgentParentPayloadPromotesOfficialWorkerPlaintext(t *testing.T) {
+	envelope := "Message Type: NEW_TASK\nTask name: /root/official_worker\nSender: /root\nPayload:\n"
+	task := "Complete the delegated browser checks and report the bounded result."
+	opaque := validGPTReasoningEncryptedContentForRootTest()
+	payload := []byte(`{"input":[{"type":"agent_message","id":"amsg_official","author":"/root","recipient":"/root/official_worker","content":[{"type":"input_text","text":` + string(mustJSON(t, envelope)) + `},{"type":"encrypted_content","encrypted_content":` + string(mustJSON(t, task)) + `},{"type":"encrypted_content","encrypted_content":` + string(mustJSON(t, opaque)) + `}]}]}`)
+
+	disabled, optimized := normalizeRelayMultiAgentParentPayload(payload, false)
+	if optimized || !bytes.Equal(disabled, payload) {
+		t.Fatalf("disabled official worker normalization changed payload: %s", disabled)
+	}
+
+	got, optimized := normalizeRelayMultiAgentParentPayload(payload, true)
+	if optimized {
+		t.Fatal("worker payload without collaboration tools unexpectedly mapped a namespace")
+	}
+	message := gjson.GetBytes(got, "input.0")
+	if gotType := message.Get("type").String(); gotType != "agent_message" {
+		t.Fatalf("type = %q, want agent_message: %s", gotType, got)
+	}
+	if gotTask := message.Get("content.1.text").String(); gotTask != task {
+		t.Fatalf("promoted task = %q, want %q", gotTask, task)
+	}
+	if message.Get("content.1.encrypted_content").Exists() {
+		t.Fatalf("promoted task retained encrypted_content: %s", got)
+	}
+	if gotOpaque := message.Get("content.2.encrypted_content").String(); gotOpaque != opaque {
+		t.Fatalf("official opaque content changed: got length %d, want %d", len(gotOpaque), len(opaque))
 	}
 }
 
