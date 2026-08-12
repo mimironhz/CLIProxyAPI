@@ -38,6 +38,8 @@ func TestDeepSeekModelsExposeOfficialLimits(t *testing.T) {
 		if info.Thinking == nil {
 			t.Fatalf("%s thinking support = nil, want levels", modelID)
 		}
+		assertStringSlice(t, modelID+" input modalities", info.SupportedInputModalities, []string{"text"})
+		assertStringSlice(t, modelID+" output modalities", info.SupportedOutputModalities, []string{"text"})
 		if want := []string{"high", "max"}; len(info.Thinking.Levels) != len(want) {
 			t.Fatalf("%s thinking levels = %v, want %v", modelID, info.Thinking.Levels, want)
 		} else {
@@ -46,6 +48,35 @@ func TestDeepSeekModelsExposeOfficialLimits(t *testing.T) {
 					t.Fatalf("%s thinking levels = %v, want %v", modelID, info.Thinking.Levels, want)
 				}
 			}
+		}
+	}
+}
+
+func TestGrok45ExposesPublishedCapabilities(t *testing.T) {
+	info := LookupStaticModelInfo("grok-4.5")
+	if info == nil {
+		t.Fatal("LookupStaticModelInfo(\"grok-4.5\") = nil, want model info")
+	}
+	if info.ContextLength != 500000 {
+		t.Fatalf("context length = %d, want 500000", info.ContextLength)
+	}
+	if want := []string{"low", "medium", "high"}; info.Thinking == nil {
+		t.Fatalf("thinking support = nil, want levels %v", want)
+	} else {
+		assertStringSlice(t, "thinking levels", info.Thinking.Levels, want)
+	}
+	assertStringSlice(t, "input modalities", info.SupportedInputModalities, []string{"text", "image"})
+	assertStringSlice(t, "output modalities", info.SupportedOutputModalities, []string{"text"})
+}
+
+func assertStringSlice(t *testing.T, label string, got, want []string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("%s = %v, want %v", label, got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("%s = %v, want %v", label, got, want)
 		}
 	}
 }
@@ -69,19 +100,29 @@ func TestGeminiVertexModelsUseFlashLiteReleaseID(t *testing.T) {
 	t.Fatalf("Vertex models do not contain %q", releaseID)
 }
 
-func TestWithXAIBuiltinsIncludesVideoPreviewModel(t *testing.T) {
+func TestWithXAIBuiltinsIncludesVideo15GAAndPreviewAlias(t *testing.T) {
 	models := WithXAIBuiltins(nil)
+	foundGA := false
+	foundPreviewAlias := false
 
 	for _, model := range models {
 		if model == nil {
 			continue
 		}
-		if model.ID == xaiBuiltinVideo15PreviewModelID {
-			return
+		if model.ID == xaiBuiltinVideo15ModelID {
+			foundGA = true
+		}
+		if model.ID == xaiBuiltinVideo15PreviewID {
+			foundPreviewAlias = true
 		}
 	}
 
-	t.Fatalf("expected xAI builtin model %s", xaiBuiltinVideo15PreviewModelID)
+	if !foundGA {
+		t.Fatalf("expected xAI builtin model %s", xaiBuiltinVideo15ModelID)
+	}
+	if !foundPreviewAlias {
+		t.Fatalf("expected xAI builtin compatibility alias %s", xaiBuiltinVideo15PreviewID)
+	}
 }
 
 func TestAntigravityWebSearchModelForRequiresRequestedModelCapability(t *testing.T) {

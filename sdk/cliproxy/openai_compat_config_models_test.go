@@ -66,6 +66,38 @@ func TestBuildOpenAICompatibilityConfigModels_InputModalities(t *testing.T) {
 	}
 }
 
+func TestBuildOpenAICompatibilityConfigModelsInheritsStaticThinking(t *testing.T) {
+	compat := &config.OpenAICompatibility{
+		Name: "deepseek",
+		Models: []config.OpenAICompatibilityModel{
+			{Name: "deepseek-v4-pro", Alias: "deepseek-pro"},
+			{Name: "unknown-reasoning-model"},
+		},
+	}
+
+	models := buildOpenAICompatibilityConfigModels(compat)
+	if len(models) != 2 {
+		t.Fatalf("model count = %d, want 2", len(models))
+	}
+	assertModelThinkingLevels(t, models[0], "high", "max")
+	assertModelThinkingLevels(t, models[1], "low", "medium", "high")
+}
+
+func assertModelThinkingLevels(t *testing.T, model *ModelInfo, want ...string) {
+	t.Helper()
+	if model == nil || model.Thinking == nil {
+		t.Fatalf("model = %+v, want thinking levels %v", model, want)
+	}
+	if len(model.Thinking.Levels) != len(want) {
+		t.Fatalf("thinking levels = %v, want %v", model.Thinking.Levels, want)
+	}
+	for i := range want {
+		if model.Thinking.Levels[i] != want[i] {
+			t.Fatalf("thinking levels = %v, want %v", model.Thinking.Levels, want)
+		}
+	}
+}
+
 func joinModalities(modalities []string) string {
 	if len(modalities) == 0 {
 		return ""

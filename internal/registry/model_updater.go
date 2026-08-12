@@ -120,6 +120,7 @@ func tryRefreshModels(ctx context.Context, label string) {
 		log.Warnf("%s: fetch failed from all URLs, keeping current data", label)
 		return
 	}
+	preserveLocalProviderSections(oldData, parsed)
 
 	// Detect changes before updating store.
 	changed := detectChangedProviders(oldData, parsed)
@@ -213,6 +214,7 @@ func detectChangedProviders(oldData, newData *staticModelsJSON) []string {
 		{"codex", oldData.CodexPlus, newData.CodexPlus},
 		{"codex", oldData.CodexPro, newData.CodexPro},
 		{"kimi", oldData.Kimi, newData.Kimi},
+		{"deepseek", oldData.DeepSeek, newData.DeepSeek},
 		{"antigravity", oldData.Antigravity, newData.Antigravity},
 		{"xai", oldData.XAI, newData.XAI},
 	}
@@ -229,6 +231,19 @@ func detectChangedProviders(oldData, newData *staticModelsJSON) []string {
 		}
 	}
 	return changed
+}
+
+// preserveLocalProviderSections keeps provider catalogs maintained by this
+// distribution when the shared remote catalog does not publish that section.
+// A non-empty remote section always wins so the shared catalog can take over
+// once it starts carrying the provider.
+func preserveLocalProviderSections(current, fetched *staticModelsJSON) {
+	if current == nil || fetched == nil {
+		return
+	}
+	if len(fetched.DeepSeek) == 0 {
+		fetched.DeepSeek = cloneModelInfos(current.DeepSeek)
+	}
 }
 
 // modelSectionChanged reports whether two model slices differ.
@@ -333,6 +348,7 @@ func validateModelsCatalog(data *staticModelsJSON) error {
 		{name: "codex-plus", models: data.CodexPlus},
 		{name: "codex-pro", models: data.CodexPro},
 		{name: "kimi", models: data.Kimi},
+		{name: "deepseek", models: data.DeepSeek},
 		{name: "antigravity", models: data.Antigravity},
 		{name: "xai", models: data.XAI},
 	}

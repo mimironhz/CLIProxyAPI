@@ -29,6 +29,8 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+const kimiReasoningUnavailable = "[reasoning unavailable]"
+
 // KimiExecutor is a stateless executor for Kimi API using OpenAI-compatible chat completions.
 type KimiExecutor struct {
 	ClaudeExecutor
@@ -49,6 +51,14 @@ func NewKimiExecutor(cfg *config.Config) *KimiExecutor {
 
 // Identifier returns the executor identifier.
 func (e *KimiExecutor) Identifier() string { return "kimi" }
+
+// RequestToFormat reports the upstream request format used after auth selection.
+func (e *KimiExecutor) RequestToFormat(_ cliproxyexecutor.Request, opts cliproxyexecutor.Options) sdktranslator.Format {
+	if opts.SourceFormat == sdktranslator.FormatClaude {
+		return sdktranslator.FormatClaude
+	}
+	return sdktranslator.FormatOpenAI
+}
 
 // PrepareRequest injects Kimi credentials into the outgoing HTTP request.
 func (e *KimiExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth) error {
@@ -507,7 +517,16 @@ func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	from := opts.SourceFormat
 	if from.String() == "claude" {
 		auth.Attributes["base_url"] = kimiauth.KimiAPIBaseURL
-		return e.ClaudeExecutor.Execute(ctx, auth, req, opts)
+		preparedReq, replayScope := prepareKimiThinkingReplayRequest(ctx, req, opts)
+		claudeResp, errExecute := e.ClaudeExecutor.Execute(ctx, auth, preparedReq, opts)
+		if errExecute != nil {
+			if replayScope.replayApplied && shouldClearKimiThinkingReplayAfterError(errExecute) {
+				clearKimiThinkingReplayContent(ctx, replayScope)
+			}
+			return claudeResp, errExecute
+		}
+		cacheKimiThinkingReplayResponse(ctx, replayScope, claudeResp.Payload)
+		return claudeResp, nil
 	}
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 
@@ -646,7 +665,15 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	from := opts.SourceFormat
 	if from.String() == "claude" {
 		auth.Attributes["base_url"] = kimiauth.KimiAPIBaseURL
-		return e.ClaudeExecutor.ExecuteStream(ctx, auth, req, opts)
+		preparedReq, replayScope := prepareKimiThinkingReplayRequest(ctx, req, opts)
+		claudeResult, errExecute := e.ClaudeExecutor.ExecuteStream(ctx, auth, preparedReq, opts)
+		if errExecute != nil {
+			if replayScope.replayApplied && shouldClearKimiThinkingReplayAfterError(errExecute) {
+				clearKimiThinkingReplayContent(ctx, replayScope)
+			}
+			return nil, errExecute
+		}
+		return wrapKimiThinkingReplayStream(ctx, claudeResult, replayScope), nil
 	}
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 
@@ -846,7 +873,7 @@ func normalizeKimiToolMessageLinks(body []byte) ([]byte, error) {
 			reasoning := msg.Get("reasoning_content")
 			if reasoning.Exists() {
 				reasoningText := reasoning.String()
-				if strings.TrimSpace(reasoningText) != "" {
+				if isUsableKimiReasoning(reasoningText) {
 					latestReasoning = reasoningText
 					hasLatestReasoning = true
 				}
@@ -856,7 +883,7 @@ func normalizeKimiToolMessageLinks(body []byte) ([]byte, error) {
 			if toolCalls.Exists() && toolCalls.IsArray() {
 				toolCallItems := toolCalls.Array()
 				if len(toolCallItems) > 0 {
-					if !reasoning.Exists() || strings.TrimSpace(reasoning.String()) == "" {
+					if !reasoning.Exists() || !isUsableKimiReasoning(reasoning.String()) {
 						patches = append(patches, messagePatch{
 							index:        msgIndex,
 							path:         "reasoning_content",
@@ -1031,8 +1058,13 @@ func isKimiAssistantContentPartEmpty(part gjson.Result) bool {
 	return strings.TrimSpace(part.Raw) == "{}"
 }
 
+func isUsableKimiReasoning(reasoning string) bool {
+	trimmed := strings.TrimSpace(reasoning)
+	return trimmed != "" && trimmed != kimiReasoningUnavailable
+}
+
 func fallbackAssistantReasoning(msg gjson.Result, hasLatest bool, latest string) string {
-	if hasLatest && strings.TrimSpace(latest) != "" {
+	if hasLatest && isUsableKimiReasoning(latest) {
 		return latest
 	}
 
@@ -1056,7 +1088,7 @@ func fallbackAssistantReasoning(msg gjson.Result, hasLatest bool, latest string)
 		}
 	}
 
-	return "[reasoning unavailable]"
+	return kimiReasoningUnavailable
 }
 
 // Refresh refreshes the Kimi token using the refresh token.
@@ -1245,14 +1277,24 @@ func stripKimiPrefix(model string) string {
 // It strips the CLIProxyAPI "kimi-" prefix and any Claude Code "[1m]" context
 // suffix while preserving a trailing thinking suffix (e.g. "(1024)"), so that
 // the upstream API receives IDs such as "k3(1024)" instead of "kimi-k3[1m](1024)".
+// K2.7 Code aliases are remapped to the official Kimi Code model IDs before
+// generic prefix stripping, so already-canonical IDs stay idempotent.
 func normalizeKimiUpstreamModel(model string) string {
 	model = strings.TrimSpace(model)
 	parsed := thinking.ParseSuffix(model)
-	base := parsed.ModelName
-	if strings.HasSuffix(strings.ToLower(base), "[1m]") {
+	base := strings.ToLower(strings.TrimSpace(parsed.ModelName))
+	if strings.HasSuffix(base, "[1m]") {
 		base = base[:len(base)-len("[1m]")]
 	}
-	normalized := strings.ToLower(stripKimiPrefix(strings.TrimSpace(base)))
+	var normalized string
+	switch base {
+	case "kimi-k2.7-code", "k2.7-code", "kimi-for-coding", "for-coding":
+		normalized = "kimi-for-coding"
+	case "kimi-k2.7-code-highspeed", "k2.7-code-highspeed", "kimi-for-coding-highspeed", "for-coding-highspeed":
+		normalized = "kimi-for-coding-highspeed"
+	default:
+		normalized = stripKimiPrefix(base)
+	}
 	if parsed.HasSuffix {
 		return normalized + "(" + parsed.RawSuffix + ")"
 	}
