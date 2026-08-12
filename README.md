@@ -32,7 +32,7 @@ You can access the following providers locally and with multiple CLI accounts th
     </tr>
     <tr>
         <td align="center"><a href="https://x.ai/grok"><img src="./assets/logo/xai.svg" alt="xAI" width="28" height="28" /></a></td>
-        <td>xAI Grok series models (Grok 4.5, Grok Composer 2.5 Fast, etc.). Grok 4.5 is SpaceXAI's frontier model built for coding, agentic tasks, and knowledge work. It was trained in SpaceXAI's data centers in Memphis with new datasets spanning science, engineering, and math.</td>
+        <td>xAI Grok series models (Grok 4.6, Grok 4.5, etc.). Grok 4.6 is SpaceXAI's flagship model for code and general-purpose work, with agentic tool calling, configurable reasoning, and stronger long-running agent, interactive, and visual capabilities.</td>
     </tr>
 </tbody>
 </table>

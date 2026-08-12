@@ -382,7 +382,7 @@ nonstream-keepalive-interval: 0
 # xai-api-key:
 #   - api-key: "xai-..."
 #     weight: 5 # optional: weighted-round-robin share; omitted defaults to 1; maximum 1,000,000
-#     prefix: "xai" # optional: require calls like "xai/grok-4.5" to target this credential
+#     prefix: "xai" # optional: require calls like "xai/grok-4.6" to target this credential
 #     disable-cooling: false # optional: per-auth override for auth/model cooldown scheduling
 #     base-url: "https://api.x.ai/v1" # xAI-compatible Responses API endpoint
 #     websockets: true # optional: use the xAI upstream websocket transport for downstream websocket requests
@@ -391,14 +391,14 @@ nonstream-keepalive-interval: 0
 #     proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
 #     # proxy-url: "direct" # optional: explicit direct connect for this credential
 #     models:
-#       - name: "grok-4.5"       # upstream model name
-#         alias: "grok-4.5"       # client alias mapped to the upstream model
-#         display-name: "Grok 4.5" # optional catalog display name
+#       - name: "grok-4.6"       # upstream model name
+#         alias: "grok-4.6"       # client alias mapped to the upstream model
+#         display-name: "Grok 4.6" # optional catalog display name
 #         max-context-length: 500000 # optional: override Codex client context window metadata
 #         force-mapping: true     # optional: rewrite response model fields back to the alias
 #         is-compat: false        # optional: preserve thinking blocks with empty signatures for compatible upstreams
 #         thinking:               # optional: exact thinking capability for this configured model
-#           levels: ["high", "medium", "low"]
+#           levels: ["low", "medium", "high", "xhigh"]
 #     excluded-models:
 #       - "grok-4.1"             # exclude specific models (exact match)
 #       - "grok-3-*"             # wildcard matching prefix
@@ -493,7 +493,7 @@ nonstream-keepalive-interval: 0
 #     api: chat-completions # optional: wire protocol spoken to this upstream.
 #       # "chat-completions" (the default) translates every request to
 #       # /chat/completions. Set "responses" only for an upstream that implements
-#       # the OpenAI Responses API itself (for example https://api.deepseek.com/v1),
+#       # the OpenAI Responses API itself (for example https://api.deepseek.com),
 #       # and requests reach /responses without the round trip through Chat
 #       # Completions. Note that "responses" applies to the whole provider, and
 #       # that only clients calling /v1/responses benefit: callers using
@@ -532,8 +532,8 @@ nonstream-keepalive-interval: 0
 #       - name: "kimi-k2.5"
 #         alias: "claude-opus-4.66"
 #   - name: "deepseek"
-#     base-url: "https://api.deepseek.com/v1"
-#     api: responses
+#     base-url: "https://api.deepseek.com"
+#     api: responses # DeepSeek's native Responses API
 #     api-key-entries:
 #       - api-key: "sk-..."
 #     models:

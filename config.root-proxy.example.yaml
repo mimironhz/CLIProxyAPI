@@ -75,10 +75,10 @@ routing:
   # executor will carry the collaboration tools, which is what actually decides
   # whether the model can serve as a subagent; it is validated against
   # {xai, kimi, deepseek} at load, and only the first "/" delimits it, so a
-  # vendor-qualified slug such as "xai/x-ai/grok-4.5" works.
+  # vendor-qualified slug such as "xai/x-ai/grok-4.6" works.
   #
   #   multi-agent-v2-relay: true
-  #   multi-agent-v2-relay: ["xai/grok-4.5", "deepseek/deepseek-v4-flash"]
+  #   multi-agent-v2-relay: ["xai/grok-4.6", "deepseek/deepseek-v4-flash"]
   #
   # A Relay identifier in multi-agent-v2-models is rejected; use this key.
   multi-agent-v2-relay: true

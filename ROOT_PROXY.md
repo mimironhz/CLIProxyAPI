@@ -245,7 +245,7 @@ of a bool, for advertising only part of the Relay half:
 ```yaml
 routing:
   multi-agent-v2-relay:
-    - "xai/grok-4.5"
+    - "xai/grok-4.6"
     - "deepseek/deepseek-v4-flash"
 ```
 
@@ -258,7 +258,7 @@ the half that can be validated at config load, against the closed
 The prefix participates in the match: an entry only advertises a model the Relay
 catalog attributes to that same provider, and an unattributed model never matches
 a selective list. Only the first `/` delimits the prefix, so a vendor-qualified
-slug such as `xai/x-ai/grok-4.5` resolves correctly.
+slug such as `xai/x-ai/grok-4.6` resolves correctly.
 
 A Relay identifier in `multi-agent-v2-models` is rejected at config load, with an
 error pointing at this key.
