@@ -21,13 +21,17 @@ func TestModelOverrideHeadersFromEmbeddedModels(t *testing.T) {
 // would offer Codex four levels that behave as two, so the static definitions
 // carry the effective pair.
 func TestDeepSeekModelsExposeOfficialLimits(t *testing.T) {
-	for _, modelID := range []string{"deepseek-v4-flash", "deepseek-v4-pro"} {
+	expectedDisplayNames := map[string]string{
+		"deepseek-v4-flash": "DS/v4 Flash",
+		"deepseek-v4-pro":   "DS/v4 Pro",
+	}
+	for modelID, expectedDisplayName := range expectedDisplayNames {
 		info := LookupStaticModelInfo(modelID)
 		if info == nil {
 			t.Fatalf("LookupStaticModelInfo(%q) = nil, want model info", modelID)
 		}
-		if info.DisplayName == "" || info.DisplayName == modelID {
-			t.Fatalf("%s display name = %q, want a readable name", modelID, info.DisplayName)
+		if info.DisplayName != expectedDisplayName {
+			t.Fatalf("%s display name = %q, want %q", modelID, info.DisplayName, expectedDisplayName)
 		}
 		if info.ContextLength != 1048576 {
 			t.Fatalf("%s context length = %d, want 1048576", modelID, info.ContextLength)

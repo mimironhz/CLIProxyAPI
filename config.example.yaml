@@ -539,7 +539,7 @@ nonstream-keepalive-interval: 0
 #     models:
 #       - name: "deepseek-v4-pro"
 #         alias: "deepseek-v4-pro"
-#         display-name: "DeepSeek V4 Pro"
+#         display-name: "DS/v4 Pro"
 #         max-context-length: 1048576
 #         input-modalities: [text]
 #         output-modalities: [text]

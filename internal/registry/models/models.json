@@ -2472,7 +2472,7 @@
       "created": 1776988800,
       "owned_by": "deepseek",
       "type": "deepseek",
-      "display_name": "DeepSeek V4 Pro",
+      "display_name": "DS/v4 Pro",
       "description": "DeepSeek V4 Pro - DeepSeek's flagship V4 tier (1.6T MoE, 49B activated) with 1M context",
       "context_length": 1048576,
       "max_completion_tokens": 393216,
