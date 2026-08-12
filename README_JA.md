@@ -32,7 +32,7 @@ CLIProxyAPI は、CLI向けのOpenAI/Gemini/Claude/Codex/Grok互換APIインタ�
     </tr>
     <tr>
         <td align="center"><a href="https://x.ai/grok"><img src="./assets/logo/xai.svg" alt="xAI" width="28" height="28" /></a></td>
-        <td>xAI Grokシリーズモデル（Grok 4.5、Grok Composer 2.5 Fastなど）。Grok 4.5は、コーディング、エージェントタスク、知識作業向けに構築されたSpaceXAIのフロンティアモデルです。科学、工学、数学にわたる新しいデータセットを用いて、SpaceXAIのメンフィスにあるデータセンターで訓練されました。</td>
+        <td>xAI Grokシリーズモデル（Grok 4.6、Grok 4.5など）。Grok 4.6は、コードをはじめ幅広い用途に対応するSpaceXAIのフラッグシップモデルで、エージェント型ツール呼び出しと設定可能な推論を備え、長時間稼働するエージェントやインタラクティブ／ビジュアルな作業を強化しています。</td>
     </tr>
 </tbody>
 </table>

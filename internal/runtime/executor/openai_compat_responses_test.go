@@ -27,9 +27,9 @@ func responsesAuth(baseURL string) *cliproxyauth.Auth {
 	}}
 }
 
-// A provider configured for the Responses API must reach /responses with the
-// client's own Responses payload rather than a Chat Completions translation.
-func TestOpenAICompatExecutorPostsResponsesRequest(t *testing.T) {
+// DeepSeek V4 Pro uses DeepSeek's native /responses endpoint with the client's
+// own Responses payload rather than a Chat Completions translation.
+func TestOpenAICompatExecutorPostsDeepSeekV4ProResponsesRequest(t *testing.T) {
 	var gotPath string
 	var gotBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -41,9 +41,9 @@ func TestOpenAICompatExecutorPostsResponsesRequest(t *testing.T) {
 	defer server.Close()
 
 	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
-	payload := []byte(`{"model":"deepseek-v4-flash","stream":true,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`)
-	resp, err := executor.Execute(context.Background(), responsesAuth(server.URL+"/v1"), cliproxyexecutor.Request{
-		Model:   "deepseek-v4-flash",
+	payload := []byte(`{"model":"deepseek-v4-pro","stream":true,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`)
+	resp, err := executor.Execute(context.Background(), responsesAuth(server.URL), cliproxyexecutor.Request{
+		Model:   "deepseek-v4-pro",
 		Payload: payload,
 	}, cliproxyexecutor.Options{
 		SourceFormat: sdktranslator.FromString("openai-response"),
@@ -53,8 +53,8 @@ func TestOpenAICompatExecutorPostsResponsesRequest(t *testing.T) {
 		t.Fatalf("Execute error: %v", err)
 	}
 
-	if gotPath != "/v1/responses" {
-		t.Errorf("upstream path = %q, want /v1/responses", gotPath)
+	if gotPath != "/responses" {
+		t.Errorf("upstream path = %q, want /responses", gotPath)
 	}
 	if !gjson.GetBytes(gotBody, "input").IsArray() {
 		t.Errorf("upstream body lost the Responses input array: %s", string(gotBody))

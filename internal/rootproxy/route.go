@@ -219,14 +219,14 @@ func buildMultiAgentV2RelaySet(mode discoveryMode, selection MultiAgentV2RelaySe
 
 // parseQualifiedRelayModel splits "provider/model" on the first separator. The
 // model half may itself contain slashes, because a Relay catalog can publish
-// vendor-qualified identifiers such as "x-ai/grok-4.5".
+// vendor-qualified identifiers such as "x-ai/grok-4.6".
 func parseQualifiedRelayModel(entry string) (relayProvider, string, error) {
 	if entry == "" || strings.TrimSpace(entry) != entry {
 		return "", "", fmt.Errorf("multi-agent-v2 relay model %q is empty or has surrounding whitespace", entry)
 	}
 	providerName, model, qualified := strings.Cut(entry, "/")
 	if !qualified {
-		return "", "", fmt.Errorf(`multi-agent-v2 relay model %q must be provider-qualified, for example "xai/grok-4.5"`, entry)
+		return "", "", fmt.Errorf(`multi-agent-v2 relay model %q must be provider-qualified, for example "xai/grok-4.6"`, entry)
 	}
 	provider, errProvider := parseRelayProvider(providerName)
 	if errProvider != nil {

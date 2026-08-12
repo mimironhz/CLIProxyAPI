@@ -99,7 +99,7 @@ type RoutingConfig struct {
 // half, or a list of provider-qualified model identifiers:
 //
 //	multi-agent-v2-relay: true
-//	multi-agent-v2-relay: ["xai/grok-4.5", "deepseek/deepseek-v4-flash"]
+//	multi-agent-v2-relay: ["xai/grok-4.6", "deepseek/deepseek-v4-flash"]
 //
 // The prefix names the Relay provider whose executor will carry the
 // collaboration tools, which is the property that actually decides whether a
