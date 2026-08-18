@@ -49,6 +49,33 @@ routing:
   # Optional for ordinary turns, but required for compaction creation or
   # replay. Models in the same family may reuse provider-local state.
   relay-model-providers: []
+  # Optional per-model Desktop catalog windows. Codex reads these as
+  # context_window / max_context_window and auto_compact_token_limit.
+  # Under auto discovery, Relay /v1/models max_context_length is applied
+  # first; a listing here wins. Stock ChatGPT entries keep their upstream
+  # windows unless overridden. A global ~/.codex model_context_window
+  # still overrides the whole client.
+  # 500000 is within GPT-5.6 API 1.05M, Grok 4.6 500k, and DeepSeek V4 1M.
+  # 450000 is Codex's usual unset default: 90% of the advertised window.
+  model-context:
+    gpt-5.6-sol:
+      context-window: 500000
+      auto-compact-token-limit: 450000
+    gpt-5.6-terra:
+      context-window: 500000
+      auto-compact-token-limit: 450000
+    gpt-5.6-luna:
+      context-window: 500000
+      auto-compact-token-limit: 450000
+    grok-4.6:
+      context-window: 500000
+      auto-compact-token-limit: 450000
+    deepseek-v4-pro:
+      context-window: 500000
+      auto-compact-token-limit: 450000
+    deepseek-v4-flash:
+      context-window: 500000
+      auto-compact-token-limit: 450000
   # Stock models whose turns are forced onto the ChatGPT "Fast" (priority)
   # service tier, so Desktop no longer has to select it per turn. List only
   # models whose catalog entry advertises the tier; the current stock family

@@ -716,7 +716,8 @@ func TestXAIWebsocketsExecuteStreamNormalizesReasoningTextEvents(t *testing.T) {
 			[]byte(`{"type":"response.reasoning_text.delta","sequence_number":3,"item_id":"rs_1","output_index":0,"content_index":0,"delta":"thinking"}`),
 			[]byte(`{"type":"response.reasoning_text.done","sequence_number":4,"item_id":"rs_1","output_index":0,"content_index":0,"text":"thinking"}`),
 			[]byte(`{"type":"response.output_item.done","sequence_number":5,"output_index":0,"item":{"id":"rs_1","type":"reasoning","status":"completed","summary":[],"content":[{"type":"reasoning_text","text":"thinking"}]}}`),
-			[]byte(`{"type":"response.completed","sequence_number":6,"response":{"id":"resp_1","object":"response","created_at":0,"status":"completed","model":"grok-4.3","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`),
+			[]byte(`{"type":"response.output_item.done","sequence_number":6,"output_index":1,"item":{"id":"msg_1","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"ok"}]}}`),
+			[]byte(`{"type":"response.completed","sequence_number":7,"response":{"id":"resp_1","object":"response","created_at":0,"status":"completed","model":"grok-4.3","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`),
 		}
 		for _, event := range events {
 			if errWrite := conn.WriteMessage(websocket.TextMessage, event); errWrite != nil {
@@ -800,7 +801,7 @@ func TestXAIWebsocketsExecuteStreamRewritesRepeatedResponseIDForDownstream(t *te
 			}
 			previousID := gjson.GetBytes(payload, "previous_response_id").String()
 			capturedPreviousIDs <- previousID
-			completed := []byte(fmt.Sprintf(`{"type":"response.completed","response":{"id":"resp-real","previous_response_id":%q,"output":[{"id":"rs_resp-real","type":"reasoning","status":"completed"}],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`, previousID))
+			completed := []byte(fmt.Sprintf(`{"type":"response.completed","response":{"id":"resp-real","previous_response_id":%q,"output":[{"id":"rs_resp-real","type":"reasoning","status":"completed"},{"id":"msg_resp-real","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`, previousID))
 			if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
 				t.Errorf("write completed websocket message: %v", errWrite)
 				return
@@ -1387,12 +1388,13 @@ func TestXAIWebsocketEmptyFullResetClearsPendingCompactionReplay(t *testing.T) {
 }
 
 func TestValidateXAIWebsocketCompactionResponse(t *testing.T) {
-	valid := []byte(`{"id":"resp_compact","output":[{"type":"compaction","encrypted_content":"opaque-state"}]}`)
+	validEncryptedContent := testValidGrokEncryptedContentForSeed(35)
+	valid := []byte(fmt.Sprintf(`{"id":"resp_compact","output":[{"type":"compaction","encrypted_content":%q}]}`, validEncryptedContent))
 	responseID, item, err := validateXAIWebsocketCompactionResponse(valid)
 	if err != nil {
 		t.Fatalf("valid compaction response error: %v", err)
 	}
-	if responseID != "resp_compact" || gjson.GetBytes(item, "encrypted_content").String() != "opaque-state" {
+	if responseID != "resp_compact" || gjson.GetBytes(item, "encrypted_content").String() != validEncryptedContent {
 		t.Fatalf("validated compaction response = id:%q item:%s", responseID, item)
 	}
 

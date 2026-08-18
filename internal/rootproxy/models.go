@@ -49,6 +49,7 @@ type modelsHandler struct {
 	multiAgentV2Models      map[string]struct{}
 	multiAgentV2RelayAll    bool
 	multiAgentV2RelayModels map[string]struct{}
+	modelContext            map[string]ModelContextConfig
 
 	cacheMu    sync.RWMutex
 	cachedBody []byte
@@ -124,6 +125,7 @@ func newModelsHandlerWithDiscovery(config *Config, resolver *routeResolver, disc
 		multiAgentV2Models:      multiAgentV2Models,
 		multiAgentV2RelayAll:    config.Routing.MultiAgentV2Relay.All,
 		multiAgentV2RelayModels: multiAgentV2RelayModels,
+		modelContext:            cloneModelContext(config.Routing.ModelContext),
 	}
 	if mode == discoveryAuto {
 		if resolver == nil || discovery == nil || officialClient == nil || handler.officialBaseURL == "" {
@@ -150,7 +152,7 @@ func newModelsHandlerWithDiscovery(config *Config, resolver *routeResolver, disc
 			return 0, "", errRoute
 		}
 		return selected, routes.relayProvider(slug), nil
-	}, preferWebsockets, handler.multiAgentV2Policy())
+	}, preferWebsockets, handler.multiAgentV2Policy(), handler.modelContextPolicy(routes))
 	if errBuild != nil {
 		return nil, errBuild
 	}
@@ -225,9 +227,55 @@ func (h *modelsHandler) multiAgentV2Policy() multiAgentV2Policy {
 	}
 }
 
+type modelContextPolicy struct {
+	overrides    map[string]ModelContextConfig
+	relayWindows map[string]int
+}
+
+func (h *modelsHandler) modelContextPolicy(table routeTable) modelContextPolicy {
+	return modelContextPolicy{
+		overrides:    h.modelContext,
+		relayWindows: table.relayWindows,
+	}
+}
+
+func applyModelContext(model map[string]any, slug string, selected route, policy modelContextPolicy) {
+	if model == nil {
+		return
+	}
+	if selected == routeRelay {
+		if window := policy.relayWindows[slug]; window > 0 {
+			model["context_window"] = window
+			model["max_context_window"] = window
+		}
+	}
+	override, configured := policy.overrides[slug]
+	if !configured {
+		return
+	}
+	if override.ContextWindow > 0 {
+		model["context_window"] = override.ContextWindow
+		model["max_context_window"] = override.ContextWindow
+	}
+	if override.AutoCompactTokenLimit > 0 {
+		model["auto_compact_token_limit"] = override.AutoCompactTokenLimit
+	}
+}
+
+func cloneModelContext(source map[string]ModelContextConfig) map[string]ModelContextConfig {
+	if len(source) == 0 {
+		return nil
+	}
+	cloned := make(map[string]ModelContextConfig, len(source))
+	for key, value := range source {
+		cloned[key] = value
+	}
+	return cloned
+}
+
 // synthesizeCodexModels builds Codex catalog entries for models Root describes
 // itself, using the repository's validated metadata templates.
-func synthesizeCodexModels(slugs []string, classify func(string) (route, relayProvider, error), preferWebsockets bool, multiAgentV2 multiAgentV2Policy) ([]map[string]any, error) {
+func synthesizeCodexModels(slugs []string, classify func(string) (route, relayProvider, error), preferWebsockets bool, multiAgentV2 multiAgentV2Policy, contextPolicy modelContextPolicy) ([]map[string]any, error) {
 	inputs := make([]map[string]any, 0, len(slugs))
 	for _, model := range slugs {
 		inputs = append(inputs, map[string]any{"id": model})
@@ -271,6 +319,7 @@ func synthesizeCodexModels(slugs []string, classify func(string) (route, relayPr
 			sanitizeRelayModelMetadata(model, provider)
 		}
 		advertiseMultiAgentV2(model, slug, selected, provider, multiAgentV2)
+		applyModelContext(model, slug, selected, contextPolicy)
 		models = append(models, model)
 	}
 	return models, nil
@@ -422,6 +471,7 @@ func (h *modelsHandler) refreshAsync(request *http.Request) {
 // discovered Relay set, for use before the first successful merge.
 func (h *modelsHandler) coldStartCatalog() ([]byte, string, error) {
 	table := h.resolver.table()
+	contextPolicy := h.modelContextPolicy(table)
 	relaySlugs := make([]string, 0, len(table.relay))
 	for slug := range table.relay {
 		relaySlugs = append(relaySlugs, slug)
@@ -443,7 +493,7 @@ func (h *modelsHandler) coldStartCatalog() ([]byte, string, error) {
 			return routeOfficial, "", nil
 		}
 		return routeRelay, table.relayProvider(slug), nil
-	}, h.preferWebsockets, h.multiAgentV2Policy())
+	}, h.preferWebsockets, h.multiAgentV2Policy(), contextPolicy)
 	if errBuild != nil {
 		return nil, "", errBuild
 	}
@@ -469,6 +519,7 @@ func (h *modelsHandler) assemble(ctx context.Context, authorization, clientVersi
 		log.WithError(errRelay).Warn("root proxy could not refresh the relay catalog for discovery; using the last known set")
 	}
 	table := h.resolver.table()
+	contextPolicy := h.modelContextPolicy(table)
 
 	stockSlugs := make(map[string]struct{}, len(stockModels))
 	for _, model := range stockModels {
@@ -490,7 +541,7 @@ func (h *modelsHandler) assemble(ctx context.Context, authorization, clientVersi
 
 	relayModels, errRelayModels := synthesizeCodexModels(relaySlugs, func(slug string) (route, relayProvider, error) {
 		return routeRelay, table.relayProvider(slug), nil
-	}, h.preferWebsockets, h.multiAgentV2Policy())
+	}, h.preferWebsockets, h.multiAgentV2Policy(), contextPolicy)
 	if errRelayModels != nil {
 		return nil, "", errRelayModels
 	}
@@ -502,6 +553,7 @@ func (h *modelsHandler) assemble(ctx context.Context, authorization, clientVersi
 	for _, model := range stockModels {
 		slug, _ := model["slug"].(string)
 		advertiseMultiAgentV2(model, slug, routeOfficial, "", multiAgentV2)
+		applyModelContext(model, slug, routeOfficial, contextPolicy)
 	}
 
 	merged := make([]map[string]any, 0, len(stockModels)+len(relayModels))

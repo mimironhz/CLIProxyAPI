@@ -49,7 +49,7 @@ only non-portable third-party reasoning state; it fails closed rather than
 discard foreign compaction state and lose conversation history. Every Relay
 compaction item is attributed from its provider-specific wire representation
 and must match the exact provider configured for the target model. Same-provider
-xAI or Kimi compaction continues; GPT, unknown, malformed, mixed, or
+xAI, Kimi, or locally synthesized DeepSeek compaction continues; GPT, unknown, malformed, mixed, or
 cross-provider compaction fails closed. Relay compaction creation also fails
 closed when its model has no provider mapping. Consequently, ordinary model
 changes are recoverable, but changing providers after opaque compaction requires
@@ -129,7 +129,15 @@ divert a conversation to a third party.
 
 Relay models use conservative synthesized metadata, expose no speed tier, and
 advertise hosted search only when their `xai`, `kimi` or `deepseek` provider
-supports the Relay shim. They deliberately omit the optional OpenAI `comp_hash`:
+supports the Relay shim. Their context windows come from the fallback GPT
+template unless Relay `/v1/models` advertises `max_context_length` /
+`context_length`, or `routing.model-context` overrides the advertised
+`context_window` and `auto_compact_token_limit` for an exact slug. Root
+overrides win over Relay discovery; omit a field to leave the discovered or
+template value. A client-level `model_context_window` /
+`model_auto_compact_token_limit` in `~/.codex/config.toml` still applies to
+every model and will hide these per-model catalog values.
+They deliberately omit the optional OpenAI `comp_hash`:
 inheriting the fallback GPT template's hash would make Codex run an old-model
 compaction on every stock-to-Relay switch and then send that provider-bound
 opaque state to Relay. With no asserted compatibility hash, ordinary model

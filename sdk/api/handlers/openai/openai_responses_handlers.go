@@ -577,6 +577,7 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
 	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "responses/compact")
 	stopKeepAlive()
 	if errMsg != nil {
+		errMsg = sanitizeResponsesInitialErrorMessage(errMsg)
 		h.WriteErrorResponse(c, errMsg)
 		cliCancel(errMsg.Error)
 		return
@@ -811,6 +812,10 @@ func responsesStreamErrorText(errMsg *interfaces.ErrorMessage, status int) strin
 
 	root := gjson.Parse(text)
 	errorNode := root.Get("error")
+	flatErrorMessage := ""
+	if errorNode.Type == gjson.String {
+		flatErrorMessage = errorNode.String()
+	}
 	if !errorNode.Exists() || !errorNode.IsObject() {
 		errorNode = root.Get("response.error")
 	}
@@ -832,6 +837,14 @@ func responsesStreamErrorText(errMsg *interfaces.ErrorMessage, status int) strin
 		if copied {
 			return string(safe)
 		}
+	}
+	if flatErrorMessage != "" {
+		safe := []byte(`{"error":{}}`)
+		if code := root.Get("code"); code.Exists() && code.Type != gjson.Null {
+			safe, _ = sjson.SetBytes(safe, "error.code", truncateResponsesStreamErrorText(redactResponsesStreamErrorText(code.String()), responsesStreamErrorFieldLimit))
+		}
+		safe, _ = sjson.SetBytes(safe, "error.message", truncateResponsesStreamErrorText(redactResponsesStreamErrorText(flatErrorMessage), responsesStreamErrorMessageLimit))
+		return string(safe)
 	}
 
 	safe := []byte(`{"type":"error"}`)

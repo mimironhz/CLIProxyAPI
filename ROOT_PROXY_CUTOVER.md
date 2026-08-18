@@ -535,9 +535,11 @@ turn-aware WebSocket controller.
 
 Synthesized Relay entries omit OpenAI's optional `comp_hash`. This prevents an
 ordinary model switch from forcing an old-provider compact and lets Codex replay
-full history across stock and Relay. A genuine context-window downshift on a
-very large thread can still require provider-bound compaction and must start a
-new chain.
+full history across stock and Relay. DeepSeek context-limit compaction is handled
+provider-locally: Relay summarizes through native Responses, returns one
+`deepseek-compaction-v1:` item, and expands that item only for later DeepSeek
+turns. The summary remains provider-bound and cannot cross to another model
+family.
 
 ## Historical: Root-only readable logging activation
 

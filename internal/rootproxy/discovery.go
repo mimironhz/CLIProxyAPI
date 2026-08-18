@@ -25,18 +25,22 @@ const (
 	maxRelayCatalogBytes = 8 << 20
 )
 
-// discoveredRelayModel is one entry of the Relay catalog reduced to the two
-// fields Root routes on.
+// discoveredRelayModel is one entry of the Relay catalog reduced to the fields
+// Root routes on, plus any advertised context window.
 type discoveredRelayModel struct {
-	id       string
-	provider relayProvider
+	id            string
+	provider      relayProvider
+	contextWindow int
 }
 
 // relayCatalogResponse is the OpenAI-shaped listing served by Relay /v1/models.
 type relayCatalogResponse struct {
 	Data []struct {
-		ID      string `json:"id"`
-		OwnedBy string `json:"owned_by"`
+		ID               string `json:"id"`
+		OwnedBy          string `json:"owned_by"`
+		ContextLength    int    `json:"context_length"`
+		MaxContextLength int    `json:"max_context_length"`
+		ContextWindow    int    `json:"context_window"`
 	} `json:"data"`
 }
 
@@ -206,6 +210,14 @@ func parseRelayCatalog(body []byte) ([]discoveredRelayModel, error) {
 			model.provider = provider
 		} else if strings.TrimSpace(entry.OwnedBy) != "" {
 			log.Debugf("root proxy: relay model %q has unmapped owned_by %q; compaction stays disabled for it", id, entry.OwnedBy)
+		}
+		switch {
+		case entry.MaxContextLength > 0:
+			model.contextWindow = entry.MaxContextLength
+		case entry.ContextWindow > 0:
+			model.contextWindow = entry.ContextWindow
+		case entry.ContextLength > 0:
+			model.contextWindow = entry.ContextLength
 		}
 		models = append(models, model)
 	}

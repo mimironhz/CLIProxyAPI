@@ -14,7 +14,10 @@ import (
 
 var errNonPortableCompaction = errors.New("cross-provider compaction state is not portable to the selected upstream")
 
-const kimiCompactionPrefix = "kimi-compaction-v1:"
+const (
+	kimiCompactionPrefix     = "kimi-compaction-v1:"
+	deepSeekCompactionPrefix = "deepseek-compaction-v1:"
+)
 
 // officialFastServiceTier is the wire value behind the catalog's "Fast" speed
 // tier, which every stock entry advertises as service_tiers[].id.
@@ -89,6 +92,14 @@ func validateRelayPayloadState(payload []byte, target relayProvider, createsComp
 }
 
 func inspectRelayCompactionProvider(encryptedContent string) relayProvider {
+	if strings.HasPrefix(encryptedContent, deepSeekCompactionPrefix) {
+		encoded := strings.TrimPrefix(encryptedContent, deepSeekCompactionPrefix)
+		decoded, errDecode := base64.StdEncoding.DecodeString(encoded)
+		if errDecode == nil && strings.TrimSpace(string(decoded)) != "" {
+			return relayProviderDeepSeek
+		}
+		return ""
+	}
 	if strings.HasPrefix(encryptedContent, kimiCompactionPrefix) {
 		encoded := strings.TrimPrefix(encryptedContent, kimiCompactionPrefix)
 		decoded, errDecode := base64.StdEncoding.DecodeString(encoded)
