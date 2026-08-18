@@ -13,7 +13,7 @@ import (
 
 func TestParseRelayCatalogMapsOwnedByToProvider(t *testing.T) {
 	models, errParse := parseRelayCatalog([]byte(`{"data":[
-		{"id":"grok-4.5","owned_by":"xai"},
+		{"id":"grok-4.5","owned_by":"xai","max_context_length":1000000},
 		{"id":"deepseek-v4-flash","owned_by":"deepseek"},
 		{"id":"kimi-k3","owned_by":"kimi"},
 		{"id":"mystery-1","owned_by":"someone-else"},
@@ -24,7 +24,7 @@ func TestParseRelayCatalogMapsOwnedByToProvider(t *testing.T) {
 	}
 	want := []discoveredRelayModel{
 		{id: "deepseek-v4-flash", provider: relayProviderDeepSeek},
-		{id: "grok-4.5", provider: relayProviderXAI},
+		{id: "grok-4.5", provider: relayProviderXAI, contextWindow: 1000000},
 		{id: "kimi-k3", provider: relayProviderKimi},
 		// An unmapped or absent owned_by stays routable but unattributed, which
 		// keeps compaction disabled for it.

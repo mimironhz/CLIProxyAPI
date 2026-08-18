@@ -786,11 +786,22 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 					xaiCollectOutputItemDone(payload, outputItemsByIndex, &outputItemsFallback)
 				case "response.completed":
 					logXAIWebsocketTerminalResponse(executionSessionID, authID, wsURL, eventType, payload)
+					payload = xaiPatchCompletedOutput(payload, outputItemsByIndex, outputItemsFallback)
+					payload = xaiNormalizeReasoningSummaryData(payload)
+					if completionErr, reasoningOnly := xaiReasoningOnlyCompletionError(payload); reasoningOnly {
+						terminateReason = "reasoning_only_completion"
+						terminateErr = completionErr
+						helps.RecordAPIWebsocketError(ctx, e.cfg, terminateReason, completionErr)
+						reporter.PublishFailure(ctx, completionErr)
+						if sess != nil {
+							e.invalidateUpstreamConnWithoutDisconnectNotify(sess, conn, terminateReason, completionErr)
+						}
+						_ = send(cliproxyexecutor.StreamChunk{Err: completionErr})
+						return
+					}
 					if detail, ok := helps.ParseCodexUsage(payload); ok {
 						reporter.Publish(ctx, detail)
 					}
-					payload = xaiPatchCompletedOutput(payload, outputItemsByIndex, outputItemsFallback)
-					payload = xaiNormalizeReasoningSummaryData(payload)
 					cacheXAIReasoningReplayFromCompleted(ctx, prepared.replayScope, payload)
 					if !warmupRequest && idMapper != nil && idMapper.state != nil && !recordedTranscript {
 						idMapper.state.recordTranscriptTurn(transcriptRequestBody, payload, transcriptReset)
@@ -919,27 +930,7 @@ func (e *XAIWebsocketsExecutor) executeCompactionTriggerFromWebsocketContext(ctx
 }
 
 func validateXAIWebsocketCompactionResponse(data []byte) (string, []byte, error) {
-	if len(data) == 0 || !json.Valid(data) {
-		return "", nil, statusErr{code: http.StatusBadGateway, msg: "xai websocket compaction returned invalid JSON"}
-	}
-	responseIDResult := gjson.GetBytes(data, "id")
-	output := gjson.GetBytes(data, "output")
-	if responseIDResult.Type != gjson.String || strings.TrimSpace(responseIDResult.String()) == "" || !output.Exists() || !output.IsArray() {
-		return "", nil, statusErr{code: http.StatusBadGateway, msg: "xai websocket compaction response is missing compacted state"}
-	}
-	items := output.Array()
-	if len(items) == 0 {
-		return "", nil, statusErr{code: http.StatusBadGateway, msg: "xai websocket compaction response is missing compacted state"}
-	}
-	item := items[0]
-	itemType := item.Get("type")
-	encryptedContent := item.Get("encrypted_content")
-	if item.Type != gjson.JSON || itemType.Type != gjson.String || strings.TrimSpace(itemType.String()) != "compaction" ||
-		encryptedContent.Type != gjson.String || strings.TrimSpace(encryptedContent.String()) == "" {
-		return "", nil, statusErr{code: http.StatusBadGateway, msg: "xai websocket compaction response is missing compacted state"}
-	}
-	normalizedResponseID := xaiCompactionResponseID(data)
-	return normalizedResponseID, xaiCompactionOutputItem(data, normalizedResponseID), nil
+	return validateXAINativeCompactionResponse(data)
 }
 
 func buildXAIWebsocketCompactionPayload(payload []byte, transcriptInput []byte) ([]byte, error) {

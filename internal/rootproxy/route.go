@@ -62,6 +62,10 @@ type routeTable struct {
 	stock          map[string]struct{}
 	relay          map[string]struct{}
 	relayProviders map[string]relayProvider
+	// relayWindows is published with the same snapshot as relay/providers so a
+	// catalog refresh cannot advertise one observation's routes and another's
+	// context metadata.
+	relayWindows map[string]int
 }
 
 func buildRouteTable(stockModels, relayModels []string, configuredProviders map[string]string) (routeTable, error) {
@@ -353,6 +357,7 @@ func (r *routeResolver) applyRelayCatalog(models []discoveredRelayModel) (accept
 	}
 	relay := make(map[string]struct{}, len(models))
 	providers := make(map[string]relayProvider, len(models))
+	windows := make(map[string]int, len(models))
 	for _, model := range models {
 		if _, pinnedStock := r.stockPin[model.id]; pinnedStock {
 			collisions = append(collisions, model.id)
@@ -371,6 +376,9 @@ func (r *routeResolver) applyRelayCatalog(models []discoveredRelayModel) (accept
 		} else if model.provider != "" {
 			providers[model.id] = model.provider
 		}
+		if model.contextWindow > 0 {
+			windows[model.id] = model.contextWindow
+		}
 		accepted = append(accepted, model.id)
 	}
 	table := routeTable{
@@ -378,6 +386,7 @@ func (r *routeResolver) applyRelayCatalog(models []discoveredRelayModel) (accept
 		stock:          r.stockPin,
 		relay:          relay,
 		relayProviders: providers,
+		relayWindows:   windows,
 	}
 	r.current.Store(&table)
 	return accepted, collisions

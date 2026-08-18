@@ -89,6 +89,9 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	if endpointPath := openAICompatImageEndpointPath(opts); endpointPath != "" {
 		return e.executeImages(ctx, auth, req, opts, endpointPath)
 	}
+	if e.deepSeekRequestIsCompaction(auth, req.Payload, opts) {
+		return e.executeDeepSeekCompactionResponse(ctx, auth, req, opts)
+	}
 
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
@@ -338,6 +341,9 @@ func (e *OpenAICompatExecutor) executeImages(ctx context.Context, auth *cliproxy
 func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
 	if endpointPath := openAICompatImageEndpointPath(opts); endpointPath != "" {
 		return e.executeImagesStream(ctx, auth, req, opts, endpointPath)
+	}
+	if e.deepSeekRequestIsCompaction(auth, req.Payload, opts) {
+		return e.executeDeepSeekCompactionStream(ctx, auth, req, opts)
 	}
 
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
@@ -985,6 +991,7 @@ func prepareDeepSeekCodexInput(baseURL string, payload []byte) []byte {
 	if !helps.IsDeepSeekBaseURL(baseURL) {
 		return payload
 	}
+	payload = deepSeekExpandCompactionInputItems(payload)
 	payload = helps.NormalizeCodexDelegationMessageSchema(payload)
 	return helps.NormalizeCodexAgentMessageInput(payload)
 }

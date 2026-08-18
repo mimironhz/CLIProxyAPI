@@ -1916,6 +1916,7 @@ func TestXAIExecutionSessionIDUsesDerivedStableUUID(t *testing.T) {
 
 func TestXAIExecutorCompactUsesCompactEndpoint(t *testing.T) {
 	validEncryptedContent := testValidGrokEncryptedContent()
+	outputEncryptedContent := testValidGrokEncryptedContentForSeed(31)
 	var gotPath string
 	var gotAuth string
 	var gotAccept string
@@ -1931,7 +1932,7 @@ func TestXAIExecutorCompactUsesCompactEndpoint(t *testing.T) {
 			t.Fatalf("read body: %v", errRead)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"resp_1","object":"response.compaction","output":[{"type":"compaction","encrypted_content":"opaque-out"}],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}`))
+		_, _ = w.Write([]byte(fmt.Sprintf(`{"id":"resp_1","object":"response.compaction","output":[{"type":"compaction","encrypted_content":%q}],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}`, outputEncryptedContent)))
 	}))
 	defer server.Close()
 
@@ -1983,12 +1984,13 @@ func TestXAIExecutorCompactUsesCompactEndpoint(t *testing.T) {
 	if got := gjson.GetBytes(gotBody, "input.0.encrypted_content").String(); got != validEncryptedContent {
 		t.Fatalf("input.0.encrypted_content = %q, want valid sample; body=%s", got, string(gotBody))
 	}
-	if string(resp.Payload) != `{"id":"resp_1","object":"response.compaction","output":[{"type":"compaction","encrypted_content":"opaque-out"}],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}` {
+	if got := gjson.GetBytes(resp.Payload, "output.0.encrypted_content").String(); got != outputEncryptedContent {
 		t.Fatalf("payload = %s", string(resp.Payload))
 	}
 }
 
 func TestXAIExecutorCompactOAuthUsesOfficialAPIHeadersNotCLIProxy(t *testing.T) {
+	outputEncryptedContent := testValidGrokEncryptedContentForSeed(32)
 	var gotPath string
 	var gotHost string
 	var gotTokenAuth string
@@ -2002,7 +2004,7 @@ func TestXAIExecutorCompactOAuthUsesOfficialAPIHeadersNotCLIProxy(t *testing.T) 
 		gotClientVersion = r.Header.Get(xaiClientVersionHeader)
 		gotUserAgent = r.Header.Get("User-Agent")
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"resp_1","object":"response.compaction","output":[{"type":"compaction","encrypted_content":"opaque-out"}],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}`))
+		_, _ = w.Write([]byte(fmt.Sprintf(`{"id":"resp_1","object":"response.compaction","output":[{"type":"compaction","encrypted_content":%q}],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}`, outputEncryptedContent)))
 	}))
 	defer server.Close()
 
@@ -2054,9 +2056,10 @@ func TestXAIExecutorCompactClearsReplayBeforePostCompactTurn(t *testing.T) {
 	internalcache.ClearXAIReasoningReplayCache()
 	t.Cleanup(internalcache.ClearXAIReasoningReplayCache)
 
+	outputEncryptedContent := testValidGrokEncryptedContentForSeed(33)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"resp_compact","object":"response.compaction","output":[{"type":"compaction","encrypted_content":"opaque-out"}]}`))
+		_, _ = w.Write([]byte(fmt.Sprintf(`{"id":"resp_compact","object":"response.compaction","output":[{"type":"compaction","encrypted_content":%q}]}`, outputEncryptedContent)))
 	}))
 	defer server.Close()
 
@@ -2155,6 +2158,7 @@ func TestXAIExecutorCompactFailureRetainsReplay(t *testing.T) {
 }
 
 func TestXAIExecutorExecuteStreamCompactionTriggerUsesCompactEndpoint(t *testing.T) {
+	outputEncryptedContent := testValidGrokEncryptedContentForSeed(34)
 	var gotPath string
 	var gotAccept string
 	var gotBody []byte
@@ -2168,7 +2172,7 @@ func TestXAIExecutorExecuteStreamCompactionTriggerUsesCompactEndpoint(t *testing
 			t.Fatalf("read body: %v", errRead)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"resp_xai_1","model":"grok-4.3","output":[{"type":"compaction","encrypted_content":"opaque"}],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}`))
+		_, _ = w.Write([]byte(fmt.Sprintf(`{"id":"resp_xai_1","model":"grok-4.3","output":[{"type":"compaction","encrypted_content":%q}],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}`, outputEncryptedContent)))
 	}))
 	defer server.Close()
 
@@ -2220,7 +2224,7 @@ func TestXAIExecutorExecuteStreamCompactionTriggerUsesCompactEndpoint(t *testing
 	if strings.Count(output, `"model":"grok-4.3"`) < 2 {
 		t.Fatalf("response.model missing from created/in_progress events: %s", output)
 	}
-	if !strings.Contains(output, `"type":"compaction"`) || !strings.Contains(output, `"encrypted_content":"opaque"`) {
+	if !strings.Contains(output, `"type":"compaction"`) || !strings.Contains(output, `"encrypted_content":"`+outputEncryptedContent+`"`) {
 		t.Fatalf("compaction output missing from stream: %s", output)
 	}
 	if !strings.Contains(output, `"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}`) {
@@ -2557,8 +2561,10 @@ func TestXAIExecutorExecuteStreamNormalizesReasoningTextEvents(t *testing.T) {
 		_, _ = w.Write([]byte("data: {\"type\":\"response.reasoning_text.done\",\"sequence_number\":4,\"item_id\":\"rs_1\",\"output_index\":0,\"content_index\":0,\"text\":\"thinking\"}\n\n"))
 		_, _ = w.Write([]byte("event: response.output_item.done\n"))
 		_, _ = w.Write([]byte("data: {\"type\":\"response.output_item.done\",\"sequence_number\":5,\"output_index\":0,\"item\":{\"id\":\"rs_1\",\"type\":\"reasoning\",\"status\":\"completed\",\"summary\":[],\"content\":[{\"type\":\"reasoning_text\",\"text\":\"thinking\"}]}}\n\n"))
+		_, _ = w.Write([]byte("event: response.output_item.done\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_item.done\",\"sequence_number\":6,\"output_index\":1,\"item\":{\"id\":\"msg_1\",\"type\":\"message\",\"status\":\"completed\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}}\n\n"))
 		_, _ = w.Write([]byte("event: response.completed\n"))
-		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"sequence_number\":6,\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"created_at\":0,\"status\":\"completed\",\"model\":\"grok-4.3\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"sequence_number\":7,\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"created_at\":0,\"status\":\"completed\",\"model\":\"grok-4.3\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n"))
 	}))
 	defer server.Close()
 
@@ -2620,7 +2626,8 @@ func TestXAIExecutorExecuteNormalizesReasoningOutputForNonStreamTranslation(t *t
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("data: {\"type\":\"response.output_item.done\",\"sequence_number\":1,\"output_index\":0,\"item\":{\"id\":\"rs_1\",\"type\":\"reasoning\",\"status\":\"completed\",\"summary\":[],\"content\":[{\"type\":\"reasoning_text\",\"text\":\"thinking\"}]}}\n\n"))
-		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"sequence_number\":2,\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"created_at\":0,\"status\":\"completed\",\"model\":\"grok-4.3\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_item.done\",\"sequence_number\":2,\"output_index\":1,\"item\":{\"id\":\"msg_1\",\"type\":\"message\",\"status\":\"completed\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"sequence_number\":3,\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"created_at\":0,\"status\":\"completed\",\"model\":\"grok-4.3\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n"))
 	}))
 	defer server.Close()
 
@@ -4044,6 +4051,7 @@ func TestXAIExecutorReasoningReplayCacheStoresFinalDoneAndInjectsNextClaudeReque
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte(`data: {"type":"response.output_item.added","item":{"id":"rs_added","type":"reasoning","status":"in_progress","summary":[],"encrypted_content":"` + addedEncryptedContent + `"},"output_index":0}` + "\n"))
 		_, _ = w.Write([]byte(`data: {"type":"response.output_item.done","item":{"id":"rs_done","type":"reasoning","summary":[],"encrypted_content":"` + doneEncryptedContent + `"},"output_index":0}` + "\n"))
+		_, _ = w.Write([]byte(`data: {"type":"response.output_item.done","item":{"id":"msg_1","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"ok"}]},"output_index":1}` + "\n"))
 		_, _ = w.Write([]byte(`data: {"type":"response.completed","response":{"id":"resp_1","object":"response","created_at":0,"status":"completed","model":"grok-4.3","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}` + "\n\n"))
 	}))
 	defer server.Close()
@@ -4092,8 +4100,11 @@ func TestXAIExecutorReasoningReplayCacheStoresFinalDoneAndInjectsNextClaudeReque
 	if got := gjson.GetBytes(secondBody, "input.0.encrypted_content").String(); got != doneEncryptedContent {
 		t.Fatalf("injected encrypted_content = %q, want final done %q; body=%s", got, doneEncryptedContent, string(secondBody))
 	}
-	if got := gjson.GetBytes(secondBody, "input.1.role").String(); got != "user" {
-		t.Fatalf("input.1.role = %q, want user; body=%s", got, string(secondBody))
+	if got := gjson.GetBytes(secondBody, "input.1.role").String(); got != "assistant" {
+		t.Fatalf("input.1.role = %q, want assistant; body=%s", got, string(secondBody))
+	}
+	if got := gjson.GetBytes(secondBody, "input.2.role").String(); got != "user" {
+		t.Fatalf("input.2.role = %q, want user; body=%s", got, string(secondBody))
 	}
 }
 

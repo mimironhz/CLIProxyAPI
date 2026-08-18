@@ -804,7 +804,7 @@ func isCodexPlaintextAgentMessageContent(value string) bool {
 		}
 	}
 	trimmed := strings.TrimSpace(value)
-	for _, prefix := range []string{"gAAAAA", "kimi-compaction-v1:", "deepseek-reasoning-v1:"} {
+	for _, prefix := range []string{"gAAAAA", "kimi-compaction-v1:", "deepseek-compaction-v1:", "deepseek-reasoning-v1:"} {
 		if strings.HasPrefix(trimmed, prefix) {
 			return false
 		}

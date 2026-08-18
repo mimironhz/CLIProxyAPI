@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -100,11 +101,15 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 		case "response.output_item.done":
 			xaiCollectOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
 		case "response.completed":
-			if detail, ok := helps.ParseCodexUsage(eventData); ok {
-				reporter.Publish(ctx, detail)
-			}
 			completedData := xaiPatchCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
 			completedData = xaiNormalizeReasoningSummaryData(completedData)
+			if completionErr, reasoningOnly := xaiReasoningOnlyCompletionError(completedData); reasoningOnly {
+				helps.RecordAPIResponseError(ctx, e.cfg, completionErr)
+				return resp, completionErr
+			}
+			if detail, ok := helps.ParseCodexUsage(completedData); ok {
+				reporter.Publish(ctx, detail)
+			}
 			cacheXAIReasoningReplayFromCompleted(ctx, prepared.replayScope, completedData)
 			var param any
 			out := sdktranslator.TranslateNonStream(ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, completedData, &param)
@@ -142,12 +147,6 @@ func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxya
 		"request_kind":        requestKind,
 	}).Info("compaction capture")
 
-	token, _ := xaiCreds(auth)
-	// Compact must not use xaiChatBaseURL: CLI chat-proxy returns 404 for
-	// /responses/compact and a 404 cools down the whole xAI auth pool.
-	baseURL := xaiCompactBaseURL(auth)
-	logXAIResolvedBaseURL(ctx, baseURL)
-
 	prepared, err := e.prepareResponsesRequestTo(ctx, req, opts, false, sdktranslator.FormatOpenAIResponse)
 	if err != nil {
 		return nil, nil, nil, err
@@ -158,26 +157,77 @@ func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxya
 		prepared.body, _ = sjson.DeleteBytes(prepared.body, field)
 	}
 	prepared.body = xaiRemoveInputItemsByType(prepared.body, "compaction_trigger")
-
-	reporter := helps.NewExecutorUsageReporter(ctx, e, prepared.baseModel, auth)
-	defer reporter.TrackFailure(ctx, &err)
-	reporter.SetTranslatedReasoningEffort(prepared.body, e.Identifier())
-
-	requestURL := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
-	helps.LogWithRequestID(ctx).WithFields(helps.CompactionDiagnosticFields(prepared.body)).WithFields(log.Fields{
-		"compaction_provider": "xai",
-		"compaction_phase":    "upstream_request",
-		"request_kind":        requestKind,
-		"upstream_url":        requestURL,
-	}).Info("compaction capture")
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, bytes.NewReader(prepared.body))
+	estimatedTokens, err := xaiPreparedCompactTokenCount(prepared.body)
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	contextLimit := xaiModelContextLimit(prepared.baseModel)
+	media := xaiInlineMediaInPreparedBody(prepared.body)
+	if media.count > 0 && contextLimit > 0 && estimatedTokens > contextLimit {
+		xaiLogCompactionFallback(ctx, "estimated_context_limit", estimatedTokens, contextLimit, media)
+		return e.executeCompactMediaFallback(ctx, auth, prepared, requestKind)
+	}
+
+	data, headers, status, err := e.executeNativeCompactAttempt(ctx, auth, prepared, prepared.body, requestKind, "upstream_request", prepared.sessionID)
+	if err != nil {
+		if media.count > 0 && xaiIsExactCompactContextLengthError(status, data) {
+			xaiLogCompactionFallback(ctx, "native_context_limit", estimatedTokens, contextLimit, media)
+			return e.executeCompactMediaFallback(ctx, auth, prepared, requestKind)
+		}
+		return nil, nil, nil, err
+	}
+	if _, _, errValidate := validateXAINativeCompactionResponse(data); errValidate != nil {
+		return nil, nil, nil, errValidate
+	}
+	clearXAIReasoningReplayAfterCompaction(ctx, prepared.replayScope)
+	return prepared, data, headers, nil
+}
+
+func (e *XAIExecutor) executeCompactMediaFallback(ctx context.Context, auth *cliproxyauth.Auth, prepared *xaiPreparedRequest, requestKind string) (*xaiPreparedRequest, []byte, http.Header, error) {
+	fallbackSessionID := uuid.NewString()
+	summaryBody := xaiBuildCompactionSummaryBody(prepared.body, fallbackSessionID)
+	summary, err := e.executeXAICompactionSummary(ctx, auth, prepared, summaryBody, fallbackSessionID)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	finalBody, err := xaiBuildTextOnlyCompactBody(prepared.baseModel, summary)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("xai compact fallback: build text-only request: %w", err)
+	}
+	data, headers, _, err := e.executeNativeCompactAttempt(ctx, auth, prepared, finalBody, requestKind, "fallback_native_request", fallbackSessionID)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if _, _, errValidate := validateXAINativeCompactionResponse(data); errValidate != nil {
+		return nil, nil, nil, errValidate
+	}
+	clearXAIReasoningReplayAfterCompaction(ctx, prepared.replayScope)
+	return prepared, data, headers, nil
+}
+
+func (e *XAIExecutor) executeNativeCompactAttempt(ctx context.Context, auth *cliproxyauth.Auth, prepared *xaiPreparedRequest, body []byte, requestKind, requestPhase, sessionID string) (data []byte, headers http.Header, status int, err error) {
+	token, _ := xaiCreds(auth)
+	baseURL := xaiCompactBaseURL(auth)
+	logXAIResolvedBaseURL(ctx, baseURL)
+	reporter := helps.NewExecutorUsageReporter(ctx, e, prepared.baseModel, auth)
+	defer reporter.TrackFailure(ctx, &err)
+	reporter.SetTranslatedReasoningEffort(body, e.Identifier())
+
+	requestURL := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
+	helps.LogWithRequestID(ctx).WithFields(helps.CompactionDiagnosticFields(body)).WithFields(log.Fields{
+		"compaction_provider": "xai",
+		"compaction_phase":    requestPhase,
+		"request_kind":        requestKind,
+		"upstream_url":        requestURL,
+	}).Info("compaction capture")
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, bytes.NewReader(body))
+	if err != nil {
+		return nil, nil, 0, err
+	}
 	// Official API / custom compact endpoints use standard API headers, not CLI
 	// chat-proxy identity headers (which applyXAIChatHeaders may still attach for OAuth chat).
-	applyXAIHeaders(httpReq, auth, token, false, prepared.sessionID)
-	e.recordXAIRequest(ctx, auth, requestURL, httpReq.Header.Clone(), prepared.body)
+	applyXAIHeaders(httpReq, auth, token, false, sessionID)
+	e.recordXAIRequest(ctx, auth, requestURL, httpReq.Header.Clone(), body)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpClient = reporter.TrackHTTPClient(httpClient)
@@ -190,7 +240,7 @@ func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxya
 			"request_kind":        requestKind,
 			"upstream_url":        requestURL,
 		}).Warn("compaction capture")
-		return nil, nil, nil, err
+		return nil, nil, 0, err
 	}
 	defer func() {
 		if errClose := httpResp.Body.Close(); errClose != nil {
@@ -199,7 +249,7 @@ func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxya
 	}()
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 
-	data, err := io.ReadAll(httpResp.Body)
+	data, err = io.ReadAll(httpResp.Body)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		helps.LogWithRequestID(ctx).WithError(err).WithFields(log.Fields{
@@ -209,7 +259,7 @@ func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxya
 			"request_kind":        requestKind,
 			"upstream_url":        requestURL,
 		}).Warn("compaction capture")
-		return nil, nil, nil, err
+		return nil, nil, httpResp.StatusCode, err
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 	responseFields := helps.CompactionDiagnosticFields(data)
@@ -226,13 +276,12 @@ func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxya
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
 		err = xaiStatusErr(httpResp.StatusCode, data)
-		return nil, nil, nil, err
+		return data, httpResp.Header.Clone(), httpResp.StatusCode, err
 	}
 
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(data))
 	reporter.EnsurePublished(ctx)
-	clearXAIReasoningReplayAfterCompaction(ctx, prepared.replayScope)
-	return prepared, data, httpResp.Header.Clone(), nil
+	return data, httpResp.Header.Clone(), httpResp.StatusCode, nil
 }
 
 func (e *XAIExecutor) executeCompactionTriggerStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {

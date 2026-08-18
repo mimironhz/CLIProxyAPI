@@ -926,6 +926,25 @@ func xaiPatchCompletedOutput(eventData []byte, outputItemsByIndex map[int64][]by
 	return patched
 }
 
+func xaiReasoningOnlyCompletionError(eventData []byte) (statusErr, bool) {
+	if gjson.GetBytes(eventData, "type").String() != "response.completed" {
+		return statusErr{}, false
+	}
+	output := gjson.GetBytes(eventData, "response.output")
+	if !output.IsArray() || len(output.Array()) == 0 {
+		return statusErr{}, false
+	}
+	for _, item := range output.Array() {
+		if item.Get("type").String() != "reasoning" {
+			return statusErr{}, false
+		}
+	}
+	return statusErr{
+		code: http.StatusBadGateway,
+		msg:  "xai response completed with reasoning only and no assistant message or tool call",
+	}, true
+}
+
 // xaiFreeUsageExhaustedCooldown is the free-tier rolling window advertised by
 // cli-chat-proxy ("Usage resets over a rolling 24-hour window").
 const xaiFreeUsageExhaustedCooldown = 24 * time.Hour

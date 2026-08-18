@@ -137,6 +137,10 @@ routing:
     grok-a: xai
     grok-b: xai
     kimi-a: kimi
+  model-context:
+    grok-a:
+      context-window: 1000000
+      auto-compact-token-limit: 500000
 `)
 	config, errLoad := loadConfig(path, staticEnvironment("relay-secret"))
 	if errLoad != nil {
@@ -147,6 +151,10 @@ routing:
 	}
 	if got := config.httpBridgeOptions().relayProviders["kimi-a"]; got != "kimi" {
 		t.Fatalf("kimi-a provider = %q, want kimi", got)
+	}
+	gotContext := config.Routing.ModelContext["grok-a"]
+	if gotContext.ContextWindow != 1000000 || gotContext.AutoCompactTokenLimit != 500000 {
+		t.Fatalf("grok-a model-context = %+v", gotContext)
 	}
 
 	options := config.bridgeOptions()
@@ -331,6 +339,39 @@ routing:
   stock-models: ["gpt-stock"]
   relay-models: ["relay-model"]
   multi-agent-v2-relay: {xai: true}
+`,
+		"model-context empty entry": `
+routing:
+  stock-models: ["gpt-stock"]
+  relay-models: ["relay-model"]
+  model-context:
+    grok-4.6: {}
+`,
+		"model-context inverted windows": `
+routing:
+  stock-models: ["gpt-stock"]
+  relay-models: ["relay-model"]
+  model-context:
+    grok-4.6:
+      context-window: 1000
+      auto-compact-token-limit: 1000
+`,
+		"model-context wildcard": `
+routing:
+  discovery: "auto"
+  stock-models: ["gpt-stock"]
+  relay-models: ["relay-model"]
+  model-context:
+    "grok-*":
+      context-window: 1000000
+`,
+		"model-context internal whitespace": `
+routing:
+  stock-models: ["gpt-stock"]
+  relay-models: ["relay-model"]
+  model-context:
+    "grok 4.6":
+      context-window: 1000000
 `,
 		"zero message limit": `
 routing:

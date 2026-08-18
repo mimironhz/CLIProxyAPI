@@ -827,16 +827,23 @@ func xaiIsExactCodexViewImageTool(tool gjson.Result) bool {
 	parameters := tool.Get("parameters")
 	properties := parameters.Get("properties")
 	path := properties.Get("path")
+	if !xaiJSONObjectHasExactKeys(parameters, "type", "properties", "required", "additionalProperties") ||
+		parameters.Get("type").String() != "object" ||
+		parameters.Get("additionalProperties").Type != gjson.False ||
+		!xaiJSONStringArrayEquals(parameters.Get("required"), "path") ||
+		!xaiJSONObjectHasExactKeys(path, "type", "description") ||
+		path.Get("type").String() != "string" ||
+		path.Get("description").String() != xaiViewImagePathDescription {
+		return false
+	}
+	if xaiJSONObjectHasExactKeys(properties, "path") {
+		return true
+	}
+	if !xaiJSONObjectHasExactKeys(properties, "path", "detail") {
+		return false
+	}
 	detail := properties.Get("detail")
-	return xaiJSONObjectHasExactKeys(parameters, "type", "properties", "required", "additionalProperties") &&
-		parameters.Get("type").String() == "object" &&
-		parameters.Get("additionalProperties").Type == gjson.False &&
-		xaiJSONStringArrayEquals(parameters.Get("required"), "path") &&
-		xaiJSONObjectHasExactKeys(properties, "path", "detail") &&
-		xaiJSONObjectHasExactKeys(path, "type", "description") &&
-		path.Get("type").String() == "string" &&
-		path.Get("description").String() == xaiViewImagePathDescription &&
-		xaiJSONObjectHasExactKeys(detail, "type", "description", "enum") &&
+	return xaiJSONObjectHasExactKeys(detail, "type", "description", "enum") &&
 		detail.Get("type").String() == "string" &&
 		detail.Get("description").String() == xaiViewImageDetailDescription &&
 		xaiJSONStringArrayEquals(detail.Get("enum"), "high", "original")

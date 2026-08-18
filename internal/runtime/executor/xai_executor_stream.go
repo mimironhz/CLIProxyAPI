@@ -124,11 +124,20 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 					case "response.output_item.done":
 						xaiCollectOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
 					case "response.completed":
+						eventData = xaiPatchCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
+						eventData = xaiNormalizeReasoningSummaryData(eventData)
+						if completionErr, reasoningOnly := xaiReasoningOnlyCompletionError(eventData); reasoningOnly {
+							helps.RecordAPIResponseError(ctx, e.cfg, completionErr)
+							reporter.PublishFailure(ctx, completionErr)
+							select {
+							case out <- cliproxyexecutor.StreamChunk{Err: completionErr}:
+							case <-ctx.Done():
+							}
+							return
+						}
 						if detail, ok := helps.ParseCodexUsage(eventData); ok {
 							reporter.Publish(ctx, detail)
 						}
-						eventData = xaiPatchCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
-						eventData = xaiNormalizeReasoningSummaryData(eventData)
 						cacheXAIReasoningReplayFromCompleted(ctx, prepared.replayScope, eventData)
 						normalizedEventName = gjson.GetBytes(eventData, "type").String()
 					}

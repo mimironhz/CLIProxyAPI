@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"gopkg.in/yaml.v3"
 )
@@ -90,8 +91,20 @@ type RoutingConfig struct {
 	RelayModelProviders map[string]string `yaml:"relay-model-providers"`
 	FastModels          []string          `yaml:"fast-models"`
 	MultiAgentV2Models  []string          `yaml:"multi-agent-v2-models"`
+	// ModelContext overrides the Desktop catalog fields Codex uses for
+	// per-model context and auto-compaction. Keys are exact advertised slugs.
+	// Under auto discovery Relay max_context_length is applied first; these
+	// entries win when present.
+	ModelContext map[string]ModelContextConfig `yaml:"model-context"`
 
 	MultiAgentV2Relay MultiAgentV2RelaySelection `yaml:"multi-agent-v2-relay"`
+}
+
+// ModelContextConfig is the per-model Desktop catalog window. Either field may
+// be omitted. context-window sets both context_window and max_context_window.
+type ModelContextConfig struct {
+	ContextWindow         int `yaml:"context-window"`
+	AutoCompactTokenLimit int `yaml:"auto-compact-token-limit"`
 }
 
 // MultiAgentV2RelaySelection chooses which Relay models are advertised as
@@ -299,6 +312,11 @@ func (c *Config) validateAndResolve(lookupEnv func(string) (string, bool)) error
 		return errMultiAgentV2Relay
 	}
 	c.multiAgentV2RelayModels = multiAgentV2RelayModels
+	modelContext, errModelContext := validateModelContext(c.Routing.ModelContext)
+	if errModelContext != nil {
+		return errModelContext
+	}
+	c.Routing.ModelContext = modelContext
 	switch c.Websocket.Mode {
 	case websocketModeHTTPFallback, websocketModeFirstMessage:
 	default:
@@ -369,6 +387,38 @@ func (c *Config) validateLogging() error {
 		}
 	}
 	return nil
+}
+
+// validateModelContext copies routing.model-context and rejects empty, wildcard,
+// or inverted windows. Unknown slugs stay allowed: under auto discovery the
+// Relay half is only known at runtime.
+func validateModelContext(entries map[string]ModelContextConfig) (map[string]ModelContextConfig, error) {
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	validated := make(map[string]ModelContextConfig, len(entries))
+	for model, entry := range entries {
+		if errModel := addExactModel(make(map[string]struct{}, 1), model, "model-context"); errModel != nil {
+			return nil, errModel
+		}
+		if strings.ContainsFunc(model, unicode.IsSpace) {
+			return nil, fmt.Errorf("model-context %q contains whitespace", model)
+		}
+		if entry.ContextWindow < 0 {
+			return nil, fmt.Errorf("model-context %q context-window must not be negative", model)
+		}
+		if entry.AutoCompactTokenLimit < 0 {
+			return nil, fmt.Errorf("model-context %q auto-compact-token-limit must not be negative", model)
+		}
+		if entry.ContextWindow == 0 && entry.AutoCompactTokenLimit == 0 {
+			return nil, fmt.Errorf("model-context %q must set context-window or auto-compact-token-limit", model)
+		}
+		if entry.ContextWindow > 0 && entry.AutoCompactTokenLimit > 0 && entry.AutoCompactTokenLimit >= entry.ContextWindow {
+			return nil, fmt.Errorf("model-context %q auto-compact-token-limit must be below context-window", model)
+		}
+		validated[model] = entry
+	}
+	return validated, nil
 }
 
 // discoveryMode resolves routing.discovery. It defaults to static so an existing
