@@ -398,6 +398,7 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			changes = append(changes, "  "+c)
 		}
 	}
+	changes = append(changes, DiffProviderQuota(oldCfg.ProviderQuota, newCfg.ProviderQuota)...)
 
 	// Vertex-compatible API keys
 	if len(oldCfg.VertexCompatAPIKey) != len(newCfg.VertexCompatAPIKey) {

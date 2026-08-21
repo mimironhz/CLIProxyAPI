@@ -30,6 +30,10 @@ type VertexCompatModel = internalconfig.VertexCompatModel
 type OpenAICompatibility = internalconfig.OpenAICompatibility
 type OpenAICompatibilityAPIKey = internalconfig.OpenAICompatibilityAPIKey
 type OpenAICompatibilityModel = internalconfig.OpenAICompatibilityModel
+type ProviderQuota = internalconfig.ProviderQuota
+type QuotaWindows = internalconfig.QuotaWindows
+type QuotaWindow = internalconfig.QuotaWindow
+type QuotaBudget = internalconfig.QuotaBudget
 
 type TLS = internalconfig.TLSConfig
 

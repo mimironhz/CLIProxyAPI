@@ -28,6 +28,7 @@ type RoundRobinSelector struct {
 	mu      sync.Mutex
 	cursors map[string]int
 	maxKeys int
+	quota   quotaGateBinding
 }
 
 // WeightedRoundRobinSelector provides smooth weighted round-robin selection.
@@ -35,6 +36,7 @@ type WeightedRoundRobinSelector struct {
 	mu      sync.Mutex
 	states  map[string]*smoothWeightedState
 	maxKeys int
+	quota   quotaGateBinding
 }
 
 type smoothWeightedState struct {
@@ -63,7 +65,9 @@ func weightedSelectorStateModel(ctx context.Context, availabilityModel string) s
 // FillFirstSelector selects the first available credential (deterministic ordering).
 // This "burns" one account before moving to the next, which can help stagger
 // rolling-window subscription caps (e.g. chat message limits).
-type FillFirstSelector struct{}
+type FillFirstSelector struct {
+	quota quotaGateBinding
+}
 
 type blockReason int
 
@@ -269,16 +273,28 @@ func collectAvailableByPriority(auths []*Auth, model string, now time.Time) (ava
 }
 
 func getAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]*Auth, error) {
-	return getAvailableAuthsWithPriorityMode(auths, provider, model, now, false)
+	return getAvailableAuthsWithPriorityMode(auths, provider, model, now, false, nil)
 }
 
 func getAvailableAuthsAcrossPriorities(auths []*Auth, provider, model string, now time.Time) ([]*Auth, error) {
-	return getAvailableAuthsWithPriorityMode(auths, provider, model, now, true)
+	return getAvailableAuthsWithPriorityMode(auths, provider, model, now, true, nil)
 }
 
-func getAvailableAuthsWithPriorityMode(auths []*Auth, provider, model string, now time.Time, allPriorities bool) ([]*Auth, error) {
+func getAvailableAuthsWithPriorityMode(auths []*Auth, provider, model string, now time.Time, allPriorities bool, gate QuotaWindowGate) ([]*Auth, error) {
 	if len(auths) == 0 {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth candidates"}
+	}
+	if gate != nil {
+		if block, exhausted := gate.BlockedForModel(auths, model, now); exhausted {
+			return nil, newQuotaWindowError(model, block, now)
+		}
+		originalAuths := auths
+		auths = quotaWindowAvailableAuths(gate, originalAuths, model, now)
+		if len(auths) != len(originalAuths) {
+			if block, exhausted := gate.BlockedForModel(originalAuths, model, now); exhausted {
+				return nil, newQuotaWindowError(model, block, now)
+			}
+		}
 	}
 
 	availableByPriority, cooldownCount, earliest := collectAvailableByPriority(auths, model, now)
@@ -370,7 +386,7 @@ func highestPriorityAuths(auths []*Auth) []*Auth {
 func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	_ = opts
 	now := time.Now()
-	available, err := getAvailableAuths(auths, provider, model, now)
+	available, err := getAvailableAuthsWithPriorityMode(auths, provider, model, now, false, selectorQuotaWindowGate(ctx, &s.quota))
 	if err != nil {
 		return nil, err
 	}
@@ -416,7 +432,7 @@ func positiveWeightAuths(auths []*Auth) []*Auth {
 // Pick selects the next available auth using smooth weighted round-robin.
 func (s *WeightedRoundRobinSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	_ = opts
-	available, errAvailable := getAvailableAuths(positiveWeightAuths(auths), provider, model, time.Now())
+	available, errAvailable := getAvailableAuthsWithPriorityMode(positiveWeightAuths(auths), provider, model, time.Now(), false, selectorQuotaWindowGate(ctx, &s.quota))
 	if errAvailable != nil {
 		return nil, errAvailable
 	}
@@ -526,7 +542,7 @@ func saturatingAddInt64(value, delta int64) int64 {
 func (s *FillFirstSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	_ = opts
 	now := time.Now()
-	available, err := getAvailableAuths(auths, provider, model, now)
+	available, err := getAvailableAuthsWithPriorityMode(auths, provider, model, now, false, selectorQuotaWindowGate(ctx, &s.quota))
 	if err != nil {
 		return nil, err
 	}
@@ -610,6 +626,7 @@ func availabilityBlock(unavailable, quotaExceeded bool, nextRetryAfter, nextReco
 type SessionAffinitySelector struct {
 	fallback Selector
 	cache    *SessionCache
+	quota    quotaGateBinding
 }
 
 // SessionAffinityConfig configures the session affinity selector.
@@ -661,7 +678,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		availabilityCandidates = positiveWeightAuths(auths)
 	}
 	if primaryID == "" {
-		fallbackAuths, errAvailable := getAvailableAuths(availabilityCandidates, provider, model, now)
+		fallbackAuths, errAvailable := getAvailableAuthsWithPriorityMode(availabilityCandidates, provider, model, now, false, selectorQuotaWindowGate(ctx, &s.quota))
 		if errAvailable != nil {
 			return nil, errAvailable
 		}
@@ -671,7 +688,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 
 	// A single availability pass serves both lookups: the bound credential is validated against
 	// every priority tier, while the fallback selector keeps seeing only the highest tier.
-	available, err := getAvailableAuthsAcrossPriorities(availabilityCandidates, provider, model, now)
+	available, err := getAvailableAuthsWithPriorityMode(availabilityCandidates, provider, model, now, true, selectorQuotaWindowGate(ctx, &s.quota))
 	if err != nil {
 		return nil, err
 	}

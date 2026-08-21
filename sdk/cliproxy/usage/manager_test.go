@@ -2,8 +2,20 @@ package usage
 
 import (
 	"context"
+	"errors"
 	"testing"
+	"time"
 )
+
+type blockingUsagePlugin struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (p *blockingUsagePlugin) HandleUsage(context.Context, Record) {
+	close(p.started)
+	<-p.release
+}
 
 func TestGenerateEnabledDefaultsNilToTrue(t *testing.T) {
 	if !GenerateEnabled(nil) {
@@ -48,5 +60,23 @@ func TestRecordOmittedGenerateIsEnabled(t *testing.T) {
 	}
 	if !GenerateEnabled(record.Generate) {
 		t.Fatalf("GenerateEnabled(omitted) = false, want true")
+	}
+}
+
+func TestStopContextHonorsDeadlineForBlockedPlugin(t *testing.T) {
+	manager := NewManager(1)
+	plugin := &blockingUsagePlugin{started: make(chan struct{}), release: make(chan struct{})}
+	manager.Register(plugin)
+	manager.Publish(context.Background(), Record{})
+	<-plugin.started
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	if errStop := manager.StopContext(ctx); !errors.Is(errStop, context.DeadlineExceeded) {
+		t.Fatalf("StopContext() error = %v, want deadline exceeded", errStop)
+	}
+	close(plugin.release)
+	if errStop := manager.StopContext(context.Background()); errStop != nil {
+		t.Fatalf("StopContext() after release error = %v", errStop)
 	}
 }

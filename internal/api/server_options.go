@@ -9,6 +9,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/quotawindow"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
@@ -25,6 +26,7 @@ type serverOptionConfig struct {
 	postAuthHook          auth.PostAuthHook
 	postAuthPersistHook   auth.PostAuthHook
 	pluginHost            *pluginhost.Host
+	quotaWindows          *quotawindow.Gate
 	configReloadHook      func(context.Context, *config.Config)
 	exampleAPIKeySafeMode bool
 }
@@ -117,6 +119,13 @@ func WithPostAuthPersistHook(hook auth.PostAuthHook) ServerOption {
 func WithPluginHost(host *pluginhost.Host) ServerOption {
 	return func(cfg *serverOptionConfig) {
 		cfg.pluginHost = host
+	}
+}
+
+// WithQuotaWindows attaches provider quota-window status and management handlers.
+func WithQuotaWindows(gate *quotawindow.Gate) ServerOption {
+	return func(cfg *serverOptionConfig) {
+		cfg.quotaWindows = gate
 	}
 }
 

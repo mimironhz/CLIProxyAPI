@@ -345,7 +345,22 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			}
 		}
 
-		usage.StopDefault()
+		usageDrained := true
+		if errUsage := usage.StopDefaultContext(ctx); errUsage != nil {
+			usageDrained = false
+			log.WithError(errUsage).Warn("timed out draining usage records during shutdown")
+			if shutdownErr == nil {
+				shutdownErr = errUsage
+			}
+		}
+		if usageDrained && s.quotaWindows != nil {
+			if errClose := s.quotaWindows.Close(); errClose != nil {
+				log.WithError(errClose).Warn("failed to flush provider quota-window ledger")
+				if shutdownErr == nil {
+					shutdownErr = errClose
+				}
+			}
+		}
 	})
 	return shutdownErr
 }

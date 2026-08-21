@@ -331,6 +331,7 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	}
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
+		defer reporter.EnsurePublished(ctx)
 		defer close(out)
 		defer func() {
 			if errClose := httpResp.Body.Close(); errClose != nil {
@@ -523,6 +524,7 @@ func (e *GeminiExecutor) executeInteractionsStream(ctx context.Context, auth *cl
 	out := make(chan cliproxyexecutor.StreamChunk)
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	go func() {
+		defer reporter.EnsurePublished(ctx)
 		defer close(out)
 		defer func() {
 			if errClose := httpResp.Body.Close(); errClose != nil {

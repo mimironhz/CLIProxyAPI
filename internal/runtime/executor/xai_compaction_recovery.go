@@ -240,6 +240,10 @@ func (e *XAIExecutor) executeXAICompactionSummary(ctx context.Context, auth *cli
 	if prepared == nil {
 		return "", statusErr{code: http.StatusInternalServerError, msg: "xai compact fallback summary request is unavailable"}
 	}
+	ctx, err = cliproxyauth.QuotaWindowContextForUpstreamAttempt(ctx)
+	if err != nil {
+		return "", err
+	}
 	token, _ := xaiCreds(auth)
 	requestURL := strings.TrimSuffix(xaiChatBaseURL(auth), "/") + "/responses"
 	reporter := helps.NewExecutorUsageReporter(ctx, e, prepared.baseModel, auth)

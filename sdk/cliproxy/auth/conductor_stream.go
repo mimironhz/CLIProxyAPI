@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -203,6 +204,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		return nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
 	}
 	ctx = contextWithRequestedModelAlias(ctx, opts, routeModel)
+	quotaModel := quotaWindowBillingModel(opts, routeModel)
 	var lastErr error
 	didRefreshOnUnauthorized := false
 	if auth != nil && unauthorizedRefreshTried != nil {
@@ -227,7 +229,10 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		if errCtx := ctx.Err(); errCtx != nil {
 			return nil, errCtx
 		}
-		streamResult, errStream := executor.ExecuteStream(ctx, auth, execReq, execOpts)
+		streamResult, errStream := m.streamQuotaAttempt(ctx, executor, auth, quotaModel, execReq, execOpts)
+		if errors.Is(errStream, errQuotaWindowCredentialExhausted) || isQuotaWindowError(errStream) {
+			return nil, errStream
+		}
 		if errStream != nil {
 			if errCtx := ctx.Err(); errCtx != nil {
 				return nil, errCtx
@@ -249,7 +254,10 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					m.replaceHomeExecutionLifecycleAuth(execOpts.ExecutionLifecycle, auth)
 					publishSelectedAuthMetadata(execOpts.Metadata, auth)
 					didRefreshOnUnauthorized = true
-					streamResult, errStream = executor.ExecuteStream(ctx, auth, execReq, execOpts)
+					streamResult, errStream = m.streamQuotaAttempt(ctx, executor, auth, quotaModel, execReq, execOpts)
+					if errors.Is(errStream, errQuotaWindowCredentialExhausted) || isQuotaWindowError(errStream) {
+						return nil, errStream
+					}
 					if errStream != nil {
 						if errCtx := ctx.Err(); errCtx != nil {
 							return nil, errCtx
@@ -302,7 +310,10 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					m.replaceHomeExecutionLifecycleAuth(execOpts.ExecutionLifecycle, auth)
 					publishSelectedAuthMetadata(execOpts.Metadata, auth)
 					didRefreshOnUnauthorized = true
-					retryStream, retryErr := executor.ExecuteStream(ctx, auth, execReq, execOpts)
+					retryStream, retryErr := m.streamQuotaAttempt(ctx, executor, auth, quotaModel, execReq, execOpts)
+					if errors.Is(retryErr, errQuotaWindowCredentialExhausted) || isQuotaWindowError(retryErr) {
+						return nil, retryErr
+					}
 					retryStream, retryErr = validateStreamResult(retryStream, retryErr)
 					if retryErr != nil {
 						if errCtx := ctx.Err(); errCtx != nil {

@@ -103,6 +103,10 @@ func (s *Service) commitConfigUpdate(newCfg *config.Config) configCommit {
 		log.WithError(errValidate).Warn("rejected config update with invalid credential weights")
 		return configCommit{}
 	}
+	if errValidate := newCfg.ValidateProviderQuota(); errValidate != nil {
+		log.WithError(errValidate).Warn("rejected config update with invalid provider quota")
+		return configCommit{}
+	}
 
 	s.cfgMu.Lock()
 	s.cfg = newCfg
@@ -213,6 +217,12 @@ func (s *Service) applyManagerConfig(ctx context.Context, commit configCommit) b
 		return false
 	}
 	s.coreManager.SetOAuthModelAlias(commit.cfg.OAuthModelAlias)
+	if s.quotaWindows != nil {
+		if errQuota := s.quotaWindows.Update(commit.cfg); errQuota != nil {
+			log.WithError(errQuota).Warn("rejected provider quota-window runtime update")
+			return false
+		}
+	}
 	return true
 }
 

@@ -126,6 +126,26 @@ func (r *UsageReporter) PublishAdditionalModel(ctx context.Context, model string
 	r.publishRecord(ctx, record)
 }
 
+// PublishWithAdditionalModel emits a primary and secondary-model usage pair.
+// The markers let quota accounting combine both records before consuming its reservation.
+func (r *UsageReporter) PublishWithAdditionalModel(ctx context.Context, detail usage.Detail, model string, additional usage.Detail) {
+	if r == nil {
+		return
+	}
+	additionalRecord, ok := r.buildAdditionalModelRecord(model, additional)
+	if !ok {
+		r.Publish(ctx, detail)
+		return
+	}
+	r.once.Do(func() {
+		primary := r.buildRecord(normalizeUsageDetailTotal(detail, r.provider, r.executorType), false, usage.Failure{})
+		primary.AdditionalUsagePending = true
+		r.publishRecord(ctx, primary)
+	})
+	additionalRecord.AdditionalUsage = true
+	r.publishRecord(ctx, additionalRecord)
+}
+
 func (r *UsageReporter) SetTranslatedReasoningEffort(payload []byte, format string) {
 	if r == nil {
 		return
