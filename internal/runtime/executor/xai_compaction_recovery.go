@@ -23,6 +23,9 @@ import (
 const (
 	xaiCompactionSummaryMaxOutputTokens = 8192
 	xaiCompactionSummaryInstructions    = "Create a compact, self-contained text summary of the conversation for another model to continue from. Preserve user intent, important facts, decisions, constraints, unresolved work, and relevant tool results. Describe material information visible in images, files, or audio. Do not call tools. Return only the summary text."
+	xaiCompactionInlineImagePlaceholder = "[Inline image payload omitted; use surrounding text and prior visual descriptions.]"
+	xaiCompactionInlineFilePlaceholder  = "[Inline file payload omitted; use surrounding text and prior file descriptions.]"
+	xaiCompactionInlineAudioPlaceholder = "[Inline audio payload omitted; use surrounding text and prior audio descriptions.]"
 	xaiCompactContextErrorPrefix        = "compaction failed: This model's maximum prompt length is "
 	xaiCompactContextErrorSeparator     = " but the request contains "
 	xaiCompactContextErrorSuffix        = " tokens."
@@ -159,7 +162,48 @@ func xaiBuildCompactionSummaryBody(fullCompactBody []byte, fallbackSessionID str
 	for _, itemType := range []string{"compaction_trigger", "additional_tools", xaiToolSearchOutputItemType} {
 		body = xaiRemoveInputItemsByType(body, itemType)
 	}
+	return xaiSanitizeCompactionSummaryInlineMedia(body)
+}
+
+func xaiSanitizeCompactionSummaryInlineMedia(body []byte) []byte {
+	input := gjson.GetBytes(body, "input")
+	if !input.IsArray() {
+		return body
+	}
+	for inputIndex, item := range input.Array() {
+		content := item.Get("content")
+		if !content.IsArray() {
+			continue
+		}
+		for contentIndex, part := range content.Array() {
+			placeholder := ""
+			switch part.Get("type").String() {
+			case "input_image":
+				imageURL := strings.TrimSpace(part.Get("image_url").String())
+				if strings.HasPrefix(strings.ToLower(imageURL), "data:") || xaiHasInlineMediaData(part.Get("file_data")) {
+					placeholder = xaiCompactionInlineImagePlaceholder
+				}
+			case "input_file":
+				if xaiHasInlineMediaData(part.Get("file_data")) {
+					placeholder = xaiCompactionInlineFilePlaceholder
+				}
+			case "input_audio":
+				if xaiHasInlineMediaData(part.Get("data")) || xaiHasInlineMediaData(part.Get("input_audio.data")) {
+					placeholder = xaiCompactionInlineAudioPlaceholder
+				}
+			}
+			if placeholder == "" {
+				continue
+			}
+			path := fmt.Sprintf("input.%d.content.%d", inputIndex, contentIndex)
+			body, _ = sjson.SetBytes(body, path, map[string]string{"type": "input_text", "text": placeholder})
+		}
+	}
 	return body
+}
+
+func xaiHasInlineMediaData(value gjson.Result) bool {
+	return value.Type == gjson.String && strings.TrimSpace(value.String()) != ""
 }
 
 func xaiBuildTextOnlyCompactBody(model, summary string) ([]byte, error) {
@@ -269,6 +313,22 @@ func (e *XAIExecutor) executeXAICompactionSummary(ctx context.Context, auth *cli
 			}
 			reporter.EnsurePublished(ctx)
 			summary = xaiAssistantTextFromCompleted(completedData)
+			if summary == "" {
+				return "", statusErr{code: http.StatusBadGateway, msg: "xai compact fallback summary response has no assistant text"}
+			}
+			return summary, nil
+		case "response.incomplete":
+			incompleteData := xaiPatchCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
+			incompleteData = xaiNormalizeReasoningSummaryData(incompleteData)
+			if detail, ok := helps.ParseCodexUsage(incompleteData); ok {
+				reporter.Publish(ctx, detail)
+			}
+			reporter.EnsurePublished(ctx)
+			reason := strings.TrimSpace(gjson.GetBytes(incompleteData, "response.incomplete_details.reason").String())
+			if reason != "max_output_tokens" {
+				return "", statusErr{code: http.StatusBadGateway, msg: "xai compact fallback summary response was incomplete for an unsupported reason"}
+			}
+			summary = xaiAssistantTextFromCompleted(incompleteData)
 			if summary == "" {
 				return "", statusErr{code: http.StatusBadGateway, msg: "xai compact fallback summary response has no assistant text"}
 			}
