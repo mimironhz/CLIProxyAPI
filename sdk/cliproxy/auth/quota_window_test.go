@@ -48,6 +48,10 @@ type weightedExhaustionGate struct {
 	exhausted bool
 }
 
+type deferredCredentialAvailabilityGate struct {
+	availabilityChecks int
+}
+
 type oneDirectAdmissionGate struct {
 	exhausted bool
 }
@@ -111,6 +115,28 @@ func (g *weightedExhaustionGate) Admit(auth *Auth, _ string, _ time.Time) (strin
 		g.exhausted = true
 	}
 	return "reservation", true
+}
+
+func (*deferredCredentialAvailabilityGate) BlockedForModel([]*Auth, string, time.Time) (QuotaWindowBlock, bool) {
+	return QuotaWindowBlock{}, false
+}
+
+func (g *deferredCredentialAvailabilityGate) AvailableAuths(auths []*Auth, _ string, _ time.Time) []*Auth {
+	g.availabilityChecks++
+	if g.availabilityChecks == 1 {
+		return auths
+	}
+	available := make([]*Auth, 0, len(auths))
+	for _, auth := range auths {
+		if auth != nil && auth.Provider != "provider-a" {
+			available = append(available, auth)
+		}
+	}
+	return available
+}
+
+func (*deferredCredentialAvailabilityGate) Admit(auth *Auth, _ string, _ time.Time) (string, bool) {
+	return "reservation", auth == nil || auth.Provider != "provider-a"
 }
 
 type quotaRetryTestExecutor struct {
@@ -412,6 +438,32 @@ func TestQuotaWindowAuthsExcludeNonPositiveWeights(t *testing.T) {
 	auths := manager.QuotaWindowAuths()
 	if len(auths) != 1 || auths[0].ID != positive.ID {
 		t.Fatalf("QuotaWindowAuths() = %#v, want only %s", auths, positive.ID)
+	}
+}
+
+func TestQuotaWindowFastPathRotationDoesNotConsumeRetryLimitBeforeDial(t *testing.T) {
+	gate := &deferredCredentialAvailabilityGate{}
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.SetQuotaWindowGate(gate)
+	manager.SetRetryConfig(0, 0, 1)
+	callsA, callsB := 0, 0
+	manager.RegisterExecutor(quotaRetryTestExecutor{provider: "provider-a", calls: &callsA})
+	manager.RegisterExecutor(quotaRetryTestExecutor{provider: "provider-b", calls: &callsB})
+	authA := &Auth{ID: "quota-fast-a", Provider: "provider-a", Status: StatusActive, Attributes: map[string]string{"priority": "10"}}
+	authB := &Auth{ID: "quota-fast-b", Provider: "provider-b", Status: StatusActive}
+	for _, auth := range []*Auth{authA, authB} {
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("Register(%s) error = %v", auth.ID, errRegister)
+		}
+		registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "shared-model"}})
+		defer registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	}
+
+	if _, errExecute := manager.Execute(context.Background(), []string{authA.Provider, authB.Provider}, cliproxyexecutor.Request{Model: "shared-model"}, cliproxyexecutor.Options{}); errExecute != nil {
+		t.Fatalf("Execute() error = %v", errExecute)
+	}
+	if callsA != 0 || callsB != 1 {
+		t.Fatalf("executor calls = A:%d B:%d, want A:0 B:1", callsA, callsB)
 	}
 }
 

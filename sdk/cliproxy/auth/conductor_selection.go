@@ -1294,8 +1294,12 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 		return m.pickNextLegacy(ctx, provider, model, opts, tried)
 	}
 	eligibility := authSelectionEligibilityForRequest(ctx, opts)
+	quotaModel := quotaWindowBillingModel(opts, model)
 	if strings.TrimSpace(model) != "" {
+		quotaCandidates := make([]*Auth, 0)
 		m.mu.RLock()
+		selector := m.selector
+		registryRef := registry.GetGlobalRegistry()
 		for _, candidate := range m.auths {
 			if candidate == nil || executorKeyFromAuth(candidate) != provider || candidate.Disabled {
 				continue
@@ -1303,6 +1307,10 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 			if !eligibility.allows(candidate) {
 				continue
 			}
+			if !m.authSupportsRouteModel(registryRef, candidate, model) {
+				continue
+			}
+			quotaCandidates = append(quotaCandidates, candidate)
 			if _, used := tried[candidate.ID]; used {
 				continue
 			}
@@ -1312,6 +1320,16 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 			}
 		}
 		m.mu.RUnlock()
+		quotaCandidates = selectorAvailabilityCandidates(selector, quotaCandidates)
+		if gate := m.quotaWindowGateSnapshot(); gate != nil {
+			now := time.Now()
+			if block, exhausted := gate.BlockedForModel(quotaCandidates, quotaModel, now); exhausted {
+				return nil, nil, newQuotaWindowError(quotaModel, block, now)
+			}
+			if available := quotaWindowAvailableAuths(gate, quotaCandidates, quotaModel, now); len(available) != len(quotaCandidates) {
+				return m.pickNextLegacy(ctx, provider, model, opts, tried)
+			}
+		}
 	}
 	executor, okExecutor := m.Executor(provider)
 	if !okExecutor {
@@ -1526,6 +1544,9 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 			now := time.Now()
 			if block, exhausted := gate.BlockedForModel(quotaCandidates, quotaModel, now); exhausted {
 				return nil, nil, "", newQuotaWindowError(quotaModel, block, now)
+			}
+			if available := quotaWindowAvailableAuths(gate, quotaCandidates, quotaModel, now); len(available) != len(quotaCandidates) {
+				return m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
 			}
 		}
 	}
