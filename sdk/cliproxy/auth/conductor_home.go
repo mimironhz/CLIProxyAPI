@@ -141,6 +141,9 @@ func shouldReturnLastErrorOnPickFailure(homeMode bool, lastErr error, errPick er
 	if lastErr == nil {
 		return false
 	}
+	if isQuotaWindowError(errPick) {
+		return false
+	}
 	if !homeMode {
 		return true
 	}
@@ -739,6 +742,13 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 	if requestedModel == "" {
 		requestedModel = requestedModelFromMetadata(opts.Metadata, model)
 	}
+	quotaModel := quotaWindowBillingModel(opts, requestedModel)
+	if gate := m.quotaWindowGateSnapshot(); gate != nil {
+		now := time.Now()
+		if block, exhausted := gate.BlockedForModel(m.quotaWindowCandidates(quotaModel), quotaModel, now); exhausted {
+			return nil, newQuotaWindowError(quotaModel, block, now)
+		}
+	}
 	retained, retainedOK, errRetained := m.retainedHomeSessionSelection(ctx, opts, requestedModel)
 	if errRetained != nil {
 		return nil, errRetained
@@ -1046,6 +1056,9 @@ func shouldAttemptAntigravityCreditsFallback(m *Manager, lastErr error, provider
 	if isRequestTerminatedError(lastErr) {
 		return false
 	}
+	if isQuotaWindowError(lastErr) {
+		return false
+	}
 	status := statusCodeFromError(lastErr)
 	log.WithFields(log.Fields{
 		"lastErr":   errorString(lastErr),
@@ -1114,7 +1127,13 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 			resultModel := m.stateModelForExecution(c.auth, routeModel, upstreamModel, pooled)
 			execReq := req
 			execReq.Model = upstreamModel
-			resp, errExec := c.executor.Execute(creditsCtx, c.auth, execReq, creditsOpts)
+			resp, errExec := m.executeQuotaAttempt(creditsCtx, c.executor, c.auth, routeModel, execReq, creditsOpts)
+			if isQuotaWindowError(errExec) {
+				return cliproxyexecutor.Response{}, false, errExec
+			}
+			if errors.Is(errExec, errQuotaWindowCredentialExhausted) {
+				break
+			}
 			result := Result{AuthID: c.auth.ID, Provider: c.provider, Model: resultModel, Success: errExec == nil}
 			if errExec != nil {
 				result.Error = resultErrorFromError(errExec)
@@ -1167,6 +1186,9 @@ func (m *Manager) tryAntigravityCreditsExecuteStream(ctx context.Context, req cl
 		}
 		result, errStream := m.executeStreamWithModelPool(creditsCtx, c.executor, c.auth, c.provider, req, creditsOpts, routeModel, "", models, pooled, aliasResult, routing, true, false, nil)
 		if errStream != nil {
+			if isQuotaWindowError(errStream) {
+				return nil, false, errStream
+			}
 			continue
 		}
 		return result, true, nil

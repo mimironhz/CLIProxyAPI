@@ -485,6 +485,38 @@ nonstream-keepalive-interval: 0
 #   beta-features: "multi_agent"
 
 # OpenAI compatibility providers
+# Recurring provider spend budgets. Uncovered time and windows without budget are unmetered.
+# Token budgets settle after responses and can overshoot by requests already in flight.
+# disable-cooling does not disable these budgets. Ledgers are per proxy process, not cluster-wide.
+# If multiple providers expose the same alias, exhausting any provider refuses the alias; use
+# distinct prefixes or aliases when explicit provider fallback is desired.
+# Provider quota windows are rejected when Home is enabled because this proxy does not receive
+# Home's authoritative remote credential inventory and therefore cannot enforce that invariant.
+# provider-quota:
+#   codex:
+#     scope: credential # default for OAuth providers; each auth file has its own budget
+#     timezone: "America/Los_Angeles"
+#     windows:
+#       - name: "workday"
+#         start: "09:00"
+#         end: "18:00"
+#         days: [mon, tue, wed, thu, fri]
+#         budget:
+#           requests: 400
+#   deepseek:
+#     scope: provider # default for openai-compatibility entries
+#     timezone: "UTC"
+#     persist: true
+#     windows:
+#       - name: "peak"
+#         start: "00:30"
+#         end: "16:30"
+#         budget:
+#           requests: 800
+#       - name: "off-peak"
+#         start: "16:30"
+#         end: "00:30"
+
 # openai-compatibility:
 #   - name: "openrouter" # The name of the provider; it will be used in the user agent and other places.
 #     disabled: false # optional: set to true to disable this provider without removing it
@@ -534,11 +566,20 @@ nonstream-keepalive-interval: 0
 #   - name: "deepseek"
 #     base-url: "https://api.deepseek.com"
 #     api: responses # DeepSeek's native Responses API
+#     # quota: # optional inline alternative to provider-quota.deepseek; inline wins
+#     #   timezone: "UTC"
+#     #   windows:
+#     #     - name: "peak"
+#     #       start: "00:30"
+#     #       end: "16:30"
+#     #       budget: {requests: 800}
 #     api-key-entries:
 #       - api-key: "sk-..."
 #     models:
 #       - name: "deepseek-v4-pro"
 #         alias: "deepseek-v4-pro"
+#         # quota: # optional replacement schedule for this client-visible model
+#         #   windows: [{name: "peak", start: "00:30", end: "16:30", budget: {requests: 0}}]
 #         display-name: "DS/v4 Pro"
 #         max-context-length: 1048576
 #         input-modalities: [text]

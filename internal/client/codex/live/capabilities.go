@@ -123,9 +123,10 @@ func (h *Handler) HandleHangup(c *gin.Context) {
 	}
 	runtimeConfig := h.currentConfig()
 	performRequest := func(current *auth.Auth) (*http.Response, error) {
+		requestCtx := auth.WithQuotaWindowModel(ctx, session.model)
 		headers := baseHeaders.Clone()
 		setAccountHeader(headers, current)
-		request, errRequest := h.authManager.NewHttpRequest(ctx, current, http.MethodPost, upstreamURL, body, headers)
+		request, errRequest := h.authManager.NewHttpRequest(requestCtx, current, http.MethodPost, upstreamURL, body, headers)
 		if errRequest != nil {
 			return nil, errRequest
 		}
@@ -141,11 +142,14 @@ func (h *Handler) HandleHangup(c *gin.Context) {
 			AuthType:  authType,
 			AuthValue: authValue,
 		})
-		return h.authManager.HttpRequest(ctx, current, request)
+		return h.authManager.HttpRequest(requestCtx, current, request)
 	}
 	response, errRequest := performRequest(selected)
 	if errRequest != nil {
 		helps.RecordAPIResponseError(ctx, runtimeConfig, errRequest)
+		for _, value := range auth.SafeResponseHeaders(errRequest).Values("Retry-After") {
+			c.Writer.Header().Add("Retry-After", value)
+		}
 		writeRealtimeError(c, clienterror.HTTPStatusFromErrorOr(errRequest, http.StatusBadGateway), errRequest.Error(), "api_error", "realtime_upstream_unavailable")
 		return
 	}
@@ -169,6 +173,9 @@ func (h *Handler) HandleHangup(c *gin.Context) {
 		response, errRequest = performRequest(selected)
 		if errRequest != nil {
 			helps.RecordAPIResponseError(ctx, runtimeConfig, errRequest)
+			for _, value := range auth.SafeResponseHeaders(errRequest).Values("Retry-After") {
+				c.Writer.Header().Add("Retry-After", value)
+			}
 			writeRealtimeError(c, clienterror.HTTPStatusFromErrorOr(errRequest, http.StatusBadGateway), errRequest.Error(), "api_error", "realtime_upstream_unavailable")
 			return
 		}

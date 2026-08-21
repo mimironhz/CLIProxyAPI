@@ -83,16 +83,21 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
 	logging.SetGinCPATraceID(c, selected.EnsureIndex())
 
 	upstreamURL := h.directRealtimeURL(requestedModel)
-	dialUpstream := func(current *auth.Auth) (*websocket.Conn, *http.Response, error) {
+	dialUpstream := func(current *auth.Auth) (*websocket.Conn, *http.Response, context.Context, error) {
 		request, errRequest := http.NewRequestWithContext(ctx, http.MethodGet, websocketHTTPURL(upstreamURL), nil)
 		if errRequest != nil {
-			return nil, nil, errRequest
+			return nil, nil, nil, errRequest
 		}
 		request.Header = directRealtimeHeaders(c.Request.Header)
 		setAccountHeader(request.Header, current)
 		if errPrepare := h.authManager.PrepareHttpRequest(ctx, current, request); errPrepare != nil {
-			return nil, nil, errPrepare
+			return nil, nil, nil, errPrepare
 		}
+		attemptCtx, errQuota := h.authManager.AdmitQuotaWindowAttempt(ctx, current, selectionModel)
+		if errQuota != nil {
+			return nil, nil, nil, errQuota
+		}
+		request = request.WithContext(attemptCtx)
 		authType, authValue := current.AccountInfo()
 		helpersConfig := h.currentConfig()
 		helps.RecordAPIWebsocketRequest(ctx, helpersConfig, helps.UpstreamRequestLog{
@@ -107,10 +112,14 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
 		})
 		dialer := newProxyAwareSidebandDialer(helpersConfig, current)
 		dialer.Subprotocols = websocket.Subprotocols(c.Request)
-		return dialer.DialContext(ctx, upstreamURL, request.Header)
+		upstream, response, errDial := dialer.DialContext(attemptCtx, upstreamURL, request.Header)
+		if errDial != nil {
+			auth.FinishQuotaWindowUpstreamAttempt(attemptCtx)
+		}
+		return upstream, response, attemptCtx, errDial
 	}
 
-	upstream, handshakeResponse, errDial := dialUpstream(selected)
+	upstream, handshakeResponse, quotaAttemptCtx, errDial := dialUpstream(selected)
 	if errDial != nil && selection != nil && handshakeResponse != nil && handshakeResponse.StatusCode == http.StatusUnauthorized {
 		h.authManager.ReportHomeUnauthorized(ctx, selected, "codex", selectionModel)
 		closeHandshakeBody(handshakeResponse, "direct websocket unauthorized")
@@ -122,10 +131,14 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
 		if didRefresh && refreshed != nil {
 			selected = refreshed
 			logging.SetGinCPATraceID(c, selected.EnsureIndex())
-			upstream, handshakeResponse, errDial = dialUpstream(selected)
+			upstream, handshakeResponse, quotaAttemptCtx, errDial = dialUpstream(selected)
 		}
 	}
 	if errDial != nil {
+		if auth.SafeResponseHeaders(errDial).Get("Retry-After") != "" {
+			writeSelectionError(c, errDial)
+			return
+		}
 		status := clienterror.HTTPStatusFromErrorOr(errDial, http.StatusBadGateway)
 		if handshakeResponse != nil && handshakeResponse.StatusCode > 0 {
 			status = handshakeResponse.StatusCode
@@ -151,6 +164,8 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
 		writeRealtimeError(c, status, helpDetails, helpType, helpCode)
 		return
 	}
+	quotaUsage := &realtimeQuotaAccumulator{}
+	defer quotaUsage.Settle(quotaAttemptCtx)
 	closeHandshakeBody(handshakeResponse, "direct websocket handshake")
 	closeUpstream := websocketCloseFunc("upstream", upstream)
 	defer func() { _ = closeUpstream() }()
@@ -201,7 +216,7 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
 		}
 	}
 
-	if errRelay := relayWebsockets(downstream, upstream); errRelay != nil && !isNormalWebsocketClose(errRelay) {
+	if errRelay := relayWebsockets(downstream, upstream, quotaUsage.Observe); errRelay != nil && !isNormalWebsocketClose(errRelay) {
 		helps.RecordAPIWebsocketError(ctx, h.currentConfig(), "relay", errRelay)
 		log.WithError(errRelay).Debug("codex realtime direct websocket relay closed")
 	}

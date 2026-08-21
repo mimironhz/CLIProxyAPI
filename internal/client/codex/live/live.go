@@ -284,9 +284,10 @@ func (h *Handler) Handle(c *gin.Context) {
 	baseHeaders := protocolHeaders(c.Request.Header)
 	baseHeaders.Set("Content-Type", upstreamContentType)
 	performRequest := func(current *auth.Auth) (*http.Response, error) {
+		requestCtx := auth.WithQuotaWindowModel(ctx, model)
 		headers := baseHeaders.Clone()
 		setAccountHeader(headers, current)
-		req, errRequest := h.authManager.NewHttpRequest(ctx, current, http.MethodPost, upstreamCallURL, upstreamBody, headers)
+		req, errRequest := h.authManager.NewHttpRequest(requestCtx, current, http.MethodPost, upstreamCallURL, upstreamBody, headers)
 		if errRequest != nil {
 			return nil, errRequest
 		}
@@ -302,7 +303,7 @@ func (h *Handler) Handle(c *gin.Context) {
 			AuthType:  authType,
 			AuthValue: authValue,
 		})
-		return h.authManager.HttpRequest(ctx, current, req)
+		return h.authManager.HttpRequest(requestCtx, current, req)
 	}
 
 	if errContext := ctx.Err(); errContext != nil {
@@ -318,6 +319,9 @@ func (h *Handler) Handle(c *gin.Context) {
 			selection.End("request_failed")
 		}
 		helps.RecordAPIResponseError(ctx, runtimeConfig, errRequest)
+		for _, value := range auth.SafeResponseHeaders(errRequest).Values("Retry-After") {
+			c.Writer.Header().Add("Retry-After", value)
+		}
 		writeLiveError(c, clienterror.HTTPStatusFromErrorOr(errRequest, http.StatusBadGateway), errRequest.Error())
 		return
 	}
@@ -345,6 +349,9 @@ func (h *Handler) Handle(c *gin.Context) {
 		if errRequest != nil {
 			selection.End("retry_failed")
 			helps.RecordAPIResponseError(ctx, runtimeConfig, errRequest)
+			for _, value := range auth.SafeResponseHeaders(errRequest).Values("Retry-After") {
+				c.Writer.Header().Add("Retry-After", value)
+			}
 			writeLiveError(c, clienterror.HTTPStatusFromErrorOr(errRequest, http.StatusBadGateway), errRequest.Error())
 			return
 		}

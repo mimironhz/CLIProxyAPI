@@ -34,7 +34,8 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	}
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
-	defer reporter.TrackFailure(ctx, &err)
+	usageCtx := ctx
+	defer func() { reporter.TrackFailure(usageCtx, &err) }()
 
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
@@ -130,13 +131,18 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	var closer *websocketConnectionCloser
 	var respHS *http.Response
 	var errDial error
+	attemptCtx, errQuota := cliproxyauth.QuotaWindowContextForUpstreamAttempt(ctx)
+	if errQuota != nil {
+		return resp, errQuota
+	}
+	usageCtx = attemptCtx
 	if cliproxyexecutor.RequiredUpstreamWebsocket(ctx) {
 		conn, closer = existingWebsocketSessionConn(sess, authID, wsURL)
 		if conn == nil {
 			return resp, cliproxyexecutor.NewUpstreamWebsocketReplayRequiredError()
 		}
 	} else {
-		conn, closer, respHS, errDial = e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
+		conn, closer, respHS, errDial = e.ensureUpstreamConn(attemptCtx, auth, sess, authID, wsURL, wsHeaders)
 	}
 	if errDial != nil {
 		bodyErr := websocketHandshakeBody(respHS)
@@ -147,7 +153,13 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			if opts.ExecutionLifecycle != nil || cliproxyexecutor.DownstreamWebsocket(ctx) {
 				return resp, statusErr{code: respHS.StatusCode, msg: string(bodyErr)}
 			}
-			return e.CodexExecutor.Execute(ctx, auth, req, opts)
+			cliproxyauth.FinishQuotaWindowUpstreamAttempt(attemptCtx)
+			fallbackCtx, errFallbackQuota := cliproxyauth.QuotaWindowContextForUpstreamAttempt(ctx)
+			if errFallbackQuota != nil {
+				return resp, errFallbackQuota
+			}
+			usageCtx = fallbackCtx
+			return e.CodexExecutor.Execute(fallbackCtx, auth, req, opts)
 		}
 		if respHS != nil && respHS.StatusCode > 0 {
 			return resp, statusErr{code: respHS.StatusCode, msg: string(bodyErr)}
@@ -205,7 +217,13 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			// Retry once with a fresh websocket connection. This is mainly to handle
 			// upstream closing the socket between sequential requests within the same
 			// execution session.
-			connRetry, closerRetry, respHSRetry, errDialRetry := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
+			cliproxyauth.FinishQuotaWindowUpstreamAttempt(attemptCtx)
+			retryCtx, errRetryQuota := cliproxyauth.QuotaWindowContextForUpstreamAttempt(ctx)
+			if errRetryQuota != nil {
+				return resp, errRetryQuota
+			}
+			usageCtx = retryCtx
+			connRetry, closerRetry, respHSRetry, errDialRetry := e.ensureUpstreamConn(retryCtx, auth, sess, authID, wsURL, wsHeaders)
 			if errDialRetry == nil && connRetry != nil {
 				previousConn, previousReadCh := conn, readCh
 				conn = connRetry
@@ -317,9 +335,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		case "response.completed":
 			payload = patchCodexCompletedOutput(payload, outputItemsByIndex, outputItemsFallback)
 			cacheCodexReasoningReplayFromCompleted(replayScope, payload)
-			if detail, ok := helps.ParseCodexUsage(payload); ok {
-				reporter.Publish(ctx, detail)
-			}
+			publishCodexImageToolUsage(usageCtx, reporter, clientBody, payload)
 			var param any
 			clientPayload := applyCodexIdentityExposeResponsePayload(payload, identityState)
 			out := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, originalPayload, clientBody, clientPayload, &param)

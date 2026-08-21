@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 
@@ -97,10 +98,28 @@ func describeOpenAICompatibilityUpdate(oldEntry, newEntry config.OpenAICompatibi
 	if !equalStringMap(oldEntry.Headers, newEntry.Headers) {
 		details = append(details, "headers updated")
 	}
+	if !reflect.DeepEqual(oldEntry.Quota, newEntry.Quota) || !reflect.DeepEqual(openAIModelQuotas(oldEntry.Models), openAIModelQuotas(newEntry.Models)) {
+		details = append(details, "quota windows updated")
+	}
 	if len(details) == 0 {
 		return ""
 	}
 	return "(" + strings.Join(details, ", ") + ")"
+}
+
+func openAIModelQuotas(models []config.OpenAICompatibilityModel) map[string]*config.QuotaWindows {
+	out := make(map[string]*config.QuotaWindows)
+	for index := range models {
+		model := models[index]
+		key := strings.ToLower(strings.TrimSpace(model.Alias))
+		if key == "" {
+			key = strings.ToLower(strings.TrimSpace(model.Name))
+		}
+		if key != "" && model.Quota != nil {
+			out[key] = model.Quota
+		}
+	}
+	return out
 }
 
 func countAPIKeys(entry config.OpenAICompatibility) int {

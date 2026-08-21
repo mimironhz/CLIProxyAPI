@@ -36,7 +36,8 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	}
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
-	defer reporter.TrackFailure(ctx, &err)
+	usageCtx := ctx
+	defer func() { reporter.TrackFailure(usageCtx, &err) }()
 
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
@@ -112,6 +113,13 @@ attemptLoop:
 				err = errReq
 				return nil, err
 			}
+			attemptCtx, errQuota := cliproxyauth.QuotaWindowContextForUpstreamAttempt(ctx)
+			if errQuota != nil {
+				err = errQuota
+				return nil, err
+			}
+			usageCtx = attemptCtx
+			httpReq = httpReq.WithContext(attemptCtx)
 			httpResp, errDo := httpClient.Do(httpReq)
 			if errDo != nil {
 				helps.RecordAPIResponseError(ctx, e.cfg, errDo)
@@ -123,6 +131,7 @@ attemptLoop:
 				lastErr = errDo
 				if idx+1 < len(baseURLs) {
 					log.Debugf("antigravity executor: request error on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
+					cliproxyauth.FinishQuotaWindowUpstreamAttempt(attemptCtx)
 					continue
 				}
 				err = errDo
@@ -149,6 +158,7 @@ attemptLoop:
 					lastErr = errRead
 					if idx+1 < len(baseURLs) {
 						log.Debugf("antigravity executor: read error on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
+						cliproxyauth.FinishQuotaWindowUpstreamAttempt(attemptCtx)
 						continue
 					}
 					err = errRead
@@ -168,6 +178,7 @@ attemptLoop:
 									return nil, errWait
 								}
 							}
+							cliproxyauth.FinishQuotaWindowUpstreamAttempt(attemptCtx)
 							continue attemptLoop
 						}
 					case antigravity429DecisionShortCooldownSwitchAuth:
@@ -191,6 +202,7 @@ attemptLoop:
 				lastErr = nil
 				if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) {
 					log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
+					cliproxyauth.FinishQuotaWindowUpstreamAttempt(attemptCtx)
 					continue
 				}
 				if antigravityShouldRetryTransientResourceExhausted429(httpResp.StatusCode, bodyBytes) && attempt+1 < attempts {
@@ -199,11 +211,13 @@ attemptLoop:
 					if errWait := antigravityWait(ctx, delay); errWait != nil {
 						return nil, errWait
 					}
+					cliproxyauth.FinishQuotaWindowUpstreamAttempt(attemptCtx)
 					continue attemptLoop
 				}
 				if antigravityShouldRetryNoCapacity(httpResp.StatusCode, bodyBytes) {
 					if idx+1 < len(baseURLs) {
 						log.Debugf("antigravity executor: no capacity on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
+						cliproxyauth.FinishQuotaWindowUpstreamAttempt(attemptCtx)
 						continue
 					}
 					if attempt+1 < attempts {
@@ -212,6 +226,7 @@ attemptLoop:
 						if errWait := antigravityWait(ctx, delay); errWait != nil {
 							return nil, errWait
 						}
+						cliproxyauth.FinishQuotaWindowUpstreamAttempt(attemptCtx)
 						continue attemptLoop
 					}
 				}
@@ -222,6 +237,7 @@ attemptLoop:
 						if errWait := antigravityWait(ctx, delay); errWait != nil {
 							return nil, errWait
 						}
+						cliproxyauth.FinishQuotaWindowUpstreamAttempt(attemptCtx)
 						continue attemptLoop
 					}
 				}
@@ -240,6 +256,7 @@ attemptLoop:
 			replayAccumulator := newAntigravityReasoningReplayAccumulator(replayScope, requestPayload)
 			out := make(chan cliproxyexecutor.StreamChunk)
 			go func(resp *http.Response) {
+				defer reporter.EnsurePublished(attemptCtx)
 				defer close(out)
 				defer func() {
 					if errClose := resp.Body.Close(); errClose != nil {
@@ -267,7 +284,7 @@ attemptLoop:
 					}
 
 					if detail, ok := helps.ParseAntigravityStreamUsage(payload); ok {
-						reporter.Publish(ctx, detail)
+						reporter.Publish(attemptCtx, detail)
 					}
 
 					payload = e.resolveWebSearchGroundingURLs(ctx, auth, from, originalPayload, translated, payload)
@@ -290,7 +307,7 @@ attemptLoop:
 				}
 				if errScan := scanner.Err(); errScan != nil {
 					helps.RecordAPIResponseError(ctx, e.cfg, errScan)
-					reporter.PublishFailure(ctx, errScan)
+					reporter.PublishFailure(attemptCtx, errScan)
 					select {
 					case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
 					case <-ctx.Done():
@@ -299,7 +316,7 @@ attemptLoop:
 					if replayAccumulator != nil {
 						replayAccumulator.Commit(ctx)
 					}
-					reporter.EnsurePublished(ctx)
+					reporter.EnsurePublished(attemptCtx)
 				}
 			}(httpResp)
 			return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
