@@ -33,10 +33,11 @@ type Store struct {
 }
 
 func NewStore(authDir string, ledger *Ledger) *Store {
-	authDir = filepath.Clean(authDir)
-	if authDir == "." || authDir == "" {
+	authDir = strings.TrimSpace(authDir)
+	if authDir == "" {
 		return nil
 	}
+	authDir = filepath.Clean(authDir)
 	return &Store{
 		path:     filepath.Join(authDir, snapshotFileName),
 		ledger:   ledger,

@@ -247,6 +247,37 @@ func TestGateRejectsConflictingSchedulesForSharedUpstreamAliases(t *testing.T) {
 	}
 }
 
+func TestGateRejectsProviderBaseConflictWithPrefixedOverride(t *testing.T) {
+	zero, one := int64(0), int64(1)
+	cfg := &config.Config{
+		ProviderQuota: map[string]config.ProviderQuota{"codex": {
+			QuotaWindows: config.QuotaWindows{Timezone: "UTC", Windows: []config.QuotaWindow{{Name: "base", Start: "00:00", End: "23:59", Budget: &config.QuotaBudget{Requests: &one}}}},
+			Models:       map[string]config.QuotaWindows{"team-a/gpt-5": {Timezone: "UTC", Windows: []config.QuotaWindow{{Name: "override", Start: "00:00", End: "23:59", Budget: &config.QuotaBudget{Requests: &zero}}}}},
+		}},
+		CodexKey: []config.CodexKey{
+			{APIKey: "base", Models: []config.CodexModel{{Name: "gpt-5", Alias: "gpt-5"}}},
+			{APIKey: "prefixed", Prefix: "team-a", Models: []config.CodexModel{{Name: "gpt-5", Alias: "gpt-5"}}},
+		},
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.SetConfig(cfg)
+	if _, errNew := New(cfg, manager, t.TempDir()); errNew == nil {
+		t.Fatal("New() error = nil, want provider base conflict rejected")
+	}
+}
+
+func TestSchedulePolicyKeyMatchesRawConfigPolicy(t *testing.T) {
+	persist := true
+	windows := config.QuotaWindows{Timezone: "UTC", Persist: &persist, Windows: []config.QuotaWindow{{Name: "peak", Start: "09:00", End: "17:00", Days: []string{"fri", "mon"}}}}
+	schedule, errCompile := compileProviderSchedule("codex", "codex|provider", windows)
+	if errCompile != nil {
+		t.Fatalf("compileProviderSchedule() error = %v", errCompile)
+	}
+	if got, want := schedulePolicyKey(schedule), config.QuotaWindowsPolicyKey(windows); got != want {
+		t.Fatalf("schedulePolicyKey() = %q, want %q", got, want)
+	}
+}
+
 func TestGatePropagatesSingleOverrideAcrossSharedUpstreamAliases(t *testing.T) {
 	zero := int64(0)
 	windows := config.QuotaWindows{Timezone: "UTC", Windows: []config.QuotaWindow{{
@@ -341,6 +372,23 @@ func TestGateMovesPersistenceToReloadedAuthDir(t *testing.T) {
 	}
 	if errClose := gate.Close(); errClose != nil {
 		t.Fatalf("Close() error = %v", errClose)
+	}
+}
+
+func TestGateReloadClearsExplicitPersistenceDirectory(t *testing.T) {
+	authDir := t.TempDir()
+	gate, errNew := New(&config.Config{}, nil, authDir)
+	if errNew != nil {
+		t.Fatalf("New() error = %v", errNew)
+	}
+	if gate.store == nil || gate.authDir != authDir {
+		t.Fatalf("initial store = %#v, authDir = %q", gate.store, gate.authDir)
+	}
+	if errUpdate := gate.Update(&config.Config{}); errUpdate != nil {
+		t.Fatalf("Update() error = %v", errUpdate)
+	}
+	if gate.store != nil || gate.authDir != "" {
+		t.Fatalf("cleared store = %#v, authDir = %q", gate.store, gate.authDir)
 	}
 }
 
@@ -522,6 +570,41 @@ func TestModelSnapshotsDoesNotRecordBudgetPolicies(t *testing.T) {
 	gate.mu.RUnlock()
 	if policyCount == 0 {
 		t.Fatal("Admit() did not record a budget policy")
+	}
+}
+
+func TestGateResetDoesNotRecordBudgetPolicies(t *testing.T) {
+	requestLimit := int64(10)
+	cfg := &config.Config{ProviderQuota: map[string]config.ProviderQuota{"codex": {
+		QuotaWindows: config.QuotaWindows{Timezone: "UTC", Windows: []config.QuotaWindow{{Name: "all-day", Start: "00:00", End: "23:59", Budget: &config.QuotaBudget{Requests: &requestLimit}}}}}}}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.SetConfig(cfg)
+	auth := &coreauth.Auth{ID: "reset-codex", Provider: "codex", FileName: "codex.json", Status: coreauth.StatusActive}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("Register() error = %v", errRegister)
+	}
+	gate, errNew := New(cfg, manager, t.TempDir())
+	if errNew != nil {
+		t.Fatalf("New() error = %v", errNew)
+	}
+	defer gate.Close()
+	now := time.Date(2026, time.August, 21, 12, 0, 0, 0, time.UTC)
+	if _, admitted := gate.Admit(auth, "gpt-5", now); !admitted {
+		t.Fatal("Admit() = false")
+	}
+	gate.mu.Lock()
+	gate.budgetPolicies = make(map[string]string)
+	gate.budgetConflicts = make(map[string]struct{})
+	gate.mu.Unlock()
+	if reset := gate.Reset("codex", "gpt-5", ""); reset != 1 {
+		t.Fatalf("Reset() = %d, want 1", reset)
+	}
+	gate.mu.RLock()
+	policyCount := len(gate.budgetPolicies)
+	conflictCount := len(gate.budgetConflicts)
+	gate.mu.RUnlock()
+	if policyCount != 0 || conflictCount != 0 {
+		t.Fatalf("Reset() recorded policies=%d conflicts=%d", policyCount, conflictCount)
 	}
 }
 

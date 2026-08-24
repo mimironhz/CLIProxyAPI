@@ -304,15 +304,11 @@ func (m *Manager) availableAuthsForRouteModelWithQuotaModel(auths []*Auth, provi
 		return nil, &Error{Code: "auth_not_found", Message: "no auth candidates"}
 	}
 	if gate := m.quotaWindowGateSnapshot(); gate != nil {
-		if block, exhausted := gate.BlockedForModel(auths, quotaModel, now); exhausted {
+		var block QuotaWindowBlock
+		var exhausted bool
+		auths, block, exhausted = evaluateQuotaWindowAuths(gate, auths, quotaModel, now)
+		if exhausted {
 			return nil, newQuotaWindowError(quotaModel, block, now)
-		}
-		originalAuths := auths
-		auths = quotaWindowAvailableAuths(gate, originalAuths, quotaModel, now)
-		if len(auths) != len(originalAuths) {
-			if block, exhausted := gate.BlockedForModel(originalAuths, quotaModel, now); exhausted {
-				return nil, newQuotaWindowError(quotaModel, block, now)
-			}
 		}
 	}
 
@@ -1323,10 +1319,11 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 		quotaCandidates = selectorAvailabilityCandidates(selector, quotaCandidates)
 		if gate := m.quotaWindowGateSnapshot(); gate != nil {
 			now := time.Now()
-			if block, exhausted := gate.BlockedForModel(quotaCandidates, quotaModel, now); exhausted {
+			available, block, exhausted := evaluateQuotaWindowAuths(gate, quotaCandidates, quotaModel, now)
+			if exhausted {
 				return nil, nil, newQuotaWindowError(quotaModel, block, now)
 			}
-			if available := quotaWindowAvailableAuths(gate, quotaCandidates, quotaModel, now); len(available) != len(quotaCandidates) {
+			if len(available) != len(quotaCandidates) {
 				return m.pickNextLegacy(ctx, provider, model, opts, tried)
 			}
 		}
@@ -1542,10 +1539,11 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 		quotaCandidates = selectorAvailabilityCandidates(selector, quotaCandidates)
 		if gate := m.quotaWindowGateSnapshot(); gate != nil {
 			now := time.Now()
-			if block, exhausted := gate.BlockedForModel(quotaCandidates, quotaModel, now); exhausted {
+			available, block, exhausted := evaluateQuotaWindowAuths(gate, quotaCandidates, quotaModel, now)
+			if exhausted {
 				return nil, nil, "", newQuotaWindowError(quotaModel, block, now)
 			}
-			if available := quotaWindowAvailableAuths(gate, quotaCandidates, quotaModel, now); len(available) != len(quotaCandidates) {
+			if len(available) != len(quotaCandidates) {
 				return m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
 			}
 		}

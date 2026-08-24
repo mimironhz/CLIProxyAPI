@@ -31,6 +31,7 @@ const (
 	defaultSidebandAPIBaseURL = "wss://api.openai.com/v1"
 	sessionLifetime           = time.Hour
 	maxObservedWebsocketFrame = 1 << 20
+	truncatedQuotaTokenUsage  = int64(maxObservedWebsocketFrame)
 	maxQuotaTokenUsage        = int64(^uint64(0) >> 1)
 )
 
@@ -463,15 +464,19 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 		}
 	}
 	if errDial != nil {
-		if auth.SafeResponseHeaders(errDial).Get("Retry-After") != "" {
+		if auth.IsQuotaWindowError(errDial) || auth.SafeResponseHeaders(errDial).Get("Retry-After") != "" {
 			writeSelectionError(c, errDial)
 			return
 		}
 		handleSidebandDialError(c, ctx, runtimeConfig, handshakeResponse, errDial)
 		return
 	}
-	quotaUsage := &realtimeQuotaAccumulator{}
-	defer quotaUsage.Settle(quotaAttemptCtx)
+	var observeQuotaUsage func([]byte, bool)
+	if auth.QuotaWindowReservationFromContext(quotaAttemptCtx) != "" {
+		quotaUsage := &realtimeQuotaAccumulator{}
+		defer quotaUsage.Settle(quotaAttemptCtx)
+		observeQuotaUsage = quotaUsage.Observe
+	}
 	if handshakeResponse != nil {
 		helps.RecordAPIWebsocketHandshake(ctx, runtimeConfig, handshakeResponse.StatusCode, callResponseHeaders(handshakeResponse.Header))
 		if handshakeResponse.Body != nil {
@@ -515,7 +520,7 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 	}
 	consumeSession = true
 
-	if errRelay := relayWebsockets(downstream, upstream, quotaUsage.Observe); errRelay != nil && !isNormalWebsocketClose(errRelay) {
+	if errRelay := relayWebsockets(downstream, upstream, observeQuotaUsage); errRelay != nil && !isNormalWebsocketClose(errRelay) {
 		helps.RecordAPIWebsocketError(ctx, runtimeConfig, "relay", errRelay)
 		log.WithError(errRelay).Debug("codex live sideband relay closed")
 	}
@@ -697,9 +702,15 @@ func (a *realtimeQuotaAccumulator) Observe(payload []byte, truncated bool) {
 		// oversized text frame is non-terminal. Charge it conservatively instead of
 		// allowing token-only budgets to be bypassed by placing usage after the cap.
 		a.observed = true
-		a.detail.InputTokens = maxQuotaTokenUsage
-		a.detail.OutputTokens = maxQuotaTokenUsage
-		a.detail.TotalTokens = maxQuotaTokenUsage
+		if a.detail.InputTokens < truncatedQuotaTokenUsage {
+			a.detail.InputTokens = truncatedQuotaTokenUsage
+		}
+		if a.detail.OutputTokens < truncatedQuotaTokenUsage {
+			a.detail.OutputTokens = truncatedQuotaTokenUsage
+		}
+		if a.detail.TotalTokens < truncatedQuotaTokenUsage {
+			a.detail.TotalTokens = truncatedQuotaTokenUsage
+		}
 		return
 	}
 	detail, ok := helps.ParseCodexUsage(payload)

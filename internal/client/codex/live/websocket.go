@@ -135,7 +135,7 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
 		}
 	}
 	if errDial != nil {
-		if auth.SafeResponseHeaders(errDial).Get("Retry-After") != "" {
+		if auth.IsQuotaWindowError(errDial) || auth.SafeResponseHeaders(errDial).Get("Retry-After") != "" {
 			writeSelectionError(c, errDial)
 			return
 		}
@@ -164,8 +164,12 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
 		writeRealtimeError(c, status, helpDetails, helpType, helpCode)
 		return
 	}
-	quotaUsage := &realtimeQuotaAccumulator{}
-	defer quotaUsage.Settle(quotaAttemptCtx)
+	var observeQuotaUsage func([]byte, bool)
+	if auth.QuotaWindowReservationFromContext(quotaAttemptCtx) != "" {
+		quotaUsage := &realtimeQuotaAccumulator{}
+		defer quotaUsage.Settle(quotaAttemptCtx)
+		observeQuotaUsage = quotaUsage.Observe
+	}
 	closeHandshakeBody(handshakeResponse, "direct websocket handshake")
 	closeUpstream := websocketCloseFunc("upstream", upstream)
 	defer func() { _ = closeUpstream() }()
@@ -216,7 +220,7 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
 		}
 	}
 
-	if errRelay := relayWebsockets(downstream, upstream, quotaUsage.Observe); errRelay != nil && !isNormalWebsocketClose(errRelay) {
+	if errRelay := relayWebsockets(downstream, upstream, observeQuotaUsage); errRelay != nil && !isNormalWebsocketClose(errRelay) {
 		helps.RecordAPIWebsocketError(ctx, h.currentConfig(), "relay", errRelay)
 		log.WithError(errRelay).Debug("codex realtime direct websocket relay closed")
 	}

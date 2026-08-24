@@ -4,6 +4,7 @@ import "testing"
 
 func TestValidateProviderQuota(t *testing.T) {
 	zero := int64(0)
+	one := int64(1)
 	negative := int64(-1)
 	tests := []struct {
 		name    string
@@ -19,6 +20,13 @@ func TestValidateProviderQuota(t *testing.T) {
 		{
 			name:    "unknown provider",
 			cfg:     Config{ProviderQuota: map[string]ProviderQuota{"typo-provider": {}}},
+			wantErr: true,
+		},
+		{
+			name: "empty schedule still validates timezone",
+			cfg: Config{ProviderQuota: map[string]ProviderQuota{"codex": {
+				QuotaWindows: QuotaWindows{Timezone: "Not/A_Timezone"},
+			}}},
 			wantErr: true,
 		},
 		{
@@ -83,6 +91,33 @@ func TestValidateProviderQuota(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "provider base conflicts with prefixed override on shared upstream",
+			cfg: Config{
+				ProviderQuota: map[string]ProviderQuota{"codex": {
+					QuotaWindows: QuotaWindows{Timezone: "UTC", Windows: []QuotaWindow{{Name: "base", Start: "00:00", End: "23:59", Budget: &QuotaBudget{Requests: &one}}}},
+					Models:       map[string]QuotaWindows{"team-a/gpt-5": {Timezone: "UTC", Windows: []QuotaWindow{{Name: "override", Start: "00:00", End: "23:59", Budget: &QuotaBudget{Requests: &zero}}}}},
+				}},
+				CodexKey: []CodexKey{
+					{APIKey: "base", Models: []CodexModel{{Name: "gpt-5", Alias: "gpt-5"}}},
+					{APIKey: "prefixed", Prefix: "team-a", Models: []CodexModel{{Name: "gpt-5", Alias: "gpt-5"}}},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "provider base and prefixed override may share identical schedule",
+			cfg: Config{
+				ProviderQuota: map[string]ProviderQuota{"codex": {
+					QuotaWindows: QuotaWindows{Timezone: "UTC", Windows: []QuotaWindow{{Name: "shared", Start: "00:00", End: "23:59", Budget: &QuotaBudget{Requests: &one}}}},
+					Models:       map[string]QuotaWindows{"team-a/gpt-5": {Timezone: "UTC", Windows: []QuotaWindow{{Name: "shared", Start: "00:00", End: "23:59", Budget: &QuotaBudget{Requests: &one}}}}},
+				}},
+				CodexKey: []CodexKey{
+					{APIKey: "base", Models: []CodexModel{{Name: "gpt-5", Alias: "gpt-5"}}},
+					{APIKey: "prefixed", Prefix: "team-a", Models: []CodexModel{{Name: "gpt-5", Alias: "gpt-5"}}},
+				},
+			},
+		},
+		{
 			name: "compat quota rejects built in provider identity collision",
 			cfg: Config{
 				ProviderQuota:       map[string]ProviderQuota{"codex": {QuotaWindows: QuotaWindows{Windows: []QuotaWindow{{Name: "workday", Start: "09:00", End: "17:00"}}}}},
@@ -109,5 +144,20 @@ func TestValidateProviderQuota(t *testing.T) {
 				t.Fatalf("ValidateProviderQuota() error = %v, wantErr = %t", err, test.wantErr)
 			}
 		})
+	}
+}
+
+func TestCanonicalQuotaModelsStripsThinkingSuffixes(t *testing.T) {
+	if got := CanonicalQuotaModels([]string{"gpt-5(high)", " GPT-5 "}, ""); got != "gpt-5" {
+		t.Fatalf("CanonicalQuotaModels() = %q, want gpt-5", got)
+	}
+}
+
+func TestQuotaWindowsPolicyKeyNormalizesDefaultsAndDayOrder(t *testing.T) {
+	persist := true
+	left := QuotaWindows{Windows: []QuotaWindow{{Name: "peak", Start: "09:00", End: "17:00", Days: []string{"fri", "mon"}}}}
+	right := QuotaWindows{Timezone: "UTC", Persist: &persist, Windows: []QuotaWindow{{Name: "peak", Start: "09:00", End: "17:00", Days: []string{"mon", "fri"}}}}
+	if leftKey, rightKey := QuotaWindowsPolicyKey(left), QuotaWindowsPolicyKey(right); leftKey != rightKey {
+		t.Fatalf("policy keys differ: %q != %q", leftKey, rightKey)
 	}
 }

@@ -840,8 +840,19 @@ func writeLiveError(c *gin.Context, status int, message string) {
 
 func writeSelectionError(c *gin.Context, err error) {
 	status := clienterror.HTTPStatusFromErrorOr(err, http.StatusServiceUnavailable)
-	for _, value := range auth.SafeResponseHeaders(err).Values("Retry-After") {
-		c.Writer.Header().Add("Retry-After", value)
+	headers := auth.SafeResponseHeaders(err)
+	for name, values := range headers {
+		for _, value := range values {
+			c.Writer.Header().Add(name, value)
+		}
+	}
+	if auth.IsQuotaWindowError(err) {
+		contentType := headers.Get("Content-Type")
+		if contentType == "" {
+			contentType = "application/json"
+		}
+		c.Data(status, contentType, []byte(err.Error()))
+		return
 	}
 	writeLiveError(c, status, err.Error())
 }

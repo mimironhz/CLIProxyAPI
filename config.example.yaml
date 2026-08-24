@@ -486,6 +486,7 @@ nonstream-keepalive-interval: 0
 
 # OpenAI compatibility providers
 # Recurring provider spend budgets. Uncovered time and windows without budget are unmetered.
+# Request budgets count billable upstream attempts, including retries and fallback dials.
 # Token budgets settle after responses and can overshoot by requests already in flight.
 # disable-cooling does not disable these budgets. Ledgers are per proxy process, not cluster-wide.
 # If multiple providers expose the same alias, exhausting any provider refuses the alias; use

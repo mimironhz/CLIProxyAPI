@@ -5,6 +5,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 )
 
 var quotaDayIndex = map[string]int{
@@ -124,36 +126,172 @@ func openAICompatibilityHasProviderQuota(entry *OpenAICompatibility) bool {
 	return false
 }
 
-type configuredQuotaAliasRoutes map[string]map[string]map[string]struct{}
+// QuotaRouteGroup maps the client-visible models of one credential routing group
+// to their canonical upstream model or pool identity.
+type QuotaRouteGroup map[string]string
+
+// ConfiguredQuotaRouteGroups returns credential-aware routes used to validate
+// effective base and model-override schedules.
+func ConfiguredQuotaRouteGroups(cfg *Config) map[string][]QuotaRouteGroup {
+	groups := make(map[string][]QuotaRouteGroup)
+	if cfg == nil {
+		return groups
+	}
+	global := make(map[string]map[string][]string)
+	for channel, entries := range cfg.OAuthModelAlias {
+		provider := strings.ToLower(strings.TrimSpace(channel))
+		if global[provider] == nil {
+			global[provider] = make(map[string][]string)
+		}
+		for _, entry := range entries {
+			clientModel := strings.ToLower(strings.TrimSpace(entry.Alias))
+			if clientModel != "" {
+				global[provider][clientModel] = append(global[provider][clientModel], entry.Name)
+			}
+		}
+	}
+	providersWithCredentialGroups := make(map[string]struct{})
+	add := func(provider string, routes map[string][]string) {
+		provider = strings.ToLower(strings.TrimSpace(provider))
+		merged := cloneQuotaRouteModels(global[provider])
+		for model, upstreams := range routes {
+			merged[model] = append(merged[model], upstreams...)
+		}
+		if group := canonicalQuotaRouteGroup(merged); len(group) > 0 {
+			groups[provider] = append(groups[provider], group)
+		}
+		providersWithCredentialGroups[provider] = struct{}{}
+	}
+	for i := range cfg.ClaudeKey {
+		add("claude", quotaRouteModels(cfg.ClaudeKey[i].Prefix, cfg.ClaudeKey[i].Models))
+	}
+	for i := range cfg.CodexKey {
+		add("codex", quotaRouteModels(cfg.CodexKey[i].Prefix, cfg.CodexKey[i].Models))
+	}
+	for i := range cfg.XAIKey {
+		add("xai", quotaRouteModels(cfg.XAIKey[i].Prefix, cfg.XAIKey[i].Models))
+	}
+	for i := range cfg.GeminiKey {
+		add("gemini", quotaRouteModels(cfg.GeminiKey[i].Prefix, cfg.GeminiKey[i].Models))
+	}
+	for i := range cfg.InteractionsKey {
+		add("interactions", quotaRouteModels(cfg.InteractionsKey[i].Prefix, cfg.InteractionsKey[i].Models))
+	}
+	for i := range cfg.VertexCompatAPIKey {
+		add("vertex", quotaRouteModels(cfg.VertexCompatAPIKey[i].Prefix, cfg.VertexCompatAPIKey[i].Models))
+	}
+	for i := range cfg.OpenAICompatibility {
+		entry := &cfg.OpenAICompatibility[i]
+		add(entry.Name, quotaRouteModels(entry.Prefix, entry.Models))
+	}
+	for provider, routes := range global {
+		if _, exists := providersWithCredentialGroups[provider]; exists {
+			continue
+		}
+		if group := canonicalQuotaRouteGroup(routes); len(group) > 0 {
+			groups[provider] = append(groups[provider], group)
+		}
+	}
+	return groups
+}
+
+func quotaRouteModels[T interface {
+	GetName() string
+	GetAlias() string
+}](prefix string, models []T) map[string][]string {
+	routes := make(map[string][]string)
+	for i := range models {
+		clientModel := strings.TrimSpace(models[i].GetAlias())
+		if clientModel == "" {
+			clientModel = strings.TrimSpace(models[i].GetName())
+		}
+		clientModel = strings.ToLower(prefixedProviderQuotaModel(prefix, clientModel))
+		if clientModel != "" {
+			routes[clientModel] = append(routes[clientModel], models[i].GetName())
+		}
+	}
+	return routes
+}
+
+func cloneQuotaRouteModels(routes map[string][]string) map[string][]string {
+	cloned := make(map[string][]string, len(routes))
+	for model, upstreams := range routes {
+		cloned[model] = append([]string(nil), upstreams...)
+	}
+	return cloned
+}
+
+func canonicalQuotaRouteGroup(routes map[string][]string) QuotaRouteGroup {
+	group := make(QuotaRouteGroup, len(routes))
+	for model, upstreams := range routes {
+		if upstream := CanonicalQuotaModels(upstreams, model); upstream != "" {
+			group[strings.ToLower(strings.TrimSpace(model))] = upstream
+		}
+	}
+	return group
+}
 
 func validateSharedUpstreamQuotaSchedules(cfg *Config) error {
-	providerModels := effectiveProviderQuotaModels(cfg)
-	aliases := configuredProviderQuotaAliases(cfg)
-	for provider, models := range providerModels {
+	providerPolicies := effectiveProviderQuotaPolicies(cfg)
+	routeGroups := ConfiguredQuotaRouteGroups(cfg)
+	for provider, policies := range providerPolicies {
 		type policy struct {
 			model string
 			key   string
 		}
 		byUpstream := make(map[string]policy)
-		for model, windows := range models {
-			policyKey := quotaWindowsPolicyKey(windows)
-			for upstream := range configuredQuotaAliasUpstreams(aliases[provider], model) {
-				previous, exists := byUpstream[upstream]
-				if exists && previous.key != policyKey {
-					return fmt.Errorf("provider-quota.%s.models: %q and %q resolve to shared upstream %q with conflicting schedules", provider, previous.model, model, upstream)
+		add := func(upstream, model string, windows QuotaWindows) error {
+			policyKey := QuotaWindowsPolicyKey(windows)
+			previous, exists := byUpstream[upstream]
+			if exists && previous.key != policyKey {
+				return fmt.Errorf("provider-quota.%s.models: %q and %q resolve to shared upstream %q with conflicting schedules", provider, previous.model, model, upstream)
+			}
+			byUpstream[upstream] = policy{model: model, key: policyKey}
+			return nil
+		}
+		for _, routes := range routeGroups[provider] {
+			for _, upstream := range routes {
+				matchedOverride := false
+				for model, windows := range policies.models {
+					resolved := routes[strings.ToLower(strings.TrimSpace(model))]
+					if resolved == "" {
+						resolved = CanonicalQuotaModels(nil, model)
+					}
+					if resolved != upstream {
+						continue
+					}
+					matchedOverride = true
+					if errAdd := add(upstream, model, windows); errAdd != nil {
+						return errAdd
+					}
 				}
-				byUpstream[upstream] = policy{model: model, key: policyKey}
+				if !matchedOverride && policies.base != nil {
+					if errAdd := add(upstream, "<provider default>", *policies.base); errAdd != nil {
+						return errAdd
+					}
+				}
+			}
+		}
+		for model, windows := range policies.models {
+			upstream := CanonicalQuotaModels(nil, model)
+			if errAdd := add(upstream, model, windows); errAdd != nil {
+				return errAdd
 			}
 		}
 	}
 	return nil
 }
 
-func effectiveProviderQuotaModels(cfg *Config) map[string]map[string]QuotaWindows {
-	out := make(map[string]map[string]QuotaWindows)
+type effectiveProviderQuotaPolicy struct {
+	base   *QuotaWindows
+	models map[string]QuotaWindows
+}
+
+func effectiveProviderQuotaPolicies(cfg *Config) map[string]effectiveProviderQuotaPolicy {
+	out := make(map[string]effectiveProviderQuotaPolicy)
 	for rawProvider, quota := range cfg.ProviderQuota {
 		provider := strings.ToLower(strings.TrimSpace(rawProvider))
-		out[provider] = inheritedQuotaModelWindows(quota)
+		out[provider] = effectiveQuotaPolicy(quota)
 	}
 	for i := range cfg.OpenAICompatibility {
 		entry := &cfg.OpenAICompatibility[i]
@@ -171,9 +309,9 @@ func effectiveProviderQuotaModels(cfg *Config) map[string]map[string]QuotaWindow
 			quota = *entry.Quota
 			hasQuota = true
 		}
-		models := make(map[string]QuotaWindows)
+		policy := effectiveProviderQuotaPolicy{models: make(map[string]QuotaWindows)}
 		if hasQuota {
-			models = inheritedQuotaModelWindows(quota)
+			policy = effectiveQuotaPolicy(quota)
 		}
 		for j := range entry.Models {
 			model := &entry.Models[j]
@@ -185,13 +323,22 @@ func effectiveProviderQuotaModels(cfg *Config) map[string]map[string]QuotaWindow
 				clientModel = strings.TrimSpace(model.Name)
 			}
 			clientModel = prefixedProviderQuotaModel(entry.Prefix, clientModel)
-			models[strings.ToLower(clientModel)] = inheritProviderQuotaWindows(*model.Quota, quota.QuotaWindows)
+			policy.models[strings.ToLower(clientModel)] = inheritProviderQuotaWindows(*model.Quota, quota.QuotaWindows)
 		}
-		if len(models) > 0 {
-			out[provider] = models
+		if policy.base != nil || len(policy.models) > 0 {
+			out[provider] = policy
 		}
 	}
 	return out
+}
+
+func effectiveQuotaPolicy(quota ProviderQuota) effectiveProviderQuotaPolicy {
+	policy := effectiveProviderQuotaPolicy{models: inheritedQuotaModelWindows(quota)}
+	if len(quota.Windows) > 0 {
+		base := quota.QuotaWindows
+		policy.base = &base
+	}
+	return policy
 }
 
 func inheritedQuotaModelWindows(quota ProviderQuota) map[string]QuotaWindows {
@@ -212,96 +359,12 @@ func inheritProviderQuotaWindows(child, parent QuotaWindows) QuotaWindows {
 	return child
 }
 
-func configuredProviderQuotaAliases(cfg *Config) configuredQuotaAliasRoutes {
-	aliases := make(configuredQuotaAliasRoutes)
-	for channel, entries := range cfg.OAuthModelAlias {
-		for _, entry := range entries {
-			addConfiguredProviderQuotaAlias(aliases, channel, "", entry.Alias, []string{entry.Name})
-		}
-	}
-	for i := range cfg.ClaudeKey {
-		addConfiguredProviderQuotaModels(aliases, "claude", cfg.ClaudeKey[i].Prefix, cfg.ClaudeKey[i].Models)
-	}
-	for i := range cfg.CodexKey {
-		addConfiguredProviderQuotaModels(aliases, "codex", cfg.CodexKey[i].Prefix, cfg.CodexKey[i].Models)
-	}
-	for i := range cfg.XAIKey {
-		addConfiguredProviderQuotaModels(aliases, "xai", cfg.XAIKey[i].Prefix, cfg.XAIKey[i].Models)
-	}
-	for i := range cfg.GeminiKey {
-		addConfiguredProviderQuotaModels(aliases, "gemini", cfg.GeminiKey[i].Prefix, cfg.GeminiKey[i].Models)
-	}
-	for i := range cfg.InteractionsKey {
-		addConfiguredProviderQuotaModels(aliases, "interactions", cfg.InteractionsKey[i].Prefix, cfg.InteractionsKey[i].Models)
-	}
-	for i := range cfg.VertexCompatAPIKey {
-		addConfiguredProviderQuotaModels(aliases, "vertex", cfg.VertexCompatAPIKey[i].Prefix, cfg.VertexCompatAPIKey[i].Models)
-	}
-	for i := range cfg.OpenAICompatibility {
-		entry := &cfg.OpenAICompatibility[i]
-		addConfiguredProviderQuotaModels(aliases, entry.Name, entry.Prefix, entry.Models)
-	}
-	return aliases
-}
-
-func addConfiguredProviderQuotaModels[T interface {
-	GetName() string
-	GetAlias() string
-}](aliases configuredQuotaAliasRoutes, provider, prefix string, models []T) {
-	grouped := make(map[string][]string)
-	for i := range models {
-		clientModel := strings.TrimSpace(models[i].GetAlias())
-		if clientModel == "" {
-			clientModel = strings.TrimSpace(models[i].GetName())
-		}
-		clientModel = prefixedProviderQuotaModel(prefix, clientModel)
-		if clientModel != "" {
-			grouped[clientModel] = append(grouped[clientModel], models[i].GetName())
-		}
-	}
-	for clientModel, upstreams := range grouped {
-		addConfiguredProviderQuotaAlias(aliases, provider, "", clientModel, upstreams)
-	}
-}
-
-func addConfiguredProviderQuotaAlias(aliases configuredQuotaAliasRoutes, provider, prefix, clientModel string, upstreams []string) {
-	provider = strings.ToLower(strings.TrimSpace(provider))
-	clientModel = strings.ToLower(strings.TrimSpace(prefixedProviderQuotaModel(prefix, clientModel)))
-	upstream := canonicalProviderQuotaModels(upstreams, clientModel)
-	if provider == "" || clientModel == "" || upstream == "" {
-		return
-	}
-	if aliases[provider] == nil {
-		aliases[provider] = make(map[string]map[string]struct{})
-	}
-	if aliases[provider][clientModel] == nil {
-		aliases[provider][clientModel] = make(map[string]struct{})
-	}
-	aliases[provider][clientModel][upstream] = struct{}{}
-}
-
-func configuredQuotaAliasUpstreams(aliases map[string]map[string]struct{}, model string) map[string]struct{} {
-	model = strings.ToLower(strings.TrimSpace(model))
-	resolved := make(map[string]struct{})
-	for alias, upstreams := range aliases {
-		if model != alias && !strings.HasSuffix(model, "/"+alias) {
-			continue
-		}
-		for upstream := range upstreams {
-			resolved[upstream] = struct{}{}
-		}
-	}
-	if len(resolved) == 0 && model != "" {
-		resolved[model] = struct{}{}
-	}
-	return resolved
-}
-
-func canonicalProviderQuotaModels(models []string, fallback string) string {
+// CanonicalQuotaModels returns the stable budget identity for one model or pool.
+func CanonicalQuotaModels(models []string, fallback string) string {
 	seen := make(map[string]struct{}, len(models))
 	canonical := make([]string, 0, len(models))
 	for _, model := range models {
-		model = strings.ToLower(strings.TrimSpace(model))
+		model = strings.ToLower(strings.TrimSpace(thinking.ParseSuffix(model).ModelName))
 		if model == "" {
 			continue
 		}
@@ -312,7 +375,7 @@ func canonicalProviderQuotaModels(models []string, fallback string) string {
 		canonical = append(canonical, model)
 	}
 	if len(canonical) == 0 {
-		return strings.ToLower(strings.TrimSpace(fallback))
+		return strings.ToLower(strings.TrimSpace(thinking.ParseSuffix(fallback).ModelName))
 	}
 	sort.Strings(canonical)
 	if len(canonical) == 1 {
@@ -330,10 +393,15 @@ func prefixedProviderQuotaModel(prefix, model string) string {
 	return prefix + "/" + model
 }
 
-func quotaWindowsPolicyKey(windows QuotaWindows) string {
+// QuotaWindowsPolicyKey returns the canonical schedule policy identity used by
+// validation and runtime shared-upstream comparisons.
+func QuotaWindowsPolicyKey(windows QuotaWindows) string {
 	timezone := strings.TrimSpace(windows.Timezone)
 	if timezone == "" {
 		timezone = "UTC"
+	}
+	if location, errLocation := time.LoadLocation(timezone); errLocation == nil {
+		timezone = location.String()
 	}
 	persist := true
 	if windows.Persist != nil {
@@ -344,14 +412,20 @@ func quotaWindowsPolicyKey(windows QuotaWindows) string {
 		start, _ := parseQuotaClock(window.Start)
 		end, _ := parseQuotaClock(window.End)
 		days, _ := quotaDays(window.Days)
-		sort.Ints(days)
-		parts = append(parts, fmt.Sprintf("%s|%d|%d|%v|%s", strings.ToLower(strings.TrimSpace(window.Name)), start, end, days, quotaBudgetPolicyKey(window.Budget)))
+		var dayMask [7]bool
+		for _, day := range days {
+			if day >= 0 && day < len(dayMask) {
+				dayMask[day] = true
+			}
+		}
+		parts = append(parts, fmt.Sprintf("%s|%d|%d|%v|%s", strings.ToLower(strings.TrimSpace(window.Name)), start, end, dayMask, QuotaBudgetPolicyKey(window.Budget)))
 	}
 	sort.Strings(parts)
 	return timezone + "|" + fmt.Sprintf("%t", persist) + "|" + strings.Join(parts, ";")
 }
 
-func quotaBudgetPolicyKey(budget *QuotaBudget) string {
+// QuotaBudgetPolicyKey returns the canonical identity of one budget.
+func QuotaBudgetPolicyKey(budget *QuotaBudget) string {
 	if budget == nil {
 		return "unmetered"
 	}
@@ -434,6 +508,9 @@ func validateQuotaWindows(path string, windows QuotaWindows) error {
 	}
 	if _, err := time.LoadLocation(timezone); err != nil {
 		return fmt.Errorf("%s.timezone: %w", path, err)
+	}
+	if len(windows.Windows) == 0 {
+		return nil
 	}
 
 	occupied := make([]string, 7*24*60)

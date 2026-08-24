@@ -15,12 +15,13 @@ import (
 )
 
 type providerSchedule struct {
-	name     string
-	scope    string
-	disabled bool
-	base     *Schedule
-	models   map[string]*Schedule
-	raw      config.ProviderQuota
+	name      string
+	scope     string
+	disabled  bool
+	base      *Schedule
+	models    map[string]*Schedule
+	upstreams map[string]*Schedule
+	raw       config.ProviderQuota
 }
 
 // Gate implements selection-time quota checks and owns the persistent ledger.
@@ -62,7 +63,7 @@ func New(cfg *config.Config, resolver *coreauth.Manager, authDir string) (*Gate,
 		}
 		ledger.SetOnChange(gate.store.Schedule)
 	}
-	if errUpdate := gate.Update(cfg); errUpdate != nil {
+	if errUpdate := gate.update(cfg, false); errUpdate != nil {
 		_ = gate.Close()
 		return nil, errUpdate
 	}
@@ -71,11 +72,15 @@ func New(cfg *config.Config, resolver *coreauth.Manager, authDir string) (*Gate,
 
 // Update atomically swaps compiled schedules while retaining unchanged live instances.
 func (g *Gate) Update(cfg *config.Config) error {
+	return g.update(cfg, true)
+}
+
+func (g *Gate) update(cfg *config.Config, clearEmptyAuthDir bool) error {
 	providers, errCompile := compileProviders(cfg)
 	if errCompile != nil {
 		return errCompile
 	}
-	if cfg != nil && strings.TrimSpace(cfg.AuthDir) != "" {
+	if cfg != nil && (clearEmptyAuthDir || strings.TrimSpace(cfg.AuthDir) != "") {
 		if errStore := g.updateStore(cfg.AuthDir); errStore != nil {
 			return errStore
 		}
@@ -270,43 +275,10 @@ func compileProviders(cfg *config.Config) (map[string]*providerSchedule, error) 
 	return providers, nil
 }
 
-type configuredQuotaAliases map[string]map[string]map[string]struct{}
-
 func validateSharedUpstreamSchedules(cfg *config.Config, providers map[string]*providerSchedule) error {
-	aliases := make(configuredQuotaAliases)
-	if cfg != nil {
-		for channel, entries := range cfg.OAuthModelAlias {
-			provider := strings.ToLower(strings.TrimSpace(channel))
-			for _, entry := range entries {
-				addConfiguredQuotaAlias(aliases, provider, "", entry.Alias, []string{entry.Name})
-			}
-		}
-		for i := range cfg.ClaudeKey {
-			addConfiguredQuotaModels(aliases, "claude", cfg.ClaudeKey[i].Prefix, cfg.ClaudeKey[i].Models)
-		}
-		for i := range cfg.CodexKey {
-			addConfiguredQuotaModels(aliases, "codex", cfg.CodexKey[i].Prefix, cfg.CodexKey[i].Models)
-		}
-		for i := range cfg.XAIKey {
-			addConfiguredQuotaModels(aliases, "xai", cfg.XAIKey[i].Prefix, cfg.XAIKey[i].Models)
-		}
-		for i := range cfg.GeminiKey {
-			addConfiguredQuotaModels(aliases, "gemini", cfg.GeminiKey[i].Prefix, cfg.GeminiKey[i].Models)
-		}
-		for i := range cfg.InteractionsKey {
-			addConfiguredQuotaModels(aliases, "interactions", cfg.InteractionsKey[i].Prefix, cfg.InteractionsKey[i].Models)
-		}
-		for i := range cfg.VertexCompatAPIKey {
-			addConfiguredQuotaModels(aliases, "vertex", cfg.VertexCompatAPIKey[i].Prefix, cfg.VertexCompatAPIKey[i].Models)
-		}
-		for i := range cfg.OpenAICompatibility {
-			entry := &cfg.OpenAICompatibility[i]
-			addConfiguredQuotaModels(aliases, strings.ToLower(strings.TrimSpace(entry.Name)), entry.Prefix, entry.Models)
-		}
-	}
-
+	routeGroups := config.ConfiguredQuotaRouteGroups(cfg)
 	for providerName, provider := range providers {
-		if provider == nil || len(provider.models) < 2 {
+		if provider == nil {
 			continue
 		}
 		type policy struct {
@@ -314,131 +286,61 @@ func validateSharedUpstreamSchedules(cfg *config.Config, providers map[string]*p
 			key   string
 		}
 		byUpstream := make(map[string]policy)
-		for model, schedule := range provider.models {
-			upstreams := configuredQuotaUpstreams(aliases[providerName], model)
+		add := func(upstream, model string, schedule *Schedule) error {
+			if upstream == "" || schedule == nil {
+				return nil
+			}
 			policyKey := schedulePolicyKey(schedule)
-			for upstream := range upstreams {
-				previous, exists := byUpstream[upstream]
-				if exists && previous.key != policyKey {
-					return fmt.Errorf("provider-quota.%s.models: %q and %q resolve to shared upstream %q with conflicting schedules", providerName, previous.model, model, upstream)
+			previous, exists := byUpstream[upstream]
+			if exists && previous.key != policyKey {
+				return fmt.Errorf("provider-quota.%s.models: %q and %q resolve to shared upstream %q with conflicting schedules", providerName, previous.model, model, upstream)
+			}
+			byUpstream[upstream] = policy{model: model, key: policyKey}
+			provider.upstreams[upstream] = schedule
+			return nil
+		}
+		for _, routes := range routeGroups[providerName] {
+			seenUpstreams := make(map[string]struct{}, len(routes))
+			for _, upstream := range routes {
+				if _, seen := seenUpstreams[upstream]; seen {
+					continue
 				}
-				byUpstream[upstream] = policy{model: model, key: policyKey}
+				seenUpstreams[upstream] = struct{}{}
+				matchedOverride := false
+				for model, schedule := range provider.models {
+					resolved := routes[strings.ToLower(strings.TrimSpace(model))]
+					if resolved == "" {
+						resolved = config.CanonicalQuotaModels(nil, model)
+					}
+					if resolved != upstream {
+						continue
+					}
+					matchedOverride = true
+					if errAdd := add(upstream, model, schedule); errAdd != nil {
+						return errAdd
+					}
+				}
+				if !matchedOverride {
+					if errAdd := add(upstream, "<provider default>", provider.base); errAdd != nil {
+						return errAdd
+					}
+				}
+			}
+		}
+		for model, schedule := range provider.models {
+			if errAdd := add(config.CanonicalQuotaModels(nil, model), model, schedule); errAdd != nil {
+				return errAdd
 			}
 		}
 	}
 	return nil
 }
 
-func addConfiguredQuotaModels[T interface {
-	GetName() string
-	GetAlias() string
-}](aliases configuredQuotaAliases, provider, prefix string, models []T) {
-	grouped := make(map[string][]string)
-	for i := range models {
-		clientModel := strings.TrimSpace(models[i].GetAlias())
-		if clientModel == "" {
-			clientModel = strings.TrimSpace(models[i].GetName())
-		}
-		clientModel = prefixedQuotaModel(prefix, clientModel)
-		if clientModel == "" {
-			continue
-		}
-		grouped[clientModel] = append(grouped[clientModel], models[i].GetName())
-	}
-	for clientModel, upstreams := range grouped {
-		addConfiguredQuotaAlias(aliases, provider, "", clientModel, upstreams)
-	}
-}
-
-func addConfiguredQuotaAlias(aliases configuredQuotaAliases, provider, prefix, clientModel string, upstreams []string) {
-	provider = strings.ToLower(strings.TrimSpace(provider))
-	clientModel = strings.ToLower(strings.TrimSpace(prefixedQuotaModel(prefix, clientModel)))
-	upstream := canonicalConfiguredQuotaModels(upstreams, clientModel)
-	if provider == "" || clientModel == "" || upstream == "" {
-		return
-	}
-	if aliases[provider] == nil {
-		aliases[provider] = make(map[string]map[string]struct{})
-	}
-	if aliases[provider][clientModel] == nil {
-		aliases[provider][clientModel] = make(map[string]struct{})
-	}
-	aliases[provider][clientModel][upstream] = struct{}{}
-}
-
-func configuredQuotaUpstreams(aliases map[string]map[string]struct{}, model string) map[string]struct{} {
-	model = strings.ToLower(strings.TrimSpace(model))
-	resolved := make(map[string]struct{})
-	for alias, upstreams := range aliases {
-		if model != alias && !strings.HasSuffix(model, "/"+alias) {
-			continue
-		}
-		for upstream := range upstreams {
-			resolved[upstream] = struct{}{}
-		}
-	}
-	if len(resolved) == 0 && model != "" {
-		resolved[model] = struct{}{}
-	}
-	return resolved
-}
-
-func canonicalConfiguredQuotaModels(models []string, fallback string) string {
-	seen := make(map[string]struct{}, len(models))
-	canonical := make([]string, 0, len(models))
-	for _, model := range models {
-		model = strings.ToLower(strings.TrimSpace(model))
-		if model == "" {
-			continue
-		}
-		if _, exists := seen[model]; exists {
-			continue
-		}
-		seen[model] = struct{}{}
-		canonical = append(canonical, model)
-	}
-	if len(canonical) == 0 {
-		return strings.ToLower(strings.TrimSpace(fallback))
-	}
-	sort.Strings(canonical)
-	if len(canonical) == 1 {
-		return canonical[0]
-	}
-	return "pool:" + strings.Join(canonical, ",")
-}
-
-func prefixedQuotaModel(prefix, model string) string {
-	prefix = strings.Trim(strings.TrimSpace(prefix), "/")
-	model = strings.TrimLeft(strings.TrimSpace(model), "/")
-	if prefix == "" || model == "" {
-		return model
-	}
-	return prefix + "/" + model
-}
-
 func schedulePolicyKey(schedule *Schedule) string {
 	if schedule == nil {
 		return ""
 	}
-	windowKeys := make([]string, 0, len(schedule.windows))
-	for _, window := range schedule.windows {
-		windowKeys = append(windowKeys, fmt.Sprintf("%s|%d|%d|%v|%s", strings.ToLower(window.name), window.startMinute, window.endMinute, window.days, quotaBudgetPolicyKey(window.budget)))
-	}
-	sort.Strings(windowKeys)
-	return schedule.location.String() + "|" + fmt.Sprintf("%t", schedule.persist) + "|" + strings.Join(windowKeys, ";")
-}
-
-func quotaBudgetPolicyKey(budget *config.QuotaBudget) string {
-	if budget == nil {
-		return "unmetered"
-	}
-	value := func(limit *int64) string {
-		if limit == nil {
-			return "*"
-		}
-		return fmt.Sprintf("%d", *limit)
-	}
-	return strings.Join([]string{value(budget.Requests), value(budget.InputTokens), value(budget.OutputTokens), value(budget.TotalTokens)}, ",")
+	return config.QuotaWindowsPolicyKey(schedule.raw)
 }
 
 func compileProvider(name string, raw config.ProviderQuota, defaultScope string, disabled bool) (*providerSchedule, error) {
@@ -446,7 +348,7 @@ func compileProvider(name string, raw config.ProviderQuota, defaultScope string,
 	if scope == "" {
 		scope = defaultScope
 	}
-	provider := &providerSchedule{name: name, scope: scope, disabled: disabled, models: make(map[string]*Schedule), raw: raw}
+	provider := &providerSchedule{name: name, scope: scope, disabled: disabled, models: make(map[string]*Schedule), upstreams: make(map[string]*Schedule), raw: raw}
 	if len(raw.Windows) > 0 {
 		base, errBase := compileProviderSchedule(name, name+"|provider", raw.QuotaWindows)
 		if errBase != nil {
@@ -623,6 +525,10 @@ func (g *Gate) sharedUpstreamSchedule(provider *providerSchedule, auth *coreauth
 	if g == nil || g.resolver == nil || provider == nil {
 		return nil, false
 	}
+	if schedule := provider.upstreams[strings.ToLower(strings.TrimSpace(target.UpstreamModel))]; schedule != nil {
+		return schedule, false
+	}
+	// Fall back to live routing for identities not predictable from configured routes.
 	models := make([]string, 0, len(provider.models))
 	for model := range provider.models {
 		models = append(models, model)
@@ -697,6 +603,21 @@ func enabledAuths(auths []*coreauth.Auth) []*coreauth.Auth {
 		}
 	}
 	return filtered
+}
+
+// EvaluateAuths atomically classifies request-level exhaustion and filters
+// credential-level exhaustion from one resolved candidate snapshot.
+func (g *Gate) EvaluateAuths(auths []*coreauth.Auth, model string, now time.Time) ([]*coreauth.Auth, coreauth.QuotaWindowBlock, bool) {
+	if g == nil || !g.hasProviders() {
+		return enabledAuths(auths), coreauth.QuotaWindowBlock{}, false
+	}
+	candidates := g.resolveCandidates(auths, model)
+	g.admissionMu.Lock()
+	defer g.admissionMu.Unlock()
+	if block, exhausted := g.blockedForResolved(candidates, now); exhausted {
+		return nil, block, true
+	}
+	return g.availableResolved(candidates, now), coreauth.QuotaWindowBlock{}, false
 }
 
 // BlockedForModel implements auth.QuotaWindowGate.
@@ -974,8 +895,12 @@ func (g *Gate) Reset(provider, model, credential string) int {
 	credential = strings.TrimSpace(credential)
 	budgetKeys := make(map[string]struct{})
 	if model != "" && g != nil && g.resolver != nil {
+		resolve := g.observedResolver()
 		for _, candidate := range g.resolver.List() {
-			resolved, configured := g.resolve(candidate, model)
+			if candidate == nil || candidate.Disabled || candidate.Status == coreauth.StatusDisabled {
+				continue
+			}
+			resolved, configured := resolve(candidate, model)
 			if configured && !resolved.conflict && strings.EqualFold(resolved.target.Provider, provider) {
 				budgetKeys[resolved.budgetKey] = struct{}{}
 			}

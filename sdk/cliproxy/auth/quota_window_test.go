@@ -19,6 +19,23 @@ type blockingQuotaWindowGate struct {
 	block QuotaWindowBlock
 }
 
+type evaluatingQuotaWindowGate struct {
+	evaluations int
+	blocked     int
+}
+
+func (g *evaluatingQuotaWindowGate) BlockedForModel([]*Auth, string, time.Time) (QuotaWindowBlock, bool) {
+	g.blocked++
+	return QuotaWindowBlock{}, false
+}
+
+func (*evaluatingQuotaWindowGate) Admit(*Auth, string, time.Time) (string, bool) { return "", true }
+
+func (g *evaluatingQuotaWindowGate) EvaluateAuths(auths []*Auth, _ string, _ time.Time) ([]*Auth, QuotaWindowBlock, bool) {
+	g.evaluations++
+	return auths, QuotaWindowBlock{}, false
+}
+
 type countingQuotaWindowGate struct {
 	admits       int
 	lastBlocked  string
@@ -480,6 +497,21 @@ func TestQuotaWindowAuthsExcludeNonPositiveWeights(t *testing.T) {
 	auths := manager.QuotaWindowAuths()
 	if len(auths) != 1 || auths[0].ID != positive.ID {
 		t.Fatalf("QuotaWindowAuths() = %#v, want only %s", auths, positive.ID)
+	}
+}
+
+func TestQuotaWindowSelectionUsesCombinedEvaluation(t *testing.T) {
+	gate := &evaluatingQuotaWindowGate{}
+	auth := &Auth{ID: "combined-evaluation", Provider: "codex", Status: StatusActive}
+	available, errAvailable := getAvailableAuthsWithPriorityMode([]*Auth{auth}, "codex", "gpt-5", time.Now(), false, gate)
+	if errAvailable != nil {
+		t.Fatalf("getAvailableAuthsWithPriorityMode() error = %v", errAvailable)
+	}
+	if len(available) != 1 || available[0] != auth {
+		t.Fatalf("available = %#v, want original auth", available)
+	}
+	if gate.evaluations != 1 || gate.blocked != 0 {
+		t.Fatalf("gate calls = evaluations:%d blocked:%d, want 1 and 0", gate.evaluations, gate.blocked)
 	}
 }
 

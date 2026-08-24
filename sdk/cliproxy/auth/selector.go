@@ -285,15 +285,11 @@ func getAvailableAuthsWithPriorityMode(auths []*Auth, provider, model string, no
 		return nil, &Error{Code: "auth_not_found", Message: "no auth candidates"}
 	}
 	if gate != nil {
-		if block, exhausted := gate.BlockedForModel(auths, model, now); exhausted {
+		var block QuotaWindowBlock
+		var exhausted bool
+		auths, block, exhausted = evaluateQuotaWindowAuths(gate, auths, model, now)
+		if exhausted {
 			return nil, newQuotaWindowError(model, block, now)
-		}
-		originalAuths := auths
-		auths = quotaWindowAvailableAuths(gate, originalAuths, model, now)
-		if len(auths) != len(originalAuths) {
-			if block, exhausted := gate.BlockedForModel(originalAuths, model, now); exhausted {
-				return nil, newQuotaWindowError(model, block, now)
-			}
 		}
 	}
 

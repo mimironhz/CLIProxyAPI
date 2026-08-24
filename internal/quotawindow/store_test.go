@@ -20,6 +20,21 @@ func TestStoreSnapshotDoesNotUseAuthJSONSuffix(t *testing.T) {
 	}
 }
 
+func TestStorePersistsWhenAuthDirIsCurrentDirectory(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	store := NewStore(".", NewLedger())
+	if store == nil {
+		t.Fatal("NewStore(.) = nil")
+	}
+	if errFlush := store.Flush(); errFlush != nil {
+		t.Fatalf("Flush() error = %v", errFlush)
+	}
+	if _, errStat := os.Stat(filepath.Join(dir, snapshotFileName)); errStat != nil {
+		t.Fatalf("snapshot missing from current directory: %v", errStat)
+	}
+}
+
 func TestStoreLoadRejectsUnsupportedOrCorruptSnapshots(t *testing.T) {
 	limit := int64(10)
 	instance := Instance{

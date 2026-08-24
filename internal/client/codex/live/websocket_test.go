@@ -2,6 +2,7 @@ package live
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -16,7 +17,8 @@ import (
 )
 
 type denyDirectAdmissionGate struct {
-	exhausted bool
+	exhausted       bool
+	unknownRecovery bool
 }
 
 type recordingDirectQuotaGate struct {
@@ -39,7 +41,11 @@ func (g *denyDirectAdmissionGate) BlockedForModel(_ []*auth.Auth, _ string, now 
 	if !g.exhausted {
 		return auth.QuotaWindowBlock{}, false
 	}
-	return auth.QuotaWindowBlock{Provider: "codex", Window: "workday", Exhausted: []string{"requests"}, AvailableAt: now.Add(time.Hour)}, true
+	block := auth.QuotaWindowBlock{Provider: "codex", Window: "workday", Exhausted: []string{"requests"}}
+	if !g.unknownRecovery {
+		block.AvailableAt = now.Add(time.Hour)
+	}
+	return block, true
 }
 
 func (g *denyDirectAdmissionGate) Admit(*auth.Auth, string, time.Time) (string, bool) {
@@ -280,6 +286,55 @@ func TestHandleDirectWebsocketQuotaAdmissionBlocksUpstreamDial(t *testing.T) {
 	}
 }
 
+func TestHandleDirectWebsocketQuotaAdmissionPreservesUnknownRecoveryBody(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	upstreamHit := make(chan struct{}, 1)
+	upstreamServer := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		upstreamHit <- struct{}{}
+	}))
+	defer upstreamServer.Close()
+
+	manager := auth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(&captureExecutor{})
+	manager.SetQuotaWindowGate(&denyDirectAdmissionGate{unknownRecovery: true})
+	registerCredential(t, manager, &auth.Auth{ID: "codex-oauth-unknown-quota", Provider: "codex", Status: auth.StatusActive, Metadata: map[string]any{"access_token": "oauth-token"}})
+	handler := NewHandler(manager, nil)
+	handler.sidebandAPIBaseURL = "ws" + strings.TrimPrefix(upstreamServer.URL, "http") + "/v1"
+	router := gin.New()
+	router.GET("/v1/realtime", handler.HandleRealtimeWebsocket)
+	downstreamServer := httptest.NewServer(router)
+	defer downstreamServer.Close()
+
+	connection, response, errDial := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(downstreamServer.URL, "http")+"/v1/realtime?model=gpt-realtime", nil)
+	if connection != nil {
+		_ = connection.Close()
+	}
+	if errDial == nil || response == nil || response.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("dial error = %v, response = %#v; want 429", errDial, response)
+	}
+	if contentType := response.Header.Get("Content-Type"); !strings.HasPrefix(contentType, "application/json") {
+		t.Fatalf("Content-Type = %q, want application/json", contentType)
+	}
+	body, errRead := io.ReadAll(response.Body)
+	if errRead != nil {
+		t.Fatalf("ReadAll() error = %v", errRead)
+	}
+	_ = response.Body.Close()
+	var payload map[string]any
+	if errJSON := json.Unmarshal(body, &payload); errJSON != nil {
+		t.Fatalf("response JSON = %v; body=%s", errJSON, body)
+	}
+	errorBody, _ := payload["error"].(map[string]any)
+	if errorBody["code"] != "quota_window_exhausted" || errorBody["available_at"] != nil {
+		t.Fatalf("error body = %#v", errorBody)
+	}
+	select {
+	case <-upstreamHit:
+		t.Fatal("quota-exhausted direct websocket reached upstream")
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
 func TestHandleDirectWebsocketSettlesTerminalTokenUsage(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	upstreamServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -325,5 +380,17 @@ func TestHandleDirectWebsocketSettlesTerminalTokenUsage(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("quota usage was not settled")
+	}
+}
+
+func TestRealtimeQuotaAccumulatorBoundsTruncatedFrames(t *testing.T) {
+	accumulator := &realtimeQuotaAccumulator{}
+	accumulator.Observe([]byte(`{"type":"session.updated"}`), true)
+	accumulator.Observe([]byte(`{"type":"session.updated"}`), true)
+	if accumulator.detail.InputTokens != truncatedQuotaTokenUsage || accumulator.detail.OutputTokens != truncatedQuotaTokenUsage || accumulator.detail.TotalTokens != truncatedQuotaTokenUsage {
+		t.Fatalf("truncated usage = %+v, want bounded sentinel %d", accumulator.detail, truncatedQuotaTokenUsage)
+	}
+	if accumulator.detail.TotalTokens == maxQuotaTokenUsage {
+		t.Fatal("truncated usage exhausted the int64 range")
 	}
 }

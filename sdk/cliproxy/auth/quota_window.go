@@ -9,12 +9,12 @@ import (
 	"fmt"
 	"math"
 	"net/http"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -39,11 +39,32 @@ type quotaWindowGateAvailability interface {
 	AvailableAuths(auths []*Auth, model string, now time.Time) []*Auth
 }
 
+type quotaWindowGateEvaluation interface {
+	EvaluateAuths(auths []*Auth, model string, now time.Time) ([]*Auth, QuotaWindowBlock, bool)
+}
+
 func quotaWindowAvailableAuths(gate QuotaWindowGate, auths []*Auth, model string, now time.Time) []*Auth {
 	if availability, ok := gate.(quotaWindowGateAvailability); ok && availability != nil {
 		return availability.AvailableAuths(auths, model, now)
 	}
 	return auths
+}
+
+func evaluateQuotaWindowAuths(gate QuotaWindowGate, auths []*Auth, model string, now time.Time) ([]*Auth, QuotaWindowBlock, bool) {
+	if evaluation, ok := gate.(quotaWindowGateEvaluation); ok && evaluation != nil {
+		return evaluation.EvaluateAuths(auths, model, now)
+	}
+	if block, exhausted := gate.BlockedForModel(auths, model, now); exhausted {
+		return nil, block, true
+	}
+	originalAuths := auths
+	auths = quotaWindowAvailableAuths(gate, originalAuths, model, now)
+	if len(auths) != len(originalAuths) {
+		if block, exhausted := gate.BlockedForModel(originalAuths, model, now); exhausted {
+			return nil, block, true
+		}
+	}
+	return auths, QuotaWindowBlock{}, false
 }
 
 // QuotaWindowCountTokensMetering lets executors identify local-only token estimators.
@@ -343,28 +364,7 @@ func (m *Manager) ResolveQuotaWindowTarget(auth *Auth, routeModel string) QuotaW
 }
 
 func canonicalQuotaModels(models []string, fallback string) string {
-	seen := make(map[string]struct{}, len(models))
-	canonical := make([]string, 0, len(models))
-	for _, model := range models {
-		model = strings.TrimSpace(thinking.ParseSuffix(model).ModelName)
-		if model == "" {
-			continue
-		}
-		key := strings.ToLower(model)
-		if _, exists := seen[key]; exists {
-			continue
-		}
-		seen[key] = struct{}{}
-		canonical = append(canonical, key)
-	}
-	if len(canonical) == 0 {
-		return strings.ToLower(strings.TrimSpace(fallback))
-	}
-	sort.Strings(canonical)
-	if len(canonical) == 1 {
-		return canonical[0]
-	}
-	return "pool:" + strings.Join(canonical, ",")
+	return internalconfig.CanonicalQuotaModels(models, fallback)
 }
 
 // QuotaWindowCooldown reports the ordinary cooldown state for a candidate set.
@@ -471,6 +471,11 @@ func (e *quotaWindowError) Headers() http.Header {
 func isQuotaWindowError(err error) bool {
 	var quotaErr *quotaWindowError
 	return errors.As(err, &quotaErr) && quotaErr != nil
+}
+
+// IsQuotaWindowError reports whether err is a local provider quota-window denial.
+func IsQuotaWindowError(err error) bool {
+	return isQuotaWindowError(err)
 }
 
 var errQuotaWindowCredentialExhausted = errors.New("quota-window credential exhausted during admission")
