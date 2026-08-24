@@ -15,10 +15,11 @@ import (
 
 func TestGateCredentialScopeRotatesAndPersists(t *testing.T) {
 	requestLimit := int64(1)
+	now := time.Now().UTC().Truncate(time.Minute)
 	cfg := &config.Config{ProviderQuota: map[string]config.ProviderQuota{"codex": {
 		Scope: "credential",
 		QuotaWindows: config.QuotaWindows{Timezone: "UTC", Windows: []config.QuotaWindow{{
-			Name: "all-day", Start: "00:00", End: "23:59", Budget: &config.QuotaBudget{Requests: &requestLimit},
+			Name: "active", Start: now.Add(-time.Hour).Format("15:04"), End: now.Add(time.Hour).Format("15:04"), Budget: &config.QuotaBudget{Requests: &requestLimit},
 		}}},
 	}}}
 	manager := coreauth.NewManager(nil, nil, nil)
@@ -30,7 +31,6 @@ func TestGateCredentialScopeRotatesAndPersists(t *testing.T) {
 	if errNew != nil {
 		t.Fatalf("New() error = %v", errNew)
 	}
-	now := time.Date(2026, time.August, 21, 12, 0, 0, 0, time.UTC)
 	if _, admitted := gate.Admit(authA, "gpt-5", now); !admitted {
 		t.Fatal("Admit(authA) = false")
 	}
