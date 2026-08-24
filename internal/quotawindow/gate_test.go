@@ -388,6 +388,12 @@ func TestGateSkipsQuotaResolutionWhenUnconfigured(t *testing.T) {
 	if len(available) != 1 || available[0] != auth {
 		t.Fatalf("AvailableAuths() = %#v, want original auth", available)
 	}
+	disabled := &coreauth.Auth{ID: "disabled", Provider: "codex", Disabled: true}
+	statusDisabled := &coreauth.Auth{ID: "status-disabled", Provider: "codex", Status: coreauth.StatusDisabled}
+	available = gate.AvailableAuths([]*coreauth.Auth{auth, nil, disabled, statusDisabled}, "gpt-5", now)
+	if len(available) != 1 || available[0] != auth {
+		t.Fatalf("AvailableAuths() with disabled inputs = %#v, want only active auth", available)
+	}
 	if allocs := testing.AllocsPerRun(100, func() { _, _ = gate.Admit(auth, "gpt-5", now) }); allocs != 0 {
 		t.Fatalf("Admit() allocations = %v, want 0 on unconfigured fast path", allocs)
 	}
@@ -570,6 +576,38 @@ func BenchmarkGateAdmit(b *testing.B) {
 		}
 		if !gate.ledger.Settle(reservation, coreusage.Detail{}) {
 			b.Fatal("Settle() = false")
+		}
+	}
+}
+
+func BenchmarkModelSnapshots(b *testing.B) {
+	requestLimit := int64(^uint64(0) >> 1)
+	cfg := &config.Config{ProviderQuota: map[string]config.ProviderQuota{"codex": {
+		QuotaWindows: config.QuotaWindows{Timezone: "UTC", Windows: []config.QuotaWindow{{
+			Name: "all-day", Start: "00:00", End: "23:59", Budget: &config.QuotaBudget{Requests: &requestLimit},
+		}}},
+	}}}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.SetConfig(cfg)
+	gate, errNew := New(cfg, manager, "")
+	if errNew != nil {
+		b.Fatalf("New() error = %v", errNew)
+	}
+	models := make([]string, 300)
+	for index := range models {
+		models[index] = fmt.Sprintf("catalog-model-%03d", index)
+	}
+	auths := make([]*coreauth.Auth, 5)
+	for index := range auths {
+		auths[index] = &coreauth.Auth{ID: fmt.Sprintf("snapshot-auth-%d", index), Provider: "codex", Status: coreauth.StatusActive}
+	}
+	now := time.Date(2026, time.August, 21, 12, 0, 0, 0, time.UTC)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for iteration := 0; iteration < b.N; iteration++ {
+		statuses := gate.ModelSnapshots(models, auths, func(*coreauth.Auth, string) bool { return true }, now, nil)
+		if len(statuses) != len(models) {
+			b.Fatalf("ModelSnapshots() statuses = %d, want %d", len(statuses), len(models))
 		}
 	}
 }

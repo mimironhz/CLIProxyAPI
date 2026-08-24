@@ -507,9 +507,6 @@ func (g *Gate) resolveWith(auth *coreauth.Auth, model string, policy budgetPolic
 	if g == nil || g.resolver == nil || auth == nil {
 		return resolvedTarget{}, false
 	}
-	if !g.hasProviders() {
-		return resolvedTarget{}, false
-	}
 	target := g.resolver.ResolveQuotaWindowTarget(auth, model)
 	providerName := strings.ToLower(strings.TrimSpace(target.Provider))
 	g.mu.RLock()
@@ -564,8 +561,34 @@ func (g *Gate) recordBudgetPolicy(budgetKey, policyKey string) bool {
 // mutating the Gate's sticky admission policy state.
 func (g *Gate) observedResolver() targetResolver {
 	policy := g.observedBudgetPolicy()
+	type cacheKey struct {
+		auth  *coreauth.Auth
+		model string
+	}
+	type cacheEntry struct {
+		resolved    resolvedTarget
+		configured  bool
+		policyKey   string
+		policyBound bool
+	}
+	cache := make(map[cacheKey]cacheEntry)
 	return func(auth *coreauth.Auth, model string) (resolvedTarget, bool) {
-		return g.resolveWith(auth, model, policy)
+		key := cacheKey{auth: auth, model: model}
+		if cached, exists := cache[key]; exists {
+			resolved := cached.resolved
+			if cached.policyBound {
+				resolved.conflict = policy(resolved.budgetKey, cached.policyKey)
+			}
+			return resolved, cached.configured
+		}
+		resolved, configured := g.resolveWith(auth, model, policy)
+		entry := cacheEntry{resolved: resolved, configured: configured}
+		if configured && resolved.schedule != nil && resolved.budgetKey != "" {
+			entry.policyKey = schedulePolicyKey(resolved.schedule)
+			entry.policyBound = true
+		}
+		cache[key] = entry
+		return resolved, configured
 	}
 }
 
@@ -653,6 +676,27 @@ func (g *Gate) resolveCandidatesUsing(resolve targetResolver, auths []*coreauth.
 
 func (g *Gate) resolveCandidates(auths []*coreauth.Auth, model string) []resolvedCandidate {
 	return g.resolveCandidatesUsing(g.resolve, auths, model)
+}
+
+func enabledAuths(auths []*coreauth.Auth) []*coreauth.Auth {
+	firstExcluded := -1
+	for index, auth := range auths {
+		if auth == nil || auth.Disabled || auth.Status == coreauth.StatusDisabled {
+			firstExcluded = index
+			break
+		}
+	}
+	if firstExcluded < 0 {
+		return auths
+	}
+	filtered := make([]*coreauth.Auth, 0, len(auths)-1)
+	filtered = append(filtered, auths[:firstExcluded]...)
+	for _, auth := range auths[firstExcluded+1:] {
+		if auth != nil && !auth.Disabled && auth.Status != coreauth.StatusDisabled {
+			filtered = append(filtered, auth)
+		}
+	}
+	return filtered
 }
 
 // BlockedForModel implements auth.QuotaWindowGate.
@@ -748,7 +792,7 @@ func (g *Gate) AvailableAuths(auths []*coreauth.Auth, model string, now time.Tim
 		return nil
 	}
 	if !g.hasProviders() {
-		return auths
+		return enabledAuths(auths)
 	}
 	candidates := g.resolveCandidates(auths, model)
 	g.admissionMu.Lock()
@@ -761,7 +805,7 @@ func (g *Gate) availableAuthsUsing(resolve targetResolver, auths []*coreauth.Aut
 		return nil
 	}
 	if !g.hasProviders() {
-		return auths
+		return enabledAuths(auths)
 	}
 	return g.availableResolved(g.resolveCandidatesUsing(resolve, auths, model), now)
 }
@@ -813,6 +857,9 @@ func (g *Gate) Admit(auth *coreauth.Auth, model string, now time.Time) (string, 
 		return "", true
 	}
 	candidates := g.admissionCandidates(auth, model)
+	// Resolve every sibling first so cross-auth policies are recorded before the
+	// admission decision. Resolve the exact selected auth separately because the
+	// manager candidates are fresh clones that may reflect a concurrent update.
 	resolvedCandidates := g.resolveCandidates(candidates, model)
 	resolved, configured := g.resolve(auth, model)
 	var instance Instance
@@ -1008,6 +1055,9 @@ func (g *Gate) ManagementSnapshot(now time.Time, auths []*coreauth.Auth) map[str
 }
 
 func (g *Gate) managementResolvedKeys(now time.Time, auths []*coreauth.Auth) []map[string]any {
+	if g == nil || !g.hasProviders() {
+		return nil
+	}
 	resolve := g.observedResolver()
 	registryRef := registry.GetGlobalRegistry()
 	seen := make(map[string]struct{})

@@ -77,14 +77,15 @@ func (g *Gate) ModelSnapshots(models []string, auths []*coreauth.Auth, supports 
 			if supports != nil && !supports(candidate, model) {
 				continue
 			}
-			target := g.resolver.ResolveQuotaWindowTarget(candidate, model)
+			resolved, configured := resolve(candidate, model)
+			target := resolved.target
 			if len(filters) > 0 {
 				if _, ok := filters[strings.ToLower(target.Provider)]; !ok {
 					continue
 				}
 			}
 			candidatesByModel[model] = append(candidatesByModel[model], candidate)
-			if resolved, configured := resolve(candidate, model); configured && !resolved.conflict {
+			if configured && !resolved.conflict {
 				if budgetModels[resolved.budgetKey] == nil {
 					budgetModels[resolved.budgetKey] = make(map[string]struct{})
 				}
@@ -164,8 +165,8 @@ func (g *Gate) providerStatuses(resolve targetResolver, auths []*coreauth.Auth, 
 		if candidate == nil {
 			continue
 		}
-		target := g.resolver.ResolveQuotaWindowTarget(candidate, model)
 		resolved, configured := resolve(candidate, model)
+		target := resolved.target
 		key := "unconfigured|" + strings.ToLower(target.Provider) + "|" + strings.ToLower(target.UpstreamModel)
 		if configured {
 			key = resolved.budgetKey
