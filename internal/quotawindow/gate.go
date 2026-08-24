@@ -578,25 +578,54 @@ type keyBlock struct {
 	key   string
 }
 
+type targetResolver func(*coreauth.Auth, string) (resolvedTarget, bool)
+
+type resolvedCandidate struct {
+	auth       *coreauth.Auth
+	resolved   resolvedTarget
+	configured bool
+}
+
+func (g *Gate) resolveCandidatesUsing(resolve targetResolver, auths []*coreauth.Auth, model string) []resolvedCandidate {
+	candidates := make([]resolvedCandidate, 0, len(auths))
+	for _, candidate := range auths {
+		if candidate == nil || candidate.Disabled || candidate.Status == coreauth.StatusDisabled {
+			continue
+		}
+		resolved, configured := resolve(candidate, model)
+		candidates = append(candidates, resolvedCandidate{auth: candidate, resolved: resolved, configured: configured})
+	}
+	return candidates
+}
+
+func (g *Gate) resolveCandidates(auths []*coreauth.Auth, model string) []resolvedCandidate {
+	return g.resolveCandidatesUsing(g.resolve, auths, model)
+}
+
 // BlockedForModel implements auth.QuotaWindowGate.
 func (g *Gate) BlockedForModel(auths []*coreauth.Auth, model string, now time.Time) (coreauth.QuotaWindowBlock, bool) {
 	if g == nil || !g.hasProviders() {
 		return coreauth.QuotaWindowBlock{}, false
 	}
+	candidates := g.resolveCandidates(auths, model)
 	g.admissionMu.Lock()
 	defer g.admissionMu.Unlock()
-	return g.blockedForModel(auths, model, now)
+	return g.blockedForResolved(candidates, now)
 }
 
-func (g *Gate) blockedForModel(auths []*coreauth.Auth, model string, now time.Time) (coreauth.QuotaWindowBlock, bool) {
+func (g *Gate) blockedForModelUsing(resolve targetResolver, auths []*coreauth.Auth, model string, now time.Time) (coreauth.QuotaWindowBlock, bool) {
+	if g == nil || !g.hasProviders() {
+		return coreauth.QuotaWindowBlock{}, false
+	}
+	return g.blockedForResolved(g.resolveCandidatesUsing(resolve, auths, model), now)
+}
+
+func (g *Gate) blockedForResolved(candidates []resolvedCandidate, now time.Time) (coreauth.QuotaWindowBlock, bool) {
 	providers := make(map[string]map[string]*keyBlock)
 	availableKeys := make(map[string]map[string]struct{})
-	for _, candidate := range auths {
-		if candidate == nil || candidate.Disabled || candidate.Status == coreauth.StatusDisabled {
-			continue
-		}
-		resolved, configured := g.resolve(candidate, model)
-		if !configured {
+	for _, candidate := range candidates {
+		resolved := candidate.resolved
+		if !candidate.configured {
 			continue
 		}
 		if resolved.conflict {
@@ -668,16 +697,28 @@ func (g *Gate) AvailableAuths(auths []*coreauth.Auth, model string, now time.Tim
 	if !g.hasProviders() {
 		return auths
 	}
+	candidates := g.resolveCandidates(auths, model)
 	g.admissionMu.Lock()
 	defer g.admissionMu.Unlock()
-	available := make([]*coreauth.Auth, 0, len(auths))
-	for _, candidate := range auths {
-		if candidate == nil || candidate.Disabled || candidate.Status == coreauth.StatusDisabled {
-			continue
-		}
-		resolved, configured := g.resolve(candidate, model)
-		if !configured {
-			available = append(available, candidate)
+	return g.availableResolved(candidates, now)
+}
+
+func (g *Gate) availableAuthsUsing(resolve targetResolver, auths []*coreauth.Auth, model string, now time.Time) []*coreauth.Auth {
+	if g == nil {
+		return nil
+	}
+	if !g.hasProviders() {
+		return auths
+	}
+	return g.availableResolved(g.resolveCandidatesUsing(resolve, auths, model), now)
+}
+
+func (g *Gate) availableResolved(candidates []resolvedCandidate, now time.Time) []*coreauth.Auth {
+	available := make([]*coreauth.Auth, 0, len(candidates))
+	for _, candidate := range candidates {
+		resolved := candidate.resolved
+		if !candidate.configured {
+			available = append(available, candidate.auth)
 			continue
 		}
 		if resolved.conflict {
@@ -685,12 +726,12 @@ func (g *Gate) AvailableAuths(auths []*coreauth.Auth, model string, now time.Tim
 		}
 		instance, active := resolved.schedule.InstanceAt(now)
 		if !active || instance.Budget == nil {
-			available = append(available, candidate)
+			available = append(available, candidate.auth)
 			continue
 		}
 		_, exhausted := g.ledger.Snapshot(resolved.budgetKey, instance, instance.Budget)
 		if len(exhausted) == 0 {
-			available = append(available, candidate)
+			available = append(available, candidate.auth)
 		}
 	}
 	return available
@@ -719,23 +760,31 @@ func (g *Gate) Admit(auth *coreauth.Auth, model string, now time.Time) (string, 
 		return "", true
 	}
 	candidates := g.admissionCandidates(auth, model)
+	resolvedCandidates := g.resolveCandidates(candidates, model)
+	resolved, configured := g.resolve(auth, model)
+	var instance Instance
+	active := false
+	var clientModels []string
+	if configured && !resolved.conflict {
+		instance, active = resolved.schedule.InstanceAt(now)
+		if active && instance.Budget != nil {
+			clientModels = g.clientModelsSharingBudget(auth, resolved)
+		}
+	}
 	g.admissionMu.Lock()
 	defer g.admissionMu.Unlock()
-	if _, blocked := g.blockedForModel(candidates, model, now); blocked {
+	if _, blocked := g.blockedForResolved(resolvedCandidates, now); blocked {
 		return "", false
 	}
-	resolved, configured := g.resolve(auth, model)
 	if !configured {
 		return "", true
 	}
 	if resolved.conflict {
 		return "", false
 	}
-	instance, active := resolved.schedule.InstanceAt(now)
 	if !active || instance.Budget == nil {
 		return "", true
 	}
-	clientModels := g.clientModelsSharingBudget(auth, resolved)
 	return g.ledger.Admit(CounterRecord{
 		BudgetKey:     resolved.budgetKey,
 		Provider:      resolved.target.Provider,
@@ -755,9 +804,8 @@ func (g *Gate) admissionCandidates(selected *coreauth.Auth, model string) []*cor
 	candidates := make([]*coreauth.Auth, 0)
 	seen := make(map[string]struct{})
 	if g != nil && g.resolver != nil {
-		registryRef := registry.GetGlobalRegistry()
-		for _, candidate := range g.resolver.QuotaWindowAuths() {
-			if candidate == nil || (strings.TrimSpace(model) != "" && !registryRef.ClientSupportsModel(candidate.ID, model)) {
+		for _, candidate := range g.resolver.QuotaWindowAuthsForModel(model) {
+			if candidate == nil {
 				continue
 			}
 			seen[candidate.ID] = struct{}{}

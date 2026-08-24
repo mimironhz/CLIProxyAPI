@@ -2,8 +2,10 @@ package quotawindow
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -388,5 +390,102 @@ func TestGateSkipsQuotaResolutionWhenUnconfigured(t *testing.T) {
 	}
 	if allocs := testing.AllocsPerRun(100, func() { _, _ = gate.Admit(auth, "gpt-5", now) }); allocs != 0 {
 		t.Fatalf("Admit() allocations = %v, want 0 on unconfigured fast path", allocs)
+	}
+}
+
+func TestGateAdmitConcurrentlyRespectsRequestBudget(t *testing.T) {
+	requestLimit := int64(200)
+	cfg := &config.Config{ProviderQuota: map[string]config.ProviderQuota{"codex": {
+		QuotaWindows: config.QuotaWindows{Timezone: "UTC", Windows: []config.QuotaWindow{{
+			Name: "all-day", Start: "00:00", End: "23:59", Budget: &config.QuotaBudget{Requests: &requestLimit},
+		}}},
+	}}}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.SetConfig(cfg)
+	gate, errNew := New(cfg, manager, t.TempDir())
+	if errNew != nil {
+		t.Fatalf("New() error = %v", errNew)
+	}
+	defer gate.Close()
+	auth := &coreauth.Auth{ID: "concurrent-codex", Provider: "codex", FileName: "codex.json", Status: coreauth.StatusActive}
+	now := time.Date(2026, time.August, 21, 12, 0, 0, 0, time.UTC)
+	results := make(chan int, 8)
+	var workers sync.WaitGroup
+	for worker := 0; worker < 8; worker++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			succeeded := 0
+			for attempt := 0; attempt < 100; attempt++ {
+				if _, admitted := gate.Admit(auth, "gpt-5", now); admitted {
+					succeeded++
+				}
+			}
+			results <- succeeded
+		}()
+	}
+	workers.Wait()
+	close(results)
+	total := 0
+	for succeeded := range results {
+		total += succeeded
+	}
+	if total != int(requestLimit) {
+		t.Fatalf("successful admissions = %d, want %d", total, requestLimit)
+	}
+}
+
+func BenchmarkGateAdmit(b *testing.B) {
+	requestLimit := int64(^uint64(0) >> 1)
+	windows := config.QuotaWindows{Timezone: "UTC", Windows: []config.QuotaWindow{{
+		Name: "all-day", Start: "00:00", End: "23:59", Budget: &config.QuotaBudget{Requests: &requestLimit},
+	}}}
+	modelQuotas := make(map[string]config.QuotaWindows, 8)
+	modelInfos := make([]*registry.ModelInfo, 0, 8)
+	for i := 0; i < 8; i++ {
+		model := fmt.Sprintf("gpt-bench-%d", i)
+		modelQuotas[model] = windows
+		modelInfos = append(modelInfos, &registry.ModelInfo{ID: model})
+	}
+	cfg := &config.Config{ProviderQuota: map[string]config.ProviderQuota{"codex": {
+		QuotaWindows: windows,
+		Models:       modelQuotas,
+	}}}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.SetConfig(cfg)
+	auths := make([]*coreauth.Auth, 0, 50)
+	for i := 0; i < 50; i++ {
+		auth := &coreauth.Auth{
+			ID:          fmt.Sprintf("benchmark-auth-%d", i),
+			Provider:    "codex",
+			FileName:    fmt.Sprintf("benchmark-auth-%d.json", i),
+			Status:      coreauth.StatusActive,
+			ModelStates: make(map[string]*coreauth.ModelState, 40),
+		}
+		for state := 0; state < 40; state++ {
+			auth.ModelStates[fmt.Sprintf("state-%d", state)] = &coreauth.ModelState{Status: coreauth.StatusActive}
+		}
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			b.Fatalf("Register(%s) error = %v", auth.ID, errRegister)
+		}
+		registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, modelInfos)
+		b.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+		auths = append(auths, auth)
+	}
+	gate, errNew := New(cfg, manager, "")
+	if errNew != nil {
+		b.Fatalf("New() error = %v", errNew)
+	}
+	now := time.Date(2026, time.August, 21, 12, 0, 0, 0, time.UTC)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		reservation, admitted := gate.Admit(auths[i%len(auths)], "gpt-bench-0", now)
+		if !admitted {
+			b.Fatal("Admit() = false")
+		}
+		if !gate.ledger.Settle(reservation, coreusage.Detail{}) {
+			b.Fatal("Settle() = false")
+		}
 	}
 }

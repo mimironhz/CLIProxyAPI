@@ -441,6 +441,35 @@ func TestQuotaWindowAuthsExcludeNonPositiveWeights(t *testing.T) {
 	}
 }
 
+func TestQuotaWindowAdmissionClonesOmitModelStates(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	auth := &Auth{
+		ID:       "quota-lightweight-clone",
+		Provider: "codex",
+		Status:   StatusActive,
+		ModelStates: map[string]*ModelState{
+			"gpt-5": {Status: StatusActive},
+		},
+	}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("Register() error = %v", errRegister)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "gpt-5"}})
+	defer registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+
+	admissionAuths := manager.QuotaWindowAuthsForModel("gpt-5")
+	if len(admissionAuths) != 1 || admissionAuths[0].ID != auth.ID {
+		t.Fatalf("QuotaWindowAuthsForModel() = %#v", admissionAuths)
+	}
+	if admissionAuths[0].ModelStates != nil {
+		t.Fatalf("admission ModelStates = %#v, want nil", admissionAuths[0].ModelStates)
+	}
+	reportingAuths := manager.QuotaWindowAuths()
+	if len(reportingAuths) != 1 || reportingAuths[0].ModelStates["gpt-5"] == nil {
+		t.Fatalf("reporting ModelStates = %#v, want preserved cooldown state", reportingAuths)
+	}
+}
+
 func TestQuotaWindowFastPathRotationDoesNotConsumeRetryLimitBeforeDial(t *testing.T) {
 	gate := &deferredCredentialAvailabilityGate{}
 	manager := NewManager(nil, &RoundRobinSelector{}, nil)

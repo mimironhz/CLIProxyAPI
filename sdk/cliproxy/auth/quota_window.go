@@ -507,10 +507,59 @@ func (m *Manager) quotaWindowCandidates(model string) []*Auth {
 		if strings.TrimSpace(model) != "" && !m.authSupportsRouteModel(registryRef, candidate, model) {
 			continue
 		}
-		candidates = append(candidates, candidate.Clone())
+		candidates = append(candidates, candidate.cloneForQuotaWindow())
 	}
 	m.mu.RUnlock()
 	return selectorAvailabilityCandidates(selector, candidates)
+}
+
+// cloneForQuotaWindow copies only the reference-typed fields read by admission:
+// identity, Prefix/FileName, Attributes, Metadata, and Runtime. ModelStates is
+// deliberately omitted to avoid cloning every per-model cooldown on each upstream
+// attempt. Keep this in sync with Auth.Clone if Auth gains new reference fields.
+func (a *Auth) cloneForQuotaWindow() *Auth {
+	if a == nil {
+		return nil
+	}
+	copyAuth := *a
+	if len(a.Attributes) > 0 {
+		copyAuth.Attributes = make(map[string]string, len(a.Attributes))
+		for key, value := range a.Attributes {
+			copyAuth.Attributes[key] = value
+		}
+	}
+	if len(a.Metadata) > 0 {
+		copyAuth.Metadata = make(map[string]any, len(a.Metadata))
+		for key, value := range a.Metadata {
+			copyAuth.Metadata[key] = value
+		}
+	}
+	copyAuth.ModelStates = nil
+	copyAuth.Runtime = a.Runtime
+	return &copyAuth
+}
+
+// QuotaWindowAuthsForModel returns lightweight admission candidates that can
+// serve model. Reporting callers must use QuotaWindowAuths to retain ModelStates.
+func (m *Manager) QuotaWindowAuthsForModel(model string) []*Auth {
+	if m == nil {
+		return nil
+	}
+	registryRef := registry.GetGlobalRegistry()
+	m.mu.RLock()
+	selector := m.selector
+	auths := make([]*Auth, 0, len(m.auths))
+	for _, auth := range m.auths {
+		if auth == nil || auth.Disabled || auth.Status == StatusDisabled {
+			continue
+		}
+		if strings.TrimSpace(model) != "" && !registryRef.ClientSupportsModel(auth.ID, model) {
+			continue
+		}
+		auths = append(auths, auth.cloneForQuotaWindow())
+	}
+	m.mu.RUnlock()
+	return selectorAvailabilityCandidates(selector, auths)
 }
 
 // QuotaWindowAuths returns the credentials that the configured selector can use.
