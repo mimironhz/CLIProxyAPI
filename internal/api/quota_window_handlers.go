@@ -20,7 +20,10 @@ func (s *Server) quotaWindowsHandler(compact bool) gin.HandlerFunc {
 		}
 		now := time.Now()
 		requestedModels := c.QueryArray("model")
-		models := advertisedQuotaModels(nil)
+		// Snapshot every advertised model: ModelSnapshots derives shares_budget_with
+		// from sibling models that map to the same budget key, so narrowing the input
+		// set here would empty that field. Requested models are filtered afterwards.
+		models := advertisedQuotaModels()
 		auths := s.handlers.AuthManager.QuotaWindowAuths()
 		registryRef := registry.GetGlobalRegistry()
 		statuses := s.quotaWindows.ModelSnapshots(models, auths, func(auth *coreauth.Auth, model string) bool {
@@ -63,7 +66,7 @@ func filterQuotaModelStatuses(statuses []quotawindow.ModelStatus, requested []st
 	return filtered
 }
 
-func advertisedQuotaModels(requested []string) []string {
+func advertisedQuotaModels() []string {
 	available := registry.GetGlobalRegistry().GetAvailableModels("openai")
 	advertised := make(map[string]string, len(available))
 	for _, model := range available {
@@ -74,24 +77,8 @@ func advertisedQuotaModels(requested []string) []string {
 		}
 	}
 	models := make([]string, 0, len(advertised))
-	if len(requested) == 0 {
-		for _, id := range advertised {
-			models = append(models, id)
-		}
-	} else {
-		seen := make(map[string]struct{}, len(requested))
-		for _, raw := range requested {
-			key := strings.ToLower(strings.TrimSpace(raw))
-			id, ok := advertised[key]
-			if !ok {
-				continue
-			}
-			if _, exists := seen[key]; exists {
-				continue
-			}
-			seen[key] = struct{}{}
-			models = append(models, id)
-		}
+	for _, id := range advertised {
+		models = append(models, id)
 	}
 	sort.Strings(models)
 	return models
