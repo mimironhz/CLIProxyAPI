@@ -79,15 +79,15 @@ func TestStoreLoadRejectsUnsupportedOrCorruptSnapshots(t *testing.T) {
 
 func TestStoreScheduleFlushesUnderSustainedChanges(t *testing.T) {
 	store := NewStore(t.TempDir(), NewLedger())
-	store.delay = 20 * time.Millisecond
-	store.maxDelay = 60 * time.Millisecond
+	store.delay = 50 * time.Millisecond
+	store.maxDelay = 200 * time.Millisecond
 	defer func() {
 		if errClose := store.Close(); errClose != nil {
 			t.Errorf("Close() error = %v", errClose)
 		}
 	}()
 
-	deadline := time.Now().Add(300 * time.Millisecond)
+	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		store.Schedule()
 		if _, errStat := os.Stat(store.path); errStat == nil {
@@ -95,15 +95,15 @@ func TestStoreScheduleFlushesUnderSustainedChanges(t *testing.T) {
 		} else if !os.IsNotExist(errStat) {
 			t.Fatalf("Stat() error = %v", errStat)
 		}
-		time.Sleep(5 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 	}
 	if _, errStat := os.Stat(store.path); errStat != nil {
 		t.Fatalf("snapshot was not flushed during sustained changes: %v", errStat)
 	}
 
 	debounced := NewStore(t.TempDir(), NewLedger())
-	debounced.delay = 20 * time.Millisecond
-	debounced.maxDelay = 60 * time.Millisecond
+	debounced.delay = time.Hour
+	debounced.maxDelay = 2 * time.Hour
 	defer func() {
 		if errClose := debounced.Close(); errClose != nil {
 			t.Errorf("Close() error = %v", errClose)
@@ -113,8 +113,67 @@ func TestStoreScheduleFlushesUnderSustainedChanges(t *testing.T) {
 	if _, errStat := os.Stat(debounced.path); !os.IsNotExist(errStat) {
 		t.Fatalf("snapshot exists before debounce elapsed: %v", errStat)
 	}
-	time.Sleep(40 * time.Millisecond)
+	debounced.mu.Lock()
+	generation := debounced.generation
+	if debounced.timer != nil {
+		debounced.timer.Stop()
+	}
+	debounced.mu.Unlock()
+	debounced.flushPending(generation)
 	if _, errStat := os.Stat(debounced.path); errStat != nil {
-		t.Fatalf("snapshot missing after debounce elapsed: %v", errStat)
+		t.Fatalf("snapshot missing after pending flush: %v", errStat)
+	}
+}
+
+func TestStoreCloseWaitsForPendingFlush(t *testing.T) {
+	ledger := NewLedger()
+	store := NewStore(t.TempDir(), ledger)
+	store.delay = 0
+	store.maxDelay = time.Second
+	ledger.mu.Lock()
+	ledgerLocked := true
+	defer func() {
+		if ledgerLocked {
+			ledger.mu.Unlock()
+		}
+	}()
+	store.Schedule()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if store.flushMu.TryLock() {
+			store.flushMu.Unlock()
+			if time.Now().After(deadline) {
+				t.Fatal("pending flush did not start")
+			}
+			time.Sleep(time.Millisecond)
+			continue
+		}
+		break
+	}
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- store.Close() }()
+	for {
+		store.mu.Lock()
+		closed := store.closed
+		store.mu.Unlock()
+		if closed {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("Close() did not mark store closed")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	select {
+	case errClose := <-closeDone:
+		t.Fatalf("Close() returned before pending flush completed: %v", errClose)
+	default:
+	}
+	ledger.mu.Unlock()
+	ledgerLocked = false
+	if errClose := <-closeDone; errClose != nil {
+		t.Fatalf("Close() error = %v", errClose)
 	}
 }

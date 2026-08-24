@@ -97,8 +97,7 @@ type Service struct {
 	pluginHost *pluginhost.Host
 
 	// quotaWindows owns recurring provider spend-budget state.
-	quotaWindows       *quotawindow.Gate
-	stopUsageContextFn func(context.Context) error
+	quotaWindows *quotawindow.Gate
 
 	// shutdownOnce ensures shutdown is called only once.
 	shutdownOnce sync.Once

@@ -19,17 +19,13 @@ func TestShutdownFlushesQuotaWindowsWhenUsageDrainFails(t *testing.T) {
 	}
 	snapshotPath := filepath.Join(dir, "provider-quota-windows.qws")
 	drainErr := errors.New("usage drain failed")
-	s := &Service{
-		quotaWindows: gate,
-		stopUsageContextFn: func(context.Context) error {
-			if _, errStat := os.Stat(snapshotPath); !os.IsNotExist(errStat) {
-				t.Fatalf("snapshot exists before usage drain: %v", errStat)
-			}
-			return drainErr
-		},
-	}
 
-	errShutdown := s.Shutdown(context.Background())
+	errShutdown := drainUsageAndCloseQuotaWindows(context.Background(), gate, func(context.Context) error {
+		if _, errStat := os.Stat(snapshotPath); !os.IsNotExist(errStat) {
+			t.Fatalf("snapshot exists before usage drain: %v", errStat)
+		}
+		return drainErr
+	})
 	if !errors.Is(errShutdown, drainErr) {
 		t.Fatalf("Shutdown() error = %v, want %v", errShutdown, drainErr)
 	}

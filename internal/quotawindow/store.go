@@ -149,6 +149,8 @@ func (s *Store) Schedule() {
 }
 
 func (s *Store) flushPending(generation uint64) {
+	s.flushMu.Lock()
+	defer s.flushMu.Unlock()
 	s.mu.Lock()
 	if s.closed || generation != s.generation {
 		s.mu.Unlock()
@@ -157,7 +159,7 @@ func (s *Store) flushPending(generation uint64) {
 	s.timer = nil
 	s.deadline = time.Time{}
 	s.mu.Unlock()
-	if errFlush := s.Flush(); errFlush != nil {
+	if errFlush := s.flushLocked(); errFlush != nil {
 		log.WithError(errFlush).Warn("failed to persist provider quota-window ledger")
 	}
 }
@@ -168,6 +170,11 @@ func (s *Store) Flush() error {
 	}
 	s.flushMu.Lock()
 	defer s.flushMu.Unlock()
+	return s.flushLocked()
+}
+
+// flushLocked writes one snapshot while the caller holds flushMu.
+func (s *Store) flushLocked() error {
 	records := s.ledger.Records(true)
 	payload, errMarshal := json.MarshalIndent(struct {
 		Version  int             `json:"version"`

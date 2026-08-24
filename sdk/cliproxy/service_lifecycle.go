@@ -346,27 +346,35 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			}
 		}
 
-		stopUsage := usage.StopDefaultContext
-		if s.stopUsageContextFn != nil {
-			stopUsage = s.stopUsageContextFn
-		}
-		if errUsage := stopUsage(ctx); errUsage != nil {
-			log.WithError(errUsage).Warn("timed out draining usage records during shutdown")
-			if shutdownErr == nil {
-				shutdownErr = errUsage
-			}
-		}
-		// Recorded ledger state is newer than the on-disk snapshot regardless of
-		// whether queued usage records finished draining.
-		if s.quotaWindows != nil {
-			if errClose := s.quotaWindows.Close(); errClose != nil {
-				log.WithError(errClose).Warn("failed to flush provider quota-window ledger")
-				if shutdownErr == nil {
-					shutdownErr = errClose
-				}
-			}
+		if errQuotaShutdown := drainUsageAndCloseQuotaWindows(ctx, s.quotaWindows, usage.StopDefaultContext); errQuotaShutdown != nil && shutdownErr == nil {
+			shutdownErr = errQuotaShutdown
 		}
 	})
+	return shutdownErr
+}
+
+type quotaWindowCloser interface {
+	Close() error
+}
+
+func drainUsageAndCloseQuotaWindows(ctx context.Context, quotaWindows quotaWindowCloser, stopUsage func(context.Context) error) error {
+	var shutdownErr error
+	if stopUsage != nil {
+		if errUsage := stopUsage(ctx); errUsage != nil {
+			log.WithError(errUsage).Warn("timed out draining usage records during shutdown")
+			shutdownErr = errUsage
+		}
+	}
+	// Recorded ledger state is newer than the on-disk snapshot regardless of
+	// whether queued usage records finished draining.
+	if quotaWindows != nil {
+		if errClose := quotaWindows.Close(); errClose != nil {
+			log.WithError(errClose).Warn("failed to flush provider quota-window ledger")
+			if shutdownErr == nil {
+				shutdownErr = errClose
+			}
+		}
+	}
 	return shutdownErr
 }
 
