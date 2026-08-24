@@ -118,6 +118,18 @@ func TestValidateProviderQuota(t *testing.T) {
 			},
 		},
 		{
+			name: "OAuth aliases do not override API key base schedules",
+			cfg: Config{
+				ProviderQuota: map[string]ProviderQuota{"codex": {
+					QuotaWindows: QuotaWindows{Timezone: "UTC", Windows: []QuotaWindow{{Name: "base", Start: "00:00", End: "23:59", Budget: &QuotaBudget{Requests: &one}}}},
+					Models:       map[string]QuotaWindows{"oauth-alias": {Timezone: "UTC", Windows: []QuotaWindow{{Name: "oauth", Start: "00:00", End: "23:59", Budget: &QuotaBudget{Requests: &zero}}}}},
+				}},
+				OAuthModelAlias: map[string][]OAuthModelAlias{"codex": {{Name: "gpt-5", Alias: "oauth-alias"}}},
+				CodexKey:        []CodexKey{{APIKey: "key", Models: []CodexModel{{Name: "gpt-5", Alias: "api-alias"}}}},
+			},
+			wantErr: true,
+		},
+		{
 			name: "compat quota rejects built in provider identity collision",
 			cfg: Config{
 				ProviderQuota:       map[string]ProviderQuota{"codex": {QuotaWindows: QuotaWindows{Windows: []QuotaWindow{{Name: "workday", Start: "09:00", End: "17:00"}}}}},
@@ -150,6 +162,32 @@ func TestValidateProviderQuota(t *testing.T) {
 func TestCanonicalQuotaModelsStripsThinkingSuffixes(t *testing.T) {
 	if got := CanonicalQuotaModels([]string{"gpt-5(high)", " GPT-5 "}, ""); got != "gpt-5" {
 		t.Fatalf("CanonicalQuotaModels() = %q, want gpt-5", got)
+	}
+}
+
+func TestConfiguredQuotaRouteGroupsKeepOAuthAndAPIKeysSeparate(t *testing.T) {
+	cfg := &Config{
+		OAuthModelAlias: map[string][]OAuthModelAlias{"codex": {{Name: "gpt-5", Alias: "oauth-alias"}}},
+		CodexKey:        []CodexKey{{APIKey: "key", Models: []CodexModel{{Name: "gpt-5", Alias: "api-alias"}}}},
+	}
+	groups := ConfiguredQuotaRouteGroups(cfg)["codex"]
+	if len(groups) != 2 {
+		t.Fatalf("route groups = %#v, want separate OAuth and API-key groups", groups)
+	}
+	seenOAuth, seenAPIKey := false, false
+	for _, group := range groups {
+		if len(group) != 1 {
+			t.Fatalf("OAuth and API-key routes merged into one group: %#v", group)
+		}
+		if _, ok := group["oauth-alias"]; ok {
+			seenOAuth = true
+		}
+		if _, ok := group["api-alias"]; ok {
+			seenAPIKey = true
+		}
+	}
+	if !seenOAuth || !seenAPIKey {
+		t.Fatalf("route groups = %#v, want one OAuth and one API-key group", groups)
 	}
 }
 

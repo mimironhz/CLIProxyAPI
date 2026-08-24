@@ -150,17 +150,11 @@ func ConfiguredQuotaRouteGroups(cfg *Config) map[string][]QuotaRouteGroup {
 			}
 		}
 	}
-	providersWithCredentialGroups := make(map[string]struct{})
 	add := func(provider string, routes map[string][]string) {
 		provider = strings.ToLower(strings.TrimSpace(provider))
-		merged := cloneQuotaRouteModels(global[provider])
-		for model, upstreams := range routes {
-			merged[model] = append(merged[model], upstreams...)
-		}
-		if group := canonicalQuotaRouteGroup(merged); len(group) > 0 {
+		if group := canonicalQuotaRouteGroup(routes); len(group) > 0 {
 			groups[provider] = append(groups[provider], group)
 		}
-		providersWithCredentialGroups[provider] = struct{}{}
 	}
 	for i := range cfg.ClaudeKey {
 		add("claude", quotaRouteModels(cfg.ClaudeKey[i].Prefix, cfg.ClaudeKey[i].Models))
@@ -185,9 +179,6 @@ func ConfiguredQuotaRouteGroups(cfg *Config) map[string][]QuotaRouteGroup {
 		add(entry.Name, quotaRouteModels(entry.Prefix, entry.Models))
 	}
 	for provider, routes := range global {
-		if _, exists := providersWithCredentialGroups[provider]; exists {
-			continue
-		}
 		if group := canonicalQuotaRouteGroup(routes); len(group) > 0 {
 			groups[provider] = append(groups[provider], group)
 		}
@@ -211,14 +202,6 @@ func quotaRouteModels[T interface {
 		}
 	}
 	return routes
-}
-
-func cloneQuotaRouteModels(routes map[string][]string) map[string][]string {
-	cloned := make(map[string][]string, len(routes))
-	for model, upstreams := range routes {
-		cloned[model] = append([]string(nil), upstreams...)
-	}
-	return cloned
 }
 
 func canonicalQuotaRouteGroup(routes map[string][]string) QuotaRouteGroup {
