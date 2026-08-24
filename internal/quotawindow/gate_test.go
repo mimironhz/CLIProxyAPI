@@ -363,3 +363,30 @@ func TestModelSnapshotsProviderFilterOmitsUnbackedModels(t *testing.T) {
 		t.Fatalf("filtered statuses = %#v, want only gpt-5", statuses)
 	}
 }
+
+func TestGateSkipsQuotaResolutionWhenUnconfigured(t *testing.T) {
+	cfg := &config.Config{}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.SetConfig(cfg)
+	gate, errNew := New(cfg, manager, t.TempDir())
+	if errNew != nil {
+		t.Fatalf("New() error = %v", errNew)
+	}
+	defer gate.Close()
+	now := time.Now()
+	auth := &coreauth.Auth{ID: "codex", Provider: "codex"}
+	auths := []*coreauth.Auth{auth}
+	if reservation, admitted := gate.Admit(auth, "gpt-5", now); !admitted || reservation != "" {
+		t.Fatalf("Admit() = %q, %t; want empty admitted reservation", reservation, admitted)
+	}
+	if _, blocked := gate.BlockedForModel(auths, "gpt-5", now); blocked {
+		t.Fatal("BlockedForModel() = true")
+	}
+	available := gate.AvailableAuths(auths, "gpt-5", now)
+	if len(available) != 1 || available[0] != auth {
+		t.Fatalf("AvailableAuths() = %#v, want original auth", available)
+	}
+	if allocs := testing.AllocsPerRun(100, func() { _, _ = gate.Admit(auth, "gpt-5", now) }); allocs != 0 {
+		t.Fatalf("Admit() allocations = %v, want 0 on unconfigured fast path", allocs)
+	}
+}

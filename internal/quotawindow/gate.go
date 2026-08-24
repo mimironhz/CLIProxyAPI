@@ -486,8 +486,23 @@ type resolvedTarget struct {
 	conflict  bool
 }
 
+// The gate is installed even when unconfigured so hot reload can enable quota
+// windows later; these checks avoid resolution work until that happens.
+func (g *Gate) hasProviders() bool {
+	if g == nil {
+		return false
+	}
+	g.mu.RLock()
+	hasProviders := len(g.providers) > 0
+	g.mu.RUnlock()
+	return hasProviders
+}
+
 func (g *Gate) resolve(auth *coreauth.Auth, model string) (resolvedTarget, bool) {
 	if g == nil || g.resolver == nil || auth == nil {
+		return resolvedTarget{}, false
+	}
+	if !g.hasProviders() {
 		return resolvedTarget{}, false
 	}
 	target := g.resolver.ResolveQuotaWindowTarget(auth, model)
@@ -565,7 +580,7 @@ type keyBlock struct {
 
 // BlockedForModel implements auth.QuotaWindowGate.
 func (g *Gate) BlockedForModel(auths []*coreauth.Auth, model string, now time.Time) (coreauth.QuotaWindowBlock, bool) {
-	if g == nil {
+	if g == nil || !g.hasProviders() {
 		return coreauth.QuotaWindowBlock{}, false
 	}
 	g.admissionMu.Lock()
@@ -650,6 +665,9 @@ func (g *Gate) AvailableAuths(auths []*coreauth.Auth, model string, now time.Tim
 	if g == nil {
 		return nil
 	}
+	if !g.hasProviders() {
+		return auths
+	}
 	g.admissionMu.Lock()
 	defer g.admissionMu.Unlock()
 	available := make([]*coreauth.Auth, 0, len(auths))
@@ -695,6 +713,9 @@ func recoveryLater(left, right time.Time) bool {
 // Admit implements auth.QuotaWindowGate.
 func (g *Gate) Admit(auth *coreauth.Auth, model string, now time.Time) (string, bool) {
 	if g == nil {
+		return "", true
+	}
+	if !g.hasProviders() {
 		return "", true
 	}
 	candidates := g.admissionCandidates(auth, model)
@@ -797,7 +818,7 @@ func (g *Gate) Close() error {
 
 // Reset clears usage for live counters matching the supplied filters.
 func (g *Gate) Reset(provider, model, credential string) int {
-	if g == nil {
+	if g == nil || !g.hasProviders() {
 		return 0
 	}
 	provider = strings.ToLower(strings.TrimSpace(provider))
