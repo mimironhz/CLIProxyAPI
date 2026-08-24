@@ -10,6 +10,7 @@ import (
 	"math"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -458,9 +459,12 @@ func (e *quotaWindowError) Headers() http.Header {
 	if !known {
 		return headers
 	}
-	for _, value := range safeRetryAfterHeader(delay).Values("Retry-After") {
-		headers.Add("Retry-After", value)
+	seconds, positive := safeRetryAfterSeconds(delay)
+	if !positive {
+		// A known recovery instant that has just passed means the client may retry now.
+		seconds = 0
 	}
+	headers.Set("Retry-After", strconv.FormatInt(seconds, 10))
 	return headers
 }
 
@@ -497,8 +501,9 @@ func (m *Manager) quotaWindowAttemptContext(ctx context.Context, auth *Auth, mod
 		return WithQuotaWindowReservation(ctx, reservation), nil
 	}
 	candidates := m.quotaWindowCandidates(model)
-	if block, exhausted := gate.BlockedForModel(candidates, model, time.Now()); exhausted {
-		return nil, newQuotaWindowError(model, block, time.Now())
+	blockedAt := time.Now()
+	if block, exhausted := gate.BlockedForModel(candidates, model, blockedAt); exhausted {
+		return nil, newQuotaWindowError(model, block, blockedAt)
 	}
 	return nil, errQuotaWindowCredentialExhausted
 }
@@ -508,6 +513,8 @@ func (m *Manager) AdmitQuotaWindowAttempt(ctx context.Context, auth *Auth, model
 	return m.quotaWindowAttemptContext(WithQuotaWindowModel(ctx, model), auth, model)
 }
 
+// quotaWindowCandidates builds the route-aware set used to classify a denied
+// selected credential before deciding whether another credential can rotate in.
 func (m *Manager) quotaWindowCandidates(model string) []*Auth {
 	if m == nil {
 		return nil

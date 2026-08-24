@@ -320,6 +320,17 @@ func TestQuotaWindowErrorOmitsRetryHintWithoutRecoveryTime(t *testing.T) {
 	if retryAfter := soon.Headers().Get("Retry-After"); retryAfter != "1" {
 		t.Fatalf("sub-second Retry-After = %q, want 1", retryAfter)
 	}
+	past := newQuotaWindowError("deepseek-v4", QuotaWindowBlock{Provider: "deepseek", Window: "peak", AvailableAt: now.Add(-time.Millisecond)}, now)
+	if retryAfter := past.Headers().Get("Retry-After"); retryAfter != "0" {
+		t.Fatalf("past Retry-After = %q, want 0", retryAfter)
+	}
+	if errJSON := json.Unmarshal([]byte(past.Error()), &payload); errJSON != nil {
+		t.Fatalf("past error JSON = %v", errJSON)
+	}
+	errorBody, _ = payload["error"].(map[string]any)
+	if errorBody["reset_seconds"] != float64(0) || errorBody["reset_time"] != "0s" {
+		t.Fatalf("past reset fields = %#v, %#v; want 0 and 0s", errorBody["reset_seconds"], errorBody["reset_time"])
+	}
 }
 
 func TestResolveQuotaWindowTargetMapsGeminiCLIToGemini(t *testing.T) {

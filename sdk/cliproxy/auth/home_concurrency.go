@@ -277,8 +277,16 @@ func SafeResponseHeaders(err error) http.Header {
 }
 
 func safeRetryAfterHeader(retryAfter time.Duration) http.Header {
-	if retryAfter <= 0 {
+	seconds, ok := safeRetryAfterSeconds(retryAfter)
+	if !ok {
 		return nil
+	}
+	return http.Header{"Retry-After": []string{strconv.FormatInt(seconds, 10)}}
+}
+
+func safeRetryAfterSeconds(retryAfter time.Duration) (int64, bool) {
+	if retryAfter <= 0 {
+		return 0, false
 	}
 	seconds := int64(retryAfter / time.Second)
 	if retryAfter%time.Second != 0 {
@@ -287,7 +295,7 @@ func safeRetryAfterHeader(retryAfter time.Duration) http.Header {
 	if seconds < 1 {
 		seconds = 1
 	}
-	return http.Header{"Retry-After": []string{strconv.FormatInt(seconds, 10)}}
+	return seconds, true
 }
 
 func homeConcurrencyInstallError(err error) error {
