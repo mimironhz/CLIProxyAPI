@@ -435,6 +435,61 @@ func TestGateAdmitConcurrentlyRespectsRequestBudget(t *testing.T) {
 	}
 }
 
+func TestObservedBudgetPolicyDetectsConflictsWithoutMutation(t *testing.T) {
+	gate := &Gate{
+		budgetPolicies:  make(map[string]string),
+		budgetConflicts: make(map[string]struct{}),
+	}
+	observe := gate.observedBudgetPolicy()
+	if conflict := observe("provider|codex|codex|gpt-5", "policy-a"); conflict {
+		t.Fatal("first observed policy is conflicted")
+	}
+	if conflict := observe("provider|codex|codex|gpt-5", "policy-b"); !conflict {
+		t.Fatal("second observed policy did not detect conflict")
+	}
+	if len(gate.budgetPolicies) != 0 || len(gate.budgetConflicts) != 0 {
+		t.Fatalf("observed policy mutated gate: policies=%v conflicts=%v", gate.budgetPolicies, gate.budgetConflicts)
+	}
+}
+
+func TestModelSnapshotsDoesNotRecordBudgetPolicies(t *testing.T) {
+	requestLimit := int64(10)
+	cfg := &config.Config{ProviderQuota: map[string]config.ProviderQuota{"codex": {
+		QuotaWindows: config.QuotaWindows{Timezone: "UTC", Windows: []config.QuotaWindow{{
+			Name: "all-day", Start: "00:00", End: "23:59", Budget: &config.QuotaBudget{Requests: &requestLimit},
+		}}},
+	}}}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.SetConfig(cfg)
+	gate, errNew := New(cfg, manager, t.TempDir())
+	if errNew != nil {
+		t.Fatalf("New() error = %v", errNew)
+	}
+	defer gate.Close()
+	auth := &coreauth.Auth{ID: "snapshot-codex", Provider: "codex", FileName: "codex.json", Status: coreauth.StatusActive}
+	now := time.Date(2026, time.August, 21, 12, 0, 0, 0, time.UTC)
+	statuses := gate.ModelSnapshots([]string{"gpt-5"}, []*coreauth.Auth{auth}, func(*coreauth.Auth, string) bool { return true }, now, nil)
+	if len(statuses) != 1 || !statuses[0].Available {
+		t.Fatalf("ModelSnapshots() = %#v", statuses)
+	}
+	gate.mu.RLock()
+	policyCount := len(gate.budgetPolicies)
+	conflictCount := len(gate.budgetConflicts)
+	gate.mu.RUnlock()
+	if policyCount != 0 || conflictCount != 0 {
+		t.Fatalf("snapshot recorded policies=%d conflicts=%d", policyCount, conflictCount)
+	}
+	if _, admitted := gate.Admit(auth, "gpt-5", now); !admitted {
+		t.Fatal("Admit() = false")
+	}
+	gate.mu.RLock()
+	policyCount = len(gate.budgetPolicies)
+	gate.mu.RUnlock()
+	if policyCount == 0 {
+		t.Fatal("Admit() did not record a budget policy")
+	}
+}
+
 func BenchmarkGateAdmit(b *testing.B) {
 	requestLimit := int64(^uint64(0) >> 1)
 	windows := config.QuotaWindows{Timezone: "UTC", Windows: []config.QuotaWindow{{

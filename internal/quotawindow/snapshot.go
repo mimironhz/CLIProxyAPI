@@ -59,6 +59,7 @@ type ModelStatus struct {
 
 // ModelSnapshots returns read-only status for advertised client-visible models.
 func (g *Gate) ModelSnapshots(models []string, auths []*coreauth.Auth, supports func(*coreauth.Auth, string) bool, now time.Time, providerFilters []string) []ModelStatus {
+	resolve := g.observedResolver()
 	filters := make(map[string]struct{}, len(providerFilters))
 	for _, provider := range providerFilters {
 		if normalized := strings.ToLower(strings.TrimSpace(provider)); normalized != "" {
@@ -83,7 +84,7 @@ func (g *Gate) ModelSnapshots(models []string, auths []*coreauth.Auth, supports 
 				}
 			}
 			candidatesByModel[model] = append(candidatesByModel[model], candidate)
-			if resolved, configured := g.resolve(candidate, model); configured && !resolved.conflict {
+			if resolved, configured := resolve(candidate, model); configured && !resolved.conflict {
 				if budgetModels[resolved.budgetKey] == nil {
 					budgetModels[resolved.budgetKey] = make(map[string]struct{})
 				}
@@ -102,11 +103,11 @@ func (g *Gate) ModelSnapshots(models []string, auths []*coreauth.Auth, supports 
 			Model:            model,
 			Available:        true,
 			SharesBudgetWith: []string{},
-			Providers:        g.providerStatuses(candidates, model, now),
+			Providers:        g.providerStatuses(resolve, candidates, model, now),
 		}
 		shares := make(map[string]struct{})
 		for _, candidate := range candidates {
-			resolved, configured := g.resolve(candidate, model)
+			resolved, configured := resolve(candidate, model)
 			if !configured || resolved.conflict {
 				continue
 			}
@@ -131,7 +132,7 @@ func (g *Gate) ModelSnapshots(models []string, auths []*coreauth.Auth, supports 
 		}
 		sort.Strings(status.SharesBudgetWith)
 
-		if block, exhausted := g.BlockedForModel(candidates, model, now); exhausted {
+		if block, exhausted := g.blockedForModelUsing(resolve, candidates, model, now); exhausted {
 			reason := "quota_window_exhausted"
 			status.Available = false
 			status.Reason = &reason
@@ -141,7 +142,7 @@ func (g *Gate) ModelSnapshots(models []string, auths []*coreauth.Auth, supports 
 				status.RetryAfterSeconds = retrySeconds(now, block.AvailableAt)
 			}
 		} else if g.resolver != nil {
-			quotaAvailable := g.AvailableAuths(candidates, model, now)
+			quotaAvailable := g.availableAuthsUsing(resolve, candidates, model, now)
 			if availableAt, cooling := g.resolver.QuotaWindowCooldown(quotaAvailable, model, now); cooling {
 				reason := "model_cooldown"
 				status.Available = false
@@ -156,7 +157,7 @@ func (g *Gate) ModelSnapshots(models []string, auths []*coreauth.Auth, supports 
 	return statuses
 }
 
-func (g *Gate) providerStatuses(auths []*coreauth.Auth, model string, now time.Time) []ProviderStatus {
+func (g *Gate) providerStatuses(resolve targetResolver, auths []*coreauth.Auth, model string, now time.Time) []ProviderStatus {
 	statuses := make([]ProviderStatus, 0)
 	seen := make(map[string]struct{})
 	for _, candidate := range auths {
@@ -164,7 +165,7 @@ func (g *Gate) providerStatuses(auths []*coreauth.Auth, model string, now time.T
 			continue
 		}
 		target := g.resolver.ResolveQuotaWindowTarget(candidate, model)
-		resolved, configured := g.resolve(candidate, model)
+		resolved, configured := resolve(candidate, model)
 		key := "unconfigured|" + strings.ToLower(target.Provider) + "|" + strings.ToLower(target.UpstreamModel)
 		if configured {
 			key = resolved.budgetKey

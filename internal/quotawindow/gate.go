@@ -25,11 +25,12 @@ type providerSchedule struct {
 
 // Gate implements selection-time quota checks and owns the persistent ledger.
 type Gate struct {
-	mu              sync.RWMutex
-	admissionMu     sync.Mutex
-	resolver        *coreauth.Manager
-	providers       map[string]*providerSchedule
-	budgetPolicies  map[string]string
+	mu             sync.RWMutex
+	admissionMu    sync.Mutex
+	resolver       *coreauth.Manager
+	providers      map[string]*providerSchedule
+	budgetPolicies map[string]string
+	// Budget conflicts are sticky until Update clears them.
 	budgetConflicts map[string]struct{}
 	ledger          *Ledger
 	storeMu         sync.Mutex
@@ -498,7 +499,9 @@ func (g *Gate) hasProviders() bool {
 	return hasProviders
 }
 
-func (g *Gate) resolve(auth *coreauth.Auth, model string) (resolvedTarget, bool) {
+type budgetPolicyFunc func(budgetKey, policyKey string) bool
+
+func (g *Gate) resolveWith(auth *coreauth.Auth, model string, policy budgetPolicyFunc) (resolvedTarget, bool) {
 	if g == nil || g.resolver == nil || auth == nil {
 		return resolvedTarget{}, false
 	}
@@ -532,15 +535,63 @@ func (g *Gate) resolve(auth *coreauth.Auth, model string) (resolvedTarget, bool)
 	}
 	budgetKey := provider.scope + "|" + providerName + "|" + unit + "|" + strings.ToLower(strings.TrimSpace(target.UpstreamModel))
 	policyKey := schedulePolicyKey(schedule)
+	conflict = policy(budgetKey, policyKey)
+	return resolvedTarget{target: target, provider: provider, schedule: schedule, budgetKey: budgetKey, conflict: conflict}, true
+}
+
+// resolve records budget policies; use it only on admission paths.
+func (g *Gate) resolve(auth *coreauth.Auth, model string) (resolvedTarget, bool) {
+	return g.resolveWith(auth, model, g.recordBudgetPolicy)
+}
+
+// recordBudgetPolicy binds a budget key to its schedule policy and reports
+// whether the key is conflicted.
+func (g *Gate) recordBudgetPolicy(budgetKey, policyKey string) bool {
 	g.mu.Lock()
+	defer g.mu.Unlock()
 	if previous, exists := g.budgetPolicies[budgetKey]; exists && previous != policyKey {
 		g.budgetConflicts[budgetKey] = struct{}{}
 	} else if !exists {
 		g.budgetPolicies[budgetKey] = policyKey
 	}
-	_, conflict = g.budgetConflicts[budgetKey]
-	g.mu.Unlock()
-	return resolvedTarget{target: target, provider: provider, schedule: schedule, budgetKey: budgetKey, conflict: conflict}, true
+	_, conflict := g.budgetConflicts[budgetKey]
+	return conflict
+}
+
+// observedResolver detects conflicts within one reporting request without
+// mutating the Gate's sticky admission policy state.
+func (g *Gate) observedResolver() targetResolver {
+	policy := g.observedBudgetPolicy()
+	return func(auth *coreauth.Auth, model string) (resolvedTarget, bool) {
+		return g.resolveWith(auth, model, policy)
+	}
+}
+
+func (g *Gate) observedBudgetPolicy() budgetPolicyFunc {
+	policies := make(map[string]string)
+	conflicts := make(map[string]struct{})
+	return func(budgetKey, policyKey string) bool {
+		g.mu.RLock()
+		globalPolicy, globalPolicyExists := g.budgetPolicies[budgetKey]
+		_, globalConflict := g.budgetConflicts[budgetKey]
+		g.mu.RUnlock()
+		if globalConflict {
+			conflicts[budgetKey] = struct{}{}
+		}
+		previous, exists := policies[budgetKey]
+		if !exists && globalPolicyExists {
+			previous = globalPolicy
+			exists = true
+			policies[budgetKey] = globalPolicy
+		}
+		if exists && previous != policyKey {
+			conflicts[budgetKey] = struct{}{}
+		} else if !exists {
+			policies[budgetKey] = policyKey
+		}
+		_, conflict := conflicts[budgetKey]
+		return conflict
+	}
 }
 
 func (g *Gate) sharedUpstreamSchedule(provider *providerSchedule, auth *coreauth.Auth, target coreauth.QuotaWindowTarget) (*Schedule, bool) {
@@ -955,6 +1006,7 @@ func (g *Gate) ManagementSnapshot(now time.Time, auths []*coreauth.Auth) map[str
 }
 
 func (g *Gate) managementResolvedKeys(now time.Time, auths []*coreauth.Auth) []map[string]any {
+	resolve := g.observedResolver()
 	registryRef := registry.GetGlobalRegistry()
 	seen := make(map[string]struct{})
 	keys := make([]map[string]any, 0)
@@ -966,7 +1018,7 @@ func (g *Gate) managementResolvedKeys(now time.Time, auths []*coreauth.Auth) []m
 			if model == nil || strings.TrimSpace(model.ID) == "" {
 				continue
 			}
-			resolved, configured := g.resolve(candidate, model.ID)
+			resolved, configured := resolve(candidate, model.ID)
 			if !configured {
 				continue
 			}
