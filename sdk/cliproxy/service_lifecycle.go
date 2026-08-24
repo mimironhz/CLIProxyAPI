@@ -56,9 +56,10 @@ func (s *Service) Run(ctx context.Context) error {
 		redisqueue.SetUsageStatisticsEnabled(true)
 	}
 
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer shutdownCancel()
 	defer func() {
+		// Start the shutdown budget when shutdown begins, not when the service starts.
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer shutdownCancel()
 		if err := s.Shutdown(shutdownCtx); err != nil {
 			log.Errorf("service shutdown returned error: %v", err)
 		}
@@ -345,15 +346,19 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			}
 		}
 
-		usageDrained := true
-		if errUsage := usage.StopDefaultContext(ctx); errUsage != nil {
-			usageDrained = false
+		stopUsage := usage.StopDefaultContext
+		if s.stopUsageContextFn != nil {
+			stopUsage = s.stopUsageContextFn
+		}
+		if errUsage := stopUsage(ctx); errUsage != nil {
 			log.WithError(errUsage).Warn("timed out draining usage records during shutdown")
 			if shutdownErr == nil {
 				shutdownErr = errUsage
 			}
 		}
-		if usageDrained && s.quotaWindows != nil {
+		// Recorded ledger state is newer than the on-disk snapshot regardless of
+		// whether queued usage records finished draining.
+		if s.quotaWindows != nil {
 			if errClose := s.quotaWindows.Close(); errClose != nil {
 				log.WithError(errClose).Warn("failed to flush provider quota-window ledger")
 				if shutdownErr == nil {

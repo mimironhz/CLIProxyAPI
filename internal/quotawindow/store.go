@@ -19,14 +19,17 @@ const snapshotFileName = "provider-quota-windows.qws"
 
 // Store persists ledger snapshots with debounced atomic replacement.
 type Store struct {
-	path   string
-	ledger *Ledger
-	delay  time.Duration
+	path     string
+	ledger   *Ledger
+	delay    time.Duration
+	maxDelay time.Duration
 
-	mu      sync.Mutex
-	flushMu sync.Mutex
-	timer   *time.Timer
-	closed  bool
+	mu         sync.Mutex
+	flushMu    sync.Mutex
+	timer      *time.Timer
+	deadline   time.Time
+	generation uint64
+	closed     bool
 }
 
 func NewStore(authDir string, ledger *Ledger) *Store {
@@ -35,9 +38,10 @@ func NewStore(authDir string, ledger *Ledger) *Store {
 		return nil
 	}
 	return &Store{
-		path:   filepath.Join(authDir, snapshotFileName),
-		ledger: ledger,
-		delay:  250 * time.Millisecond,
+		path:     filepath.Join(authDir, snapshotFileName),
+		ledger:   ledger,
+		delay:    250 * time.Millisecond,
+		maxDelay: 2 * time.Second,
 	}
 }
 
@@ -123,15 +127,39 @@ func (s *Store) Schedule() {
 		s.mu.Unlock()
 		return
 	}
+	now := time.Now()
+	if s.deadline.IsZero() {
+		s.deadline = now.Add(s.maxDelay)
+	}
+	delay := s.delay
+	if remaining := s.deadline.Sub(now); remaining < delay {
+		delay = remaining
+	}
+	if delay < 0 {
+		delay = 0
+	}
 	if s.timer != nil {
 		s.timer.Stop()
 	}
-	s.timer = time.AfterFunc(s.delay, func() {
-		if errFlush := s.Flush(); errFlush != nil {
-			log.WithError(errFlush).Warn("failed to persist provider quota-window ledger")
-		}
-	})
+	// The deadline caps how long sustained ledger churn may postpone persistence.
+	s.generation++
+	generation := s.generation
+	s.timer = time.AfterFunc(delay, func() { s.flushPending(generation) })
 	s.mu.Unlock()
+}
+
+func (s *Store) flushPending(generation uint64) {
+	s.mu.Lock()
+	if s.closed || generation != s.generation {
+		s.mu.Unlock()
+		return
+	}
+	s.timer = nil
+	s.deadline = time.Time{}
+	s.mu.Unlock()
+	if errFlush := s.Flush(); errFlush != nil {
+		log.WithError(errFlush).Warn("failed to persist provider quota-window ledger")
+	}
 }
 
 func (s *Store) Flush() error {
@@ -184,6 +212,8 @@ func (s *Store) Close() error {
 	}
 	s.mu.Lock()
 	s.closed = true
+	s.deadline = time.Time{}
+	s.generation++
 	if s.timer != nil {
 		s.timer.Stop()
 		s.timer = nil

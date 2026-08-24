@@ -76,3 +76,45 @@ func TestStoreLoadRejectsUnsupportedOrCorruptSnapshots(t *testing.T) {
 		})
 	}
 }
+
+func TestStoreScheduleFlushesUnderSustainedChanges(t *testing.T) {
+	store := NewStore(t.TempDir(), NewLedger())
+	store.delay = 20 * time.Millisecond
+	store.maxDelay = 60 * time.Millisecond
+	defer func() {
+		if errClose := store.Close(); errClose != nil {
+			t.Errorf("Close() error = %v", errClose)
+		}
+	}()
+
+	deadline := time.Now().Add(300 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		store.Schedule()
+		if _, errStat := os.Stat(store.path); errStat == nil {
+			break
+		} else if !os.IsNotExist(errStat) {
+			t.Fatalf("Stat() error = %v", errStat)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if _, errStat := os.Stat(store.path); errStat != nil {
+		t.Fatalf("snapshot was not flushed during sustained changes: %v", errStat)
+	}
+
+	debounced := NewStore(t.TempDir(), NewLedger())
+	debounced.delay = 20 * time.Millisecond
+	debounced.maxDelay = 60 * time.Millisecond
+	defer func() {
+		if errClose := debounced.Close(); errClose != nil {
+			t.Errorf("Close() error = %v", errClose)
+		}
+	}()
+	debounced.Schedule()
+	if _, errStat := os.Stat(debounced.path); !os.IsNotExist(errStat) {
+		t.Fatalf("snapshot exists before debounce elapsed: %v", errStat)
+	}
+	time.Sleep(40 * time.Millisecond)
+	if _, errStat := os.Stat(debounced.path); errStat != nil {
+		t.Fatalf("snapshot missing after debounce elapsed: %v", errStat)
+	}
+}
