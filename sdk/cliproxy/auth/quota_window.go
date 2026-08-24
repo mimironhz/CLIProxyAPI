@@ -10,7 +10,6 @@ import (
 	"math"
 	"net/http"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -403,16 +402,31 @@ func newQuotaWindowError(model string, block QuotaWindowBlock, now time.Time) *q
 	return &quotaWindowError{model: model, block: block, now: now}
 }
 
-func (e *quotaWindowError) Error() string {
-	message := fmt.Sprintf("Model %s exhausted its %s quota for provider %s", e.model, e.block.Window, e.block.Provider)
+// retryDelay reports the recovery delay and whether a recovery time is known.
+// A zero AvailableAt is a permanent or configuration block, not an immediate retry.
+func (e *quotaWindowError) retryDelay() (time.Duration, bool) {
+	if e.block.AvailableAt.IsZero() {
+		return 0, false
+	}
 	resetIn := e.block.AvailableAt.Sub(e.now)
 	if resetIn < 0 {
 		resetIn = 0
 	}
-	resetSeconds := int(math.Ceil(resetIn.Seconds()))
-	displayDuration := resetIn.Round(time.Second)
-	if resetIn > 0 && resetIn < time.Second {
-		displayDuration = time.Second
+	return resetIn, true
+}
+
+func (e *quotaWindowError) Error() string {
+	message := fmt.Sprintf("Model %s exhausted its %s quota for provider %s", e.model, e.block.Window, e.block.Provider)
+	delay, known := e.retryDelay()
+	var resetTime any
+	var resetSeconds any
+	if known {
+		resetSeconds = int(math.Ceil(delay.Seconds()))
+		displayDuration := delay.Round(time.Second)
+		if delay > 0 && delay < time.Second {
+			displayDuration = time.Second
+		}
+		resetTime = displayDuration.String()
 	}
 	errorBody := map[string]any{
 		"code":          "quota_window_exhausted",
@@ -422,7 +436,7 @@ func (e *quotaWindowError) Error() string {
 		"window":        e.block.Window,
 		"exhausted":     append([]string(nil), e.block.Exhausted...),
 		"available_at":  nil,
-		"reset_time":    displayDuration.String(),
+		"reset_time":    resetTime,
 		"reset_seconds": resetSeconds,
 	}
 	if !e.block.AvailableAt.IsZero() {
@@ -438,13 +452,15 @@ func (e *quotaWindowError) Error() string {
 func (e *quotaWindowError) StatusCode() int { return http.StatusTooManyRequests }
 
 func (e *quotaWindowError) Headers() http.Header {
-	resetIn := e.block.AvailableAt.Sub(e.now)
-	if resetIn < 0 {
-		resetIn = 0
-	}
 	headers := make(http.Header)
 	headers.Set("Content-Type", "application/json")
-	headers.Set("Retry-After", strconv.Itoa(int(math.Ceil(resetIn.Seconds()))))
+	delay, known := e.retryDelay()
+	if !known {
+		return headers
+	}
+	for _, value := range safeRetryAfterHeader(delay).Values("Retry-After") {
+		headers.Add("Retry-After", value)
+	}
 	return headers
 }
 

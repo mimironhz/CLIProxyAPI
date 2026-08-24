@@ -291,6 +291,37 @@ func assertQuotaWindowError(t *testing.T, err error) {
 	}
 }
 
+func TestQuotaWindowErrorOmitsRetryHintWithoutRecoveryTime(t *testing.T) {
+	now := time.Now()
+	err := newQuotaWindowError("deepseek-v4", QuotaWindowBlock{
+		Provider: "deepseek", Window: "configuration-conflict", Exhausted: []string{"configuration"},
+	}, now)
+	if err.StatusCode() != http.StatusTooManyRequests {
+		t.Fatalf("StatusCode() = %d", err.StatusCode())
+	}
+	if retryAfter := err.Headers().Get("Retry-After"); retryAfter != "" {
+		t.Fatalf("Retry-After = %q, want empty", retryAfter)
+	}
+	if retryAfter := SafeResponseHeaders(err).Get("Retry-After"); retryAfter != "" {
+		t.Fatalf("safe Retry-After = %q, want empty", retryAfter)
+	}
+	var payload map[string]any
+	if errJSON := json.Unmarshal([]byte(err.Error()), &payload); errJSON != nil {
+		t.Fatalf("error JSON = %v", errJSON)
+	}
+	errorBody, _ := payload["error"].(map[string]any)
+	for _, field := range []string{"available_at", "reset_time", "reset_seconds"} {
+		if errorBody[field] != nil {
+			t.Fatalf("%s = %#v, want null", field, errorBody[field])
+		}
+	}
+
+	soon := newQuotaWindowError("deepseek-v4", QuotaWindowBlock{Provider: "deepseek", Window: "peak", AvailableAt: now.Add(500 * time.Millisecond)}, now)
+	if retryAfter := soon.Headers().Get("Retry-After"); retryAfter != "1" {
+		t.Fatalf("sub-second Retry-After = %q, want 1", retryAfter)
+	}
+}
+
 func TestResolveQuotaWindowTargetMapsGeminiCLIToGemini(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
 	manager.SetConfig(&internalconfig.Config{})
