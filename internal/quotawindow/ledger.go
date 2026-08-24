@@ -74,7 +74,9 @@ func (l *Ledger) Admit(record CounterRecord, now time.Time) (string, bool) {
 	counterKey := record.BudgetKey + "|" + record.Instance.ID
 	l.mu.Lock()
 	counter := l.counters[counterKey]
+	pruned := false
 	if counter == nil {
+		pruned = l.pruneExpiredLocked(now)
 		copyRecord := record
 		copyRecord.Key = counterKey
 		copyRecord.Budget = cloneBudget(record.Budget)
@@ -88,7 +90,11 @@ func (l *Ledger) Admit(record CounterRecord, now time.Time) (string, bool) {
 	}
 	addCounterClientModel(counter, record.ClientModel)
 	if len(exhaustedDimensions(counter.Budget, counter.Used)) > 0 {
+		onChange := l.onChange
 		l.mu.Unlock()
+		if pruned && onChange != nil {
+			onChange()
+		}
 		return "", false
 	}
 	counter.Used.Requests++
@@ -100,6 +106,27 @@ func (l *Ledger) Admit(record CounterRecord, now time.Time) (string, bool) {
 		onChange()
 	}
 	return reservationID, true
+}
+
+// pruneExpiredLocked removes ended counters that are no longer pinned by an
+// in-flight settlement. The caller must hold l.mu.
+func (l *Ledger) pruneExpiredLocked(now time.Time) bool {
+	reservedCounters := make(map[string]struct{}, len(l.reservations))
+	for _, reserved := range l.reservations {
+		reservedCounters[reserved.counterKey] = struct{}{}
+	}
+	changed := false
+	for key, counter := range l.counters {
+		if counter == nil || counter.Instance.EndsAt.IsZero() || counter.Instance.EndsAt.After(now) {
+			continue
+		}
+		if _, pinned := reservedCounters[key]; pinned {
+			continue
+		}
+		delete(l.counters, key)
+		changed = true
+	}
+	return changed
 }
 
 func (l *Ledger) Settle(reservationID string, detail coreusage.Detail) bool {

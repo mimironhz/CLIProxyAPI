@@ -103,3 +103,64 @@ func TestLedgerReconcileDoesNotUseUnrelatedModelSchedule(t *testing.T) {
 		t.Fatalf("records = %#v, want removed counter", records)
 	}
 }
+
+func TestLedgerAdmitPrunesEndedWindowCounters(t *testing.T) {
+	base := time.Date(2026, time.August, 21, 12, 0, 0, 0, time.UTC)
+	requestLimit := int64(10)
+	budget := &config.QuotaBudget{Requests: &requestLimit}
+	oldInstance := Instance{
+		ID: "p|peak|old", Schedule: "p|provider", Name: "peak",
+		StartsAt: base.Add(-2 * time.Hour), EndsAt: base.Add(-time.Hour), Budget: budget, Persist: true,
+	}
+	newInstance := Instance{
+		ID: "p|peak|new", Schedule: "p|provider", Name: "peak",
+		StartsAt: base, EndsAt: base.Add(time.Hour), Budget: budget, Persist: true,
+	}
+	ledger := NewLedger()
+	oldReservation, admitted := ledger.Admit(CounterRecord{BudgetKey: "provider|p|p|model", Provider: "p", Scope: "provider", Instance: oldInstance, Budget: budget, Persist: true}, base.Add(-90*time.Minute))
+	if !admitted {
+		t.Fatal("Admit(old) = false")
+	}
+	if !ledger.Settle(oldReservation, coreusage.Detail{}) {
+		t.Fatal("Settle(old) = false")
+	}
+	if _, admitted = ledger.Admit(CounterRecord{BudgetKey: "provider|p|p|model", Provider: "p", Scope: "provider", Instance: newInstance, Budget: budget, Persist: true}, base); !admitted {
+		t.Fatal("Admit(new) = false")
+	}
+	records := ledger.Records(false)
+	if len(records) != 1 || records[0].Instance.ID != newInstance.ID {
+		t.Fatalf("records = %#v, want only new instance", records)
+	}
+}
+
+func TestLedgerAdmitKeepsEndedCounterWithInFlightSettlement(t *testing.T) {
+	base := time.Date(2026, time.August, 21, 12, 0, 0, 0, time.UTC)
+	requestLimit := int64(10)
+	budget := &config.QuotaBudget{Requests: &requestLimit}
+	oldInstance := Instance{
+		ID: "p|peak|old", Schedule: "p|provider", Name: "peak",
+		StartsAt: base.Add(-2 * time.Hour), EndsAt: base.Add(-time.Hour), Budget: budget, Persist: true,
+	}
+	newInstance := Instance{
+		ID: "p|peak|new", Schedule: "p|provider", Name: "peak",
+		StartsAt: base, EndsAt: base.Add(time.Hour), Budget: budget, Persist: true,
+	}
+	ledger := NewLedger()
+	oldReservation, admitted := ledger.Admit(CounterRecord{BudgetKey: "provider|p|p|model", Provider: "p", Scope: "provider", Instance: oldInstance, Budget: budget, Persist: true}, base.Add(-90*time.Minute))
+	if !admitted {
+		t.Fatal("Admit(old) = false")
+	}
+	if _, admitted = ledger.Admit(CounterRecord{BudgetKey: "provider|p|p|model", Provider: "p", Scope: "provider", Instance: newInstance, Budget: budget, Persist: true}, base); !admitted {
+		t.Fatal("Admit(new) = false")
+	}
+	if records := ledger.Records(false); len(records) != 2 {
+		t.Fatalf("records = %#v, want old and new instances", records)
+	}
+	if !ledger.Settle(oldReservation, coreusage.Detail{TotalTokens: 5}) {
+		t.Fatal("Settle(old) = false")
+	}
+	used, _ := ledger.Snapshot("provider|p|p|model", oldInstance, budget)
+	if used.TotalTokens != 5 {
+		t.Fatalf("old instance total tokens = %d, want 5", used.TotalTokens)
+	}
+}
