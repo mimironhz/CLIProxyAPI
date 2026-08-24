@@ -53,6 +53,8 @@ func New(cfg *config.Config, resolver *coreauth.Manager, authDir string) (*Gate,
 	if gate.store != nil {
 		records, errLoad := gate.store.Load()
 		if errLoad != nil {
+			// Persisted spend cannot be reconstructed safely; fail closed instead of
+			// booting with a refunded budget.
 			return nil, errLoad
 		}
 		if errReplace := ledger.Replace(records); errReplace != nil {

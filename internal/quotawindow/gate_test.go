@@ -393,6 +393,35 @@ func TestGateSkipsQuotaResolutionWhenUnconfigured(t *testing.T) {
 	}
 }
 
+func TestGateFailsClosedAfterUnusableSnapshot(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload []byte
+	}{
+		{name: "malformed", payload: []byte("{not json")},
+		{name: "newer version", payload: []byte(`{"version":2,"counters":[]}`)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			snapshotPath := filepath.Join(dir, snapshotFileName)
+			if errWrite := os.WriteFile(snapshotPath, test.payload, 0o600); errWrite != nil {
+				t.Fatalf("WriteFile() error = %v", errWrite)
+			}
+			if gate, errNew := New(&config.Config{AuthDir: dir}, nil, dir); errNew == nil || gate != nil {
+				t.Fatalf("New() = %#v, %v; want fail-closed error", gate, errNew)
+			}
+			persisted, errRead := os.ReadFile(snapshotPath)
+			if errRead != nil {
+				t.Fatalf("ReadFile() error = %v", errRead)
+			}
+			if string(persisted) != string(test.payload) {
+				t.Fatalf("snapshot changed to %q, want %q", persisted, test.payload)
+			}
+		})
+	}
+}
+
 func TestGateAdmitConcurrentlyRespectsRequestBudget(t *testing.T) {
 	requestLimit := int64(200)
 	cfg := &config.Config{ProviderQuota: map[string]config.ProviderQuota{"codex": {
