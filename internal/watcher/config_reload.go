@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"os"
 	"reflect"
+	"strings"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -99,8 +100,14 @@ func (w *Watcher) reloadConfig() bool {
 		newConfig.AuthDir = w.mirroredAuthDir
 	} else {
 		if resolvedAuthDir, errResolveAuthDir := util.ResolveAuthDir(newConfig.AuthDir); errResolveAuthDir != nil {
-			log.Errorf("failed to resolve auth directory from config: %v", errResolveAuthDir)
-			return false
+			retainedAuthDir := w.authDir
+			w.clientsMutex.RLock()
+			if w.config != nil && strings.TrimSpace(w.config.AuthDir) != "" {
+				retainedAuthDir = w.config.AuthDir
+			}
+			w.clientsMutex.RUnlock()
+			newConfig.AuthDir = retainedAuthDir
+			log.Errorf("failed to resolve auth directory from config; keeping %q: %v", retainedAuthDir, errResolveAuthDir)
 		} else {
 			newConfig.AuthDir = resolvedAuthDir
 		}

@@ -202,6 +202,9 @@ func TestGateAliasesWithSameUpstreamShareModelOverrideBudget(t *testing.T) {
 			"provider_key": "openai-compatible-deepseek",
 		},
 	}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("Register() error = %v", errRegister)
+	}
 	gate, errNew := New(cfg, manager, t.TempDir())
 	if errNew != nil {
 		t.Fatalf("New() error = %v", errNew)
@@ -281,13 +284,18 @@ func TestGateAllowsCredentialScopedBaseAndPrefixedOverride(t *testing.T) {
 	}
 	manager := coreauth.NewManager(nil, nil, nil)
 	manager.SetConfig(cfg)
+	baseAuth := &coreauth.Auth{ID: "base", Provider: "codex", FileName: "base.json"}
+	prefixedAuth := &coreauth.Auth{ID: "prefixed", Provider: "codex", Prefix: "team-a", FileName: "prefixed.json"}
+	for _, auth := range []*coreauth.Auth{baseAuth, prefixedAuth} {
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("Register(%s) error = %v", auth.ID, errRegister)
+		}
+	}
 	gate, errNew := New(cfg, manager, t.TempDir())
 	if errNew != nil {
 		t.Fatalf("New() error = %v", errNew)
 	}
 	defer gate.Close()
-	baseAuth := &coreauth.Auth{ID: "base", Provider: "codex", FileName: "base.json"}
-	prefixedAuth := &coreauth.Auth{ID: "prefixed", Provider: "codex", Prefix: "team-a", FileName: "prefixed.json"}
 	base, baseConfigured := gate.resolve(baseAuth, "gpt-5")
 	prefixed, prefixedConfigured := gate.resolve(prefixedAuth, "team-a/gpt-5")
 	if !baseConfigured || !prefixedConfigured || base.schedule != gate.providers["codex"].base || prefixed.schedule != gate.providers["codex"].models["team-a/gpt-5"] {
@@ -312,6 +320,9 @@ func TestGateDetectsPerAuthOAuthAliasConflictBeyondConfiguredRoutes(t *testing.T
 	manager.SetOAuthModelAlias(cfg.OAuthModelAlias)
 	auth := &coreauth.Auth{ID: "oauth", Provider: "codex", FileName: "oauth.json", Attributes: map[string]string{coreauth.AttributeAuthKind: coreauth.AuthKindOAuth}}
 	coreauth.SetOAuthModelAliasesAttribute(auth, []config.OAuthModelAlias{{Name: "gpt-5", Alias: "alias-b"}})
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("Register() error = %v", errRegister)
+	}
 	gate, errNew := New(cfg, manager, t.TempDir())
 	if errNew != nil {
 		t.Fatalf("New() error = %v", errNew)
@@ -339,6 +350,9 @@ func TestGateDoesNotTreatClientOverrideAsUnrelatedUpstreamSchedule(t *testing.T)
 	manager := coreauth.NewManager(nil, nil, nil)
 	manager.SetConfig(cfg)
 	auth := &coreauth.Auth{ID: "api-key", Provider: "codex", Attributes: map[string]string{coreauth.AttributeAuthKind: coreauth.AuthKindAPIKey, coreauth.AttributeAPIKey: "key"}}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("Register() error = %v", errRegister)
+	}
 	gate, errNew := New(cfg, manager, t.TempDir())
 	if errNew != nil {
 		t.Fatalf("New() error = %v", errNew)
@@ -349,6 +363,33 @@ func TestGateDoesNotTreatClientOverrideAsUnrelatedUpstreamSchedule(t *testing.T)
 	}
 	if resolved, configured := gate.resolve(auth, "gpt-5"); !configured || resolved.schedule == nil {
 		t.Fatalf("gpt-5 override missing: %#v", resolved)
+	}
+}
+
+func TestGateFailsClosedForStaleConfiguredAuthRouting(t *testing.T) {
+	one := int64(1)
+	cfg := &config.Config{
+		ProviderQuota: map[string]config.ProviderQuota{"codex": {Models: map[string]config.QuotaWindows{
+			"gpt-5": {Timezone: "UTC", Windows: []config.QuotaWindow{{Name: "override", Start: "00:00", End: "23:59", Budget: &config.QuotaBudget{Requests: &one}}}},
+		}}},
+		CodexKey: []config.CodexKey{{APIKey: "current", Models: []config.CodexModel{{Name: "gpt-5-codex", Alias: "gpt-5"}}}},
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.SetConfig(cfg)
+	auth := &coreauth.Auth{ID: "api-key", Provider: "codex", Attributes: map[string]string{coreauth.AttributeAuthKind: coreauth.AuthKindAPIKey, coreauth.AttributeAPIKey: "current"}}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("Register() error = %v", errRegister)
+	}
+	gate, errNew := New(cfg, manager, t.TempDir())
+	if errNew != nil {
+		t.Fatalf("New() error = %v", errNew)
+	}
+	defer gate.Close()
+	stale := auth.Clone()
+	stale.Attributes[coreauth.AttributeAPIKey] = "stale"
+	resolved, configured := gate.resolve(stale, "gpt-5")
+	if !configured || !resolved.conflict || !resolved.target.RoutingConflict {
+		t.Fatalf("stale route resolved without conflict: %#v, configured=%t", resolved, configured)
 	}
 }
 
@@ -381,6 +422,9 @@ func TestGatePropagatesSingleOverrideAcrossSharedUpstreamAliases(t *testing.T) {
 	auth := &coreauth.Auth{ID: "deepseek-shared-single", Provider: "openai-compatible-deepseek", Attributes: map[string]string{
 		"api_key": "test-key", "compat_name": "deepseek", "provider_key": "openai-compatible-deepseek",
 	}}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("Register() error = %v", errRegister)
+	}
 	gate, errNew := New(cfg, manager, t.TempDir())
 	if errNew != nil {
 		t.Fatalf("New() error = %v", errNew)
@@ -389,6 +433,41 @@ func TestGatePropagatesSingleOverrideAcrossSharedUpstreamAliases(t *testing.T) {
 	now := time.Date(2026, time.August, 21, 12, 0, 0, 0, time.UTC)
 	if _, blocked := gate.BlockedForModel([]*coreauth.Auth{auth}, "alias-b", now); !blocked {
 		t.Fatal("alias without its own override bypassed the shared upstream override")
+	}
+}
+
+func TestGateFailsClosedForSiblingSuffixConflictOnSharedUpstream(t *testing.T) {
+	one, two := int64(1), int64(2)
+	cfg := &config.Config{
+		ProviderQuota: map[string]config.ProviderQuota{"deepseek": {Scope: "credential", Models: map[string]config.QuotaWindows{
+			"alias-a":       {Timezone: "UTC", Windows: []config.QuotaWindow{{Name: "first", Start: "00:00", End: "23:59", Budget: &config.QuotaBudget{Requests: &one}}}},
+			"alias-b":       {Timezone: "UTC", Windows: []config.QuotaWindow{{Name: "first", Start: "00:00", End: "23:59", Budget: &config.QuotaBudget{Requests: &one}}}},
+			"alias-b(high)": {Timezone: "UTC", Windows: []config.QuotaWindow{{Name: "second", Start: "00:00", End: "23:59", Budget: &config.QuotaBudget{Requests: &two}}}},
+		}}},
+		OpenAICompatibility: []config.OpenAICompatibility{{
+			Name: "deepseek",
+			Models: []config.OpenAICompatibilityModel{
+				{Name: "shared", Alias: "alias-a"},
+				{Name: "shared", Alias: "alias-b"},
+			},
+		}},
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.SetConfig(cfg)
+	auth := &coreauth.Auth{ID: "deepseek-suffix-conflict", Provider: "openai-compatible-deepseek", Attributes: map[string]string{
+		"api_key": "test-key", "compat_name": "deepseek", "provider_key": "openai-compatible-deepseek",
+	}}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("Register() error = %v", errRegister)
+	}
+	gate, errNew := New(cfg, manager, t.TempDir())
+	if errNew != nil {
+		t.Fatalf("New() error = %v", errNew)
+	}
+	defer gate.Close()
+	block, blocked := gate.BlockedForModel([]*coreauth.Auth{auth}, "alias-a", time.Date(2026, time.August, 21, 12, 0, 0, 0, time.UTC))
+	if !blocked || block.Window != "configuration-conflict" {
+		t.Fatalf("BlockedForModel() = %#v, %t; want configuration conflict", block, blocked)
 	}
 }
 
@@ -461,7 +540,8 @@ func TestGateMovesPersistenceToReloadedAuthDir(t *testing.T) {
 	}
 }
 
-func TestGateReloadClearsExplicitPersistenceDirectory(t *testing.T) {
+func TestGateReloadPreservesExplicitPersistenceDirectory(t *testing.T) {
+	t.Setenv("HOME", "")
 	authDir := t.TempDir()
 	gate, errNew := New(&config.Config{}, nil, authDir)
 	if errNew != nil {
@@ -470,11 +550,20 @@ func TestGateReloadClearsExplicitPersistenceDirectory(t *testing.T) {
 	if gate.store == nil || gate.authDir != authDir {
 		t.Fatalf("initial store = %#v, authDir = %q", gate.store, gate.authDir)
 	}
-	if errUpdate := gate.Update(&config.Config{}); errUpdate != nil {
+	defer gate.Close()
+	initialStore := gate.store
+	requestLimit := int64(1)
+	if errUpdate := gate.Update(&config.Config{ProviderQuota: map[string]config.ProviderQuota{"codex": {QuotaWindows: config.QuotaWindows{Timezone: "UTC", Windows: []config.QuotaWindow{{Name: "active", Start: "00:00", End: "23:59", Budget: &config.QuotaBudget{Requests: &requestLimit}}}}}}}); errUpdate != nil {
 		t.Fatalf("Update() error = %v", errUpdate)
 	}
-	if gate.store != nil || gate.authDir != "" {
-		t.Fatalf("cleared store = %#v, authDir = %q", gate.store, gate.authDir)
+	if gate.store != initialStore || gate.authDir != authDir || !gate.hasProviders() {
+		t.Fatalf("blank auth-dir update changed store = %#v, authDir = %q, providers = %t", gate.store, gate.authDir, gate.hasProviders())
+	}
+	if errUpdate := gate.Update(&config.Config{AuthDir: "~/unresolvable", ProviderQuota: map[string]config.ProviderQuota{"codex": {QuotaWindows: config.QuotaWindows{Timezone: "UTC", Windows: []config.QuotaWindow{{Name: "updated", Start: "00:00", End: "23:59", Budget: &config.QuotaBudget{Requests: &requestLimit}}}}}}}); errUpdate != nil {
+		t.Fatalf("Update(unresolvable auth-dir) error = %v", errUpdate)
+	}
+	if gate.store != initialStore || gate.authDir != authDir || gate.providers["codex"].base.windows[0].name != "updated" {
+		t.Fatalf("unresolvable auth-dir update = store:%#v authDir:%q provider:%#v", gate.store, gate.authDir, gate.providers["codex"])
 	}
 }
 
@@ -746,6 +835,91 @@ func BenchmarkGateAdmit(b *testing.B) {
 		if !gate.ledger.Settle(reservation, coreusage.Detail{}) {
 			b.Fatal("Settle() = false")
 		}
+	}
+}
+
+func BenchmarkGateResolveDistinctSchedules(b *testing.B) {
+	for _, modelCount := range []int{20, 60, 200} {
+		b.Run(fmt.Sprintf("models-%d", modelCount), func(b *testing.B) {
+			modelQuotas := make(map[string]config.QuotaWindows, modelCount)
+			models := make([]config.OpenAICompatibilityModel, 0, modelCount)
+			for i := 0; i < modelCount; i++ {
+				model := fmt.Sprintf("model-%d", i)
+				limit := int64(i + 1)
+				modelQuotas[model] = config.QuotaWindows{Timezone: "UTC", Windows: []config.QuotaWindow{{Name: "all-day", Start: "00:00", End: "23:59", Budget: &config.QuotaBudget{Requests: &limit}}}}
+				models = append(models, config.OpenAICompatibilityModel{Name: "upstream-" + model, Alias: model})
+			}
+			cfg := &config.Config{
+				ProviderQuota:       map[string]config.ProviderQuota{"benchmark": {Models: modelQuotas}},
+				OpenAICompatibility: []config.OpenAICompatibility{{Name: "benchmark", Models: models}},
+			}
+			manager := coreauth.NewManager(nil, nil, nil)
+			manager.SetConfig(cfg)
+			auth := &coreauth.Auth{ID: "benchmark", Provider: "openai-compatible-benchmark", Attributes: map[string]string{
+				coreauth.AttributeAuthKind: coreauth.AuthKindAPIKey,
+				coreauth.AttributeAPIKey:   "key",
+				"compat_name":              "benchmark",
+				"provider_key":             "openai-compatible-benchmark",
+			}}
+			if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+				b.Fatalf("Register() error = %v", errRegister)
+			}
+			gate, errNew := New(cfg, manager, "")
+			if errNew != nil {
+				b.Fatalf("New() error = %v", errNew)
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				resolved, configured := gate.resolve(auth, "model-0")
+				if !configured || resolved.schedule == nil || resolved.conflict {
+					b.Fatalf("resolve() = %#v, %t", resolved, configured)
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkGateResolveSharedAliases(b *testing.B) {
+	for _, modelCount := range []int{20, 60, 200} {
+		b.Run(fmt.Sprintf("models-%d", modelCount), func(b *testing.B) {
+			limit := int64(1)
+			windows := config.QuotaWindows{Timezone: "UTC", Windows: []config.QuotaWindow{{Name: "all-day", Start: "00:00", End: "23:59", Budget: &config.QuotaBudget{Requests: &limit}}}}
+			modelQuotas := make(map[string]config.QuotaWindows, modelCount)
+			models := make([]config.OpenAICompatibilityModel, 0, modelCount)
+			for i := 0; i < modelCount; i++ {
+				model := fmt.Sprintf("model-%d", i)
+				modelQuotas[model] = windows
+				models = append(models, config.OpenAICompatibilityModel{Name: "shared-upstream", Alias: model})
+			}
+			cfg := &config.Config{
+				ProviderQuota:       map[string]config.ProviderQuota{"benchmark": {Models: modelQuotas}},
+				OpenAICompatibility: []config.OpenAICompatibility{{Name: "benchmark", Models: models}},
+			}
+			manager := coreauth.NewManager(nil, nil, nil)
+			manager.SetConfig(cfg)
+			auth := &coreauth.Auth{ID: "benchmark-shared", Provider: "openai-compatible-benchmark", Attributes: map[string]string{
+				coreauth.AttributeAuthKind: coreauth.AuthKindAPIKey,
+				coreauth.AttributeAPIKey:   "key",
+				"compat_name":              "benchmark",
+				"provider_key":             "openai-compatible-benchmark",
+			}}
+			if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+				b.Fatalf("Register() error = %v", errRegister)
+			}
+			gate, errNew := New(cfg, manager, "")
+			if errNew != nil {
+				b.Fatalf("New() error = %v", errNew)
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				resolved, configured := gate.resolve(auth, "model-0")
+				if !configured || resolved.schedule == nil || resolved.conflict {
+					b.Fatalf("resolve() = %#v, %t", resolved, configured)
+				}
+			}
+		})
 	}
 }
 

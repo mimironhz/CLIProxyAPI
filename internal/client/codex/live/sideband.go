@@ -31,7 +31,8 @@ const (
 	defaultSidebandAPIBaseURL = "wss://api.openai.com/v1"
 	sessionLifetime           = time.Hour
 	maxObservedWebsocketFrame = 1 << 20
-	truncatedQuotaTokenUsage  = int64(maxObservedWebsocketFrame)
+	approximateBytesPerToken  = 4
+	truncatedQuotaTokenUsage  = int64((maxObservedWebsocketFrame + approximateBytesPerToken - 1) / approximateBytesPerToken)
 	maxQuotaTokenUsage        = int64(^uint64(0) >> 1)
 )
 

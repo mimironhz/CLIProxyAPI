@@ -1,6 +1,7 @@
 package config
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"sort"
 	"strings"
@@ -129,6 +130,32 @@ func openAICompatibilityHasProviderQuota(entry *OpenAICompatibility) bool {
 // QuotaRouteGroup maps the client-visible models of one credential routing group
 // to their canonical upstream model or pool identity.
 type QuotaRouteGroup map[string]string
+
+// QuotaRouteKey returns a stable identity for one upstream and its client routes.
+func QuotaRouteKey(upstream string, models []string) string {
+	upstream = strings.ToLower(strings.TrimSpace(upstream))
+	seen := make(map[string]struct{}, len(models))
+	normalized := make([]string, 0, len(models))
+	for _, model := range models {
+		model = strings.ToLower(strings.TrimSpace(model))
+		if model == "" {
+			continue
+		}
+		if _, exists := seen[model]; exists {
+			continue
+		}
+		seen[model] = struct{}{}
+		normalized = append(normalized, model)
+	}
+	sort.Strings(normalized)
+	var identity strings.Builder
+	_, _ = fmt.Fprintf(&identity, "%d:%s", len(upstream), upstream)
+	for _, model := range normalized {
+		_, _ = fmt.Fprintf(&identity, "%d:%s", len(model), model)
+	}
+	sum := sha256.Sum256([]byte(identity.String()))
+	return fmt.Sprintf("%x", sum)
+}
 
 // ConfiguredQuotaRouteGroups returns credential-aware routes used to validate
 // effective base and model-override schedules.

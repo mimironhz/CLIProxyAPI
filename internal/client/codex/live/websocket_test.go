@@ -386,14 +386,23 @@ func TestHandleDirectWebsocketSettlesTerminalTokenUsage(t *testing.T) {
 
 func TestRealtimeQuotaAccumulatorBoundsTruncatedFrames(t *testing.T) {
 	accumulator := &realtimeQuotaAccumulator{}
-	accumulator.Observe([]byte(`{"type":"session.updated"}`), true)
-	accumulator.Observe([]byte(`{"type":"session.updated"}`), true)
-	want := 2 * truncatedQuotaTokenUsage
+	const frameCount = int64(7)
+	payload := make([]byte, maxObservedWebsocketFrame)
+	for range frameCount {
+		accumulator.Observe(payload, true)
+	}
+	want := frameCount * truncatedQuotaTokenUsage
 	if accumulator.detail.InputTokens != want || accumulator.detail.OutputTokens != want || accumulator.detail.TotalTokens != want {
 		t.Fatalf("truncated usage = %+v, want %d per dimension", accumulator.detail, want)
 	}
 	if accumulator.detail.TotalTokens == maxQuotaTokenUsage {
 		t.Fatal("truncated usage exhausted the int64 range")
+	}
+	if truncatedQuotaTokenUsage <= 0 || truncatedQuotaTokenUsage >= 1_000_000 {
+		t.Fatalf("single truncated frame charge = %d, want nonzero and below one million", truncatedQuotaTokenUsage)
+	}
+	if got, wantObservedBytes := want*approximateBytesPerToken, frameCount*maxObservedWebsocketFrame; got != wantObservedBytes {
+		t.Fatalf("truncated token estimate represents %d bytes, want %d", got, wantObservedBytes)
 	}
 }
 

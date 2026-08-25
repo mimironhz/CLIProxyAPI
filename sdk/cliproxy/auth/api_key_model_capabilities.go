@@ -21,9 +21,11 @@ type apiKeyModelCapabilityRoute struct {
 type apiKeyModelCapabilityTable map[string]map[string][]apiKeyModelCapabilityRoute
 
 type apiKeyModelRoutingSnapshot struct {
-	config       *internalconfig.Config
-	aliases      apiKeyModelAliasTable
-	capabilities apiKeyModelCapabilityTable
+	config                 *internalconfig.Config
+	aliases                apiKeyModelAliasTable
+	capabilities           apiKeyModelCapabilityTable
+	quotaRoutes            quotaWindowRouteTable
+	quotaRouteFingerprints map[string]string
 }
 
 func isConfiguredModelRoutingAuth(auth *Auth) bool {

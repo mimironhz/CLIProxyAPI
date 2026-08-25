@@ -10,19 +10,28 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
 
 type providerSchedule struct {
-	name      string
-	scope     string
-	disabled  bool
-	base      *Schedule
-	models    map[string]*Schedule
-	uniform   bool
-	upstreams map[string]*Schedule
-	raw       config.ProviderQuota
+	name              string
+	scope             string
+	disabled          bool
+	base              *Schedule
+	models            map[string]*Schedule
+	modelsByCanonical map[string][]string
+	routes            map[string]compiledProviderRoute
+	canonicalRoutes   map[string]compiledProviderRoute
+	raw               config.ProviderQuota
+}
+
+type compiledProviderRoute struct {
+	schedule     *Schedule
+	override     bool
+	conflict     bool
+	clientModels []string
 }
 
 // Gate implements selection-time quota checks and owns the persistent ledger.
@@ -64,7 +73,7 @@ func New(cfg *config.Config, resolver *coreauth.Manager, authDir string) (*Gate,
 		}
 		ledger.SetOnChange(gate.store.Schedule)
 	}
-	if errUpdate := gate.update(cfg, false); errUpdate != nil {
+	if errUpdate := gate.update(cfg); errUpdate != nil {
 		_ = gate.Close()
 		return nil, errUpdate
 	}
@@ -73,16 +82,19 @@ func New(cfg *config.Config, resolver *coreauth.Manager, authDir string) (*Gate,
 
 // Update atomically swaps compiled schedules while retaining unchanged live instances.
 func (g *Gate) Update(cfg *config.Config) error {
-	return g.update(cfg, true)
+	return g.update(cfg)
 }
 
-func (g *Gate) update(cfg *config.Config, clearEmptyAuthDir bool) error {
+func (g *Gate) update(cfg *config.Config) error {
 	providers, errCompile := compileProviders(cfg)
 	if errCompile != nil {
 		return errCompile
 	}
-	if cfg != nil && (clearEmptyAuthDir || strings.TrimSpace(cfg.AuthDir) != "") {
-		if errStore := g.updateStore(cfg.AuthDir); errStore != nil {
+	if cfg != nil && strings.TrimSpace(cfg.AuthDir) != "" {
+		resolvedAuthDir, errResolveAuthDir := util.ResolveAuthDir(cfg.AuthDir)
+		if errResolveAuthDir != nil {
+			log.WithError(errResolveAuthDir).Warn("keeping previous provider quota-window store after auth-dir resolution failure")
+		} else if errStore := g.updateStore(resolvedAuthDir); errStore != nil {
 			return errStore
 		}
 	}
@@ -270,10 +282,51 @@ func compileProviders(cfg *config.Config) (map[string]*providerSchedule, error) 
 		}
 		providers[name] = compiled
 	}
+	for _, provider := range providers {
+		provider.modelsByCanonical = indexProviderModels(provider.models)
+		provider.canonicalRoutes = compileCanonicalProviderRoutes(provider)
+	}
 	if errAliases := validateSharedUpstreamSchedules(cfg, providers); errAliases != nil {
 		return nil, errAliases
 	}
 	return providers, nil
+}
+
+func compileCanonicalProviderRoutes(provider *providerSchedule) map[string]compiledProviderRoute {
+	routes := make(map[string]compiledProviderRoute, len(provider.modelsByCanonical))
+	for canonical, models := range provider.modelsByCanonical {
+		var selected *Schedule
+		policyKey := ""
+		conflict := false
+		for _, model := range models {
+			schedule := provider.models[model]
+			candidatePolicy := schedulePolicyKey(schedule)
+			if selected == nil {
+				selected = schedule
+				policyKey = candidatePolicy
+				continue
+			}
+			if candidatePolicy != policyKey {
+				conflict = true
+			}
+		}
+		routes[canonical] = compiledProviderRoute{schedule: selected, override: selected != nil, conflict: conflict, clientModels: []string{canonical}}
+	}
+	return routes
+}
+
+func indexProviderModels(models map[string]*Schedule) map[string][]string {
+	indexed := make(map[string][]string)
+	for model := range models {
+		canonical := config.CanonicalQuotaModels(nil, model)
+		if canonical != "" {
+			indexed[canonical] = append(indexed[canonical], model)
+		}
+	}
+	for canonical := range indexed {
+		sort.Strings(indexed[canonical])
+	}
+	return indexed
 }
 
 func validateSharedUpstreamSchedules(cfg *config.Config, providers map[string]*providerSchedule) error {
@@ -326,19 +379,9 @@ func validateSharedUpstreamSchedules(cfg *config.Config, providers map[string]*p
 						return errAdd
 					}
 				}
-			}
-		}
-		provider.uniform = providerSchedulesUniform(provider)
-		if provider.uniform {
-			for _, routes := range routeGroups[providerName] {
-				for model, upstream := range routes {
-					schedule := provider.models[strings.ToLower(strings.TrimSpace(model))]
-					if schedule == nil {
-						schedule = provider.base
-					}
-					if schedule != nil {
-						provider.upstreams[upstream] = schedule
-					}
+				key, route := compileProviderRoute(provider, routes, upstream)
+				if key != "" {
+					provider.routes[key] = route
 				}
 			}
 		}
@@ -346,32 +389,62 @@ func validateSharedUpstreamSchedules(cfg *config.Config, providers map[string]*p
 	return nil
 }
 
-// providerSchedulesUniform proves that unseen per-auth routes cannot introduce
-// a different policy behind an upstream-only cache entry.
-func providerSchedulesUniform(provider *providerSchedule) bool {
-	if provider == nil {
-		return false
+func compileProviderRoute(provider *providerSchedule, routes config.QuotaRouteGroup, upstream string) (string, compiledProviderRoute) {
+	if provider == nil || upstream == "" {
+		return "", compiledProviderRoute{}
 	}
+	clientModels := make([]string, 0)
+	for model, candidateUpstream := range routes {
+		if candidateUpstream == upstream {
+			clientModels = append(clientModels, model)
+		}
+	}
+	if len(clientModels) == 0 {
+		return "", compiledProviderRoute{}
+	}
+	sort.Strings(clientModels)
+	var selected *Schedule
 	policyKey := ""
-	check := func(schedule *Schedule) bool {
-		if schedule == nil {
-			return true
+	conflict := false
+	for _, model := range clientModels {
+		canonical := config.CanonicalQuotaModels(nil, model)
+		route, exists := provider.canonicalRoutes[canonical]
+		if !exists || route.schedule == nil {
+			continue
 		}
-		if policyKey == "" {
-			policyKey = schedulePolicyKey(schedule)
-			return true
+		if route.conflict {
+			conflict = true
 		}
-		return schedulePolicyKey(schedule) == policyKey
-	}
-	if !check(provider.base) {
-		return false
-	}
-	for _, schedule := range provider.models {
-		if !check(schedule) {
-			return false
+		schedule := route.schedule
+		candidatePolicy := schedulePolicyKey(schedule)
+		if selected == nil {
+			selected = schedule
+			policyKey = candidatePolicy
+			continue
+		}
+		if candidatePolicy != policyKey {
+			conflict = true
 		}
 	}
-	return policyKey != ""
+	hasOverride := selected != nil
+	if selected == nil {
+		selected = provider.base
+	}
+	reportedModels := make([]string, 0, len(clientModels))
+	seen := make(map[string]struct{}, len(clientModels))
+	for _, model := range clientModels {
+		canonical := config.CanonicalQuotaModels(nil, model)
+		if canonical == "" {
+			continue
+		}
+		if _, exists := seen[canonical]; exists {
+			continue
+		}
+		seen[canonical] = struct{}{}
+		reportedModels = append(reportedModels, canonical)
+	}
+	sort.Strings(reportedModels)
+	return config.QuotaRouteKey(upstream, clientModels), compiledProviderRoute{schedule: selected, override: hasOverride, conflict: conflict, clientModels: reportedModels}
 }
 
 func schedulePolicyKey(schedule *Schedule) string {
@@ -386,7 +459,7 @@ func compileProvider(name string, raw config.ProviderQuota, defaultScope string,
 	if scope == "" {
 		scope = defaultScope
 	}
-	provider := &providerSchedule{name: name, scope: scope, disabled: disabled, models: make(map[string]*Schedule), upstreams: make(map[string]*Schedule), raw: raw}
+	provider := &providerSchedule{name: name, scope: scope, disabled: disabled, models: make(map[string]*Schedule), routes: make(map[string]compiledProviderRoute), raw: raw}
 	if len(raw.Windows) > 0 {
 		base, errBase := compileProviderSchedule(name, name+"|provider", raw.QuotaWindows)
 		if errBase != nil {
@@ -422,11 +495,12 @@ func inheritQuotaWindows(child, parent config.QuotaWindows) config.QuotaWindows 
 }
 
 type resolvedTarget struct {
-	target    coreauth.QuotaWindowTarget
-	provider  *providerSchedule
-	schedule  *Schedule
-	budgetKey string
-	conflict  bool
+	target       coreauth.QuotaWindowTarget
+	provider     *providerSchedule
+	schedule     *Schedule
+	budgetKey    string
+	clientModels []string
+	conflict     bool
 }
 
 // The gate is installed even when unconfigured so hot reload can enable quota
@@ -455,7 +529,10 @@ func (g *Gate) resolveWith(auth *coreauth.Auth, model string, policy budgetPolic
 	if provider == nil {
 		return resolvedTarget{target: target}, false
 	}
-	schedule, conflict := g.sharedUpstreamSchedule(provider, auth, target)
+	if target.RoutingConflict {
+		return resolvedTarget{target: target, provider: provider, conflict: true}, true
+	}
+	schedule, conflict, clientModels := sharedUpstreamSchedule(provider, target)
 	if conflict {
 		return resolvedTarget{target: target, provider: provider, conflict: true}, true
 	}
@@ -475,7 +552,7 @@ func (g *Gate) resolveWith(auth *coreauth.Auth, model string, policy budgetPolic
 	budgetKey := provider.scope + "|" + providerName + "|" + unit + "|" + strings.ToLower(strings.TrimSpace(target.UpstreamModel))
 	policyKey := schedulePolicyKey(schedule)
 	conflict = policy(budgetKey, policyKey)
-	return resolvedTarget{target: target, provider: provider, schedule: schedule, budgetKey: budgetKey, conflict: conflict}, true
+	return resolvedTarget{target: target, provider: provider, schedule: schedule, budgetKey: budgetKey, clientModels: clientModels, conflict: conflict}, true
 }
 
 // resolve records budget policies; use it only on admission paths.
@@ -559,29 +636,71 @@ func (g *Gate) observedBudgetPolicy() budgetPolicyFunc {
 	}
 }
 
-func (g *Gate) sharedUpstreamSchedule(provider *providerSchedule, auth *coreauth.Auth, target coreauth.QuotaWindowTarget) (*Schedule, bool) {
-	if g == nil || g.resolver == nil || provider == nil {
-		return nil, false
+func sharedUpstreamSchedule(provider *providerSchedule, target coreauth.QuotaWindowTarget) (*Schedule, bool, []string) {
+	if provider == nil {
+		return nil, false, nil
 	}
-	if provider.uniform {
-		if schedule := provider.models[strings.ToLower(strings.TrimSpace(target.ClientModel))]; schedule != nil {
-			return schedule, false
-		}
-		if schedule := provider.upstreams[strings.ToLower(strings.TrimSpace(target.UpstreamModel))]; schedule != nil {
-			return schedule, false
+	if target.RouteKey != "" {
+		if route, exists := provider.routes[target.RouteKey]; exists {
+			canonical := config.CanonicalQuotaModels(nil, target.ClientModel)
+			direct, directExists := provider.canonicalRoutes[canonical]
+			if directExists {
+				if route.conflict || direct.conflict {
+					return nil, true, route.clientModels
+				}
+				if !route.override {
+					return direct.schedule, false, route.clientModels
+				}
+				if direct.schedule != nil && schedulePolicyKey(direct.schedule) != schedulePolicyKey(route.schedule) {
+					return nil, true, route.clientModels
+				}
+			}
+			return route.schedule, route.conflict, route.clientModels
 		}
 	}
-	models := make([]string, 0, len(provider.models))
-	for model := range provider.models {
+	canonicalModels := make(map[string]struct{}, len(target.SharedClientModels)+1)
+	for _, model := range append([]string{target.ClientModel}, target.SharedClientModels...) {
+		if canonical := config.CanonicalQuotaModels(nil, model); canonical != "" {
+			canonicalModels[canonical] = struct{}{}
+		}
+	}
+	if len(canonicalModels) == 1 {
+		for canonical := range canonicalModels {
+			if route, exists := provider.canonicalRoutes[canonical]; exists {
+				return route.schedule, route.conflict, route.clientModels
+			}
+		}
+	}
+	modelSet := make(map[string]struct{}, len(target.SharedClientModels)+1)
+	clientModelSet := make(map[string]struct{}, len(target.SharedClientModels)+1)
+	for _, model := range append([]string{target.ClientModel}, target.SharedClientModels...) {
+		model = strings.ToLower(strings.TrimSpace(model))
+		if model == "" {
+			continue
+		}
+		if canonical := config.CanonicalQuotaModels(nil, model); canonical != "" {
+			clientModelSet[canonical] = struct{}{}
+		}
+		modelSet[model] = struct{}{}
+		for _, configuredModel := range provider.modelsByCanonical[config.CanonicalQuotaModels(nil, model)] {
+			modelSet[configuredModel] = struct{}{}
+		}
+	}
+	models := make([]string, 0, len(modelSet))
+	for model := range modelSet {
 		models = append(models, model)
 	}
 	sort.Strings(models)
+	clientModels := make([]string, 0, len(clientModelSet))
+	for model := range clientModelSet {
+		clientModels = append(clientModels, model)
+	}
+	sort.Strings(clientModels)
 	var selected *Schedule
 	selectedPolicy := ""
 	for _, model := range models {
 		schedule := provider.models[model]
-		candidate := g.resolver.ResolveQuotaWindowTarget(auth, model)
-		if !strings.EqualFold(candidate.Provider, target.Provider) || !strings.EqualFold(candidate.UpstreamModel, target.UpstreamModel) {
+		if schedule == nil {
 			continue
 		}
 		policy := schedulePolicyKey(schedule)
@@ -591,10 +710,10 @@ func (g *Gate) sharedUpstreamSchedule(provider *providerSchedule, auth *coreauth
 			continue
 		}
 		if selectedPolicy != policy {
-			return nil, true
+			return nil, true, clientModels
 		}
 	}
-	return selected, false
+	return selected, false, clientModels
 }
 
 type keyBlock struct {
@@ -885,12 +1004,9 @@ func (g *Gate) admissionCandidates(selected *coreauth.Auth, model string) []*cor
 
 func (g *Gate) clientModelsSharingBudget(auth *coreauth.Auth, resolved resolvedTarget) []string {
 	models := map[string]struct{}{resolved.target.ClientModel: {}}
-	if resolved.provider != nil {
-		for model := range resolved.provider.models {
-			target := g.resolver.ResolveQuotaWindowTarget(auth, model)
-			if strings.EqualFold(target.Provider, resolved.target.Provider) && strings.EqualFold(target.UpstreamModel, resolved.target.UpstreamModel) {
-				models[target.ClientModel] = struct{}{}
-			}
+	for _, model := range resolved.clientModels {
+		if strings.TrimSpace(model) != "" {
+			models[model] = struct{}{}
 		}
 	}
 	if auth != nil {

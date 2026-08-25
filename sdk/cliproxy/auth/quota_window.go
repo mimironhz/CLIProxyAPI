@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -74,12 +75,23 @@ type QuotaWindowCountTokensMetering interface {
 
 // QuotaWindowTarget is the credential-aware billing identity used by quota gates.
 type QuotaWindowTarget struct {
-	Provider      string
-	ClientModel   string
-	UpstreamModel string
-	Credential    string
-	AuthID        string
+	Provider           string
+	ClientModel        string
+	SharedClientModels []string
+	UpstreamModel      string
+	Credential         string
+	AuthID             string
+	RoutingConflict    bool
+	RouteKey           string
 }
+
+type quotaWindowAuthRoutes struct {
+	byClient            map[string]string
+	byUpstream          map[string][]string
+	routeKeysByUpstream map[string]string
+}
+
+type quotaWindowRouteTable map[string]quotaWindowAuthRoutes
 
 type quotaWindowReservationContextKey struct{}
 type quotaWindowRouteModelContextKey struct{}
@@ -331,7 +343,20 @@ func (m *Manager) ResolveQuotaWindowTarget(auth *Auth, routeModel string) QuotaW
 	}
 	target.Provider = provider
 
-	aliasResult := m.resolveExecutionAliasResultForRequestedWithRouting(routing, auth, requestedModel)
+	compiledUpstream := ""
+	routeFingerprint := routing.quotaRouteFingerprints[auth.ID]
+	routeFingerprintMatches := routeFingerprint != "" && routeFingerprint == quotaWindowRoutingFingerprint(auth)
+	if routeFingerprint != "" && !routeFingerprintMatches {
+		target.RoutingConflict = true
+	}
+	if routeFingerprintMatches {
+		routes := routing.quotaRoutes[auth.ID]
+		compiledUpstream = routes.byClient[strings.ToLower(strings.TrimSpace(target.ClientModel))]
+	}
+	aliasResult := homeForceMappingAliasResult(auth, requestedModel)
+	if !target.RoutingConflict && !aliasResult.ForceMapping && compiledUpstream == "" {
+		aliasResult = m.resolveExecutionAliasResultForRequestedWithRouting(routing, auth, requestedModel)
+	}
 	poolModel := executionAliasPoolModel(auth, requestedModel, aliasResult)
 	candidates := []string(nil)
 	if auth.Attributes != nil {
@@ -339,7 +364,10 @@ func (m *Manager) ResolveQuotaWindowTarget(auth *Auth, routeModel string) QuotaW
 			candidates = []string{homeModel}
 		}
 	}
-	if len(candidates) == 0 {
+	if len(candidates) == 0 && compiledUpstream != "" {
+		candidates = []string{compiledUpstream}
+	}
+	if len(candidates) == 0 && !target.RoutingConflict {
 		if pool := resolveOpenAICompatUpstreamModelPool(routing.config, auth, poolModel); len(pool) > 0 {
 			candidates = append(candidates, pool...)
 		} else {
@@ -351,6 +379,7 @@ func (m *Manager) ResolveQuotaWindowTarget(auth *Auth, routeModel string) QuotaW
 		}
 	}
 	target.UpstreamModel = canonicalQuotaModels(candidates, requestedModel)
+	target.SharedClientModels, target.RouteKey = m.quotaWindowSharedClientModels(routing, auth, routeModel, target.ClientModel, target.UpstreamModel)
 
 	credentialSource := strings.TrimSpace(cooldownAuthFile(auth))
 	if credentialSource == "" {
@@ -365,6 +394,220 @@ func (m *Manager) ResolveQuotaWindowTarget(auth *Auth, routeModel string) QuotaW
 
 func canonicalQuotaModels(models []string, fallback string) string {
 	return internalconfig.CanonicalQuotaModels(models, fallback)
+}
+
+func quotaWindowRoutingFingerprint(auth *Auth) string {
+	if auth == nil {
+		return ""
+	}
+	hash := sha256.New()
+	write := func(value string) {
+		_, _ = hash.Write([]byte(strconv.Itoa(len(value))))
+		_, _ = hash.Write([]byte{':'})
+		_, _ = hash.Write([]byte(value))
+	}
+	write(auth.ID)
+	write(auth.Provider)
+	write(auth.Prefix)
+	write(auth.FileName)
+	write(auth.ProxyURL)
+	write(auth.AuthKind())
+	write(auth.AuthSourceKind())
+	keys := make([]string, 0, len(auth.Attributes))
+	for key := range auth.Attributes {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		write(key)
+		write(auth.Attributes[key])
+	}
+	return hex.EncodeToString(hash.Sum(nil))
+}
+
+func compileQuotaWindowRoutesForAuth(cfg *internalconfig.Config, auth *Auth) quotaWindowAuthRoutes {
+	if cfg == nil || auth == nil || !isConfiguredModelRoutingAuth(auth) {
+		return quotaWindowAuthRoutes{}
+	}
+	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+	switch provider {
+	case "gemini":
+		if entry := resolveGeminiAPIKeyConfig(cfg, auth); entry != nil {
+			return compileQuotaWindowRoutes(auth.Prefix, entry.Models)
+		}
+	case "gemini-interactions":
+		if entry := resolveInteractionsAPIKeyConfig(cfg, auth); entry != nil {
+			return compileQuotaWindowRoutes(auth.Prefix, entry.Models)
+		}
+	case "claude":
+		if entry := resolveClaudeAPIKeyConfig(cfg, auth); entry != nil {
+			return compileQuotaWindowRoutes(auth.Prefix, entry.Models)
+		}
+	case "codex":
+		if entry := resolveCodexAPIKeyConfig(cfg, auth); entry != nil {
+			return compileQuotaWindowRoutes(auth.Prefix, entry.Models)
+		}
+	case "xai":
+		if entry := resolveXAIAPIKeyConfig(cfg, auth); entry != nil {
+			return compileQuotaWindowRoutes(auth.Prefix, entry.Models)
+		}
+	case "vertex":
+		if entry := resolveVertexAPIKeyConfig(cfg, auth); entry != nil {
+			return compileQuotaWindowRoutes(auth.Prefix, entry.Models)
+		}
+	default:
+		providerKey := ""
+		compatName := ""
+		if auth.Attributes != nil {
+			providerKey = strings.TrimSpace(auth.Attributes["provider_key"])
+			compatName = strings.TrimSpace(auth.Attributes["compat_name"])
+		}
+		if entry := resolveOpenAICompatConfigForAuth(cfg, auth, providerKey, compatName); entry != nil {
+			return compileQuotaWindowRoutes(auth.Prefix, entry.Models)
+		}
+	}
+	return quotaWindowAuthRoutes{}
+}
+
+func compileQuotaWindowRoutes[T interface {
+	GetName() string
+	GetAlias() string
+}](prefix string, models []T) quotaWindowAuthRoutes {
+	grouped := make(map[string][]string)
+	clientOrder := make([]string, 0, len(models))
+	for i := range models {
+		clientModel := strings.TrimSpace(models[i].GetAlias())
+		if clientModel == "" {
+			clientModel = strings.TrimSpace(models[i].GetName())
+		}
+		clientModel = prefixedQuotaWindowClientModel(prefix, clientModel)
+		if clientModel != "" {
+			if _, exists := grouped[clientModel]; !exists {
+				clientOrder = append(clientOrder, clientModel)
+			}
+			grouped[clientModel] = append(grouped[clientModel], models[i].GetName())
+		}
+	}
+	routes := quotaWindowAuthRoutes{byClient: make(map[string]string), byUpstream: make(map[string][]string), routeKeysByUpstream: make(map[string]string)}
+	for _, clientModel := range clientOrder {
+		upstreams := grouped[clientModel]
+		upstream := internalconfig.CanonicalQuotaModels(upstreams, clientModel)
+		if upstream != "" {
+			routes.byClient[clientModel] = upstream
+			canonicalClient := internalconfig.CanonicalQuotaModels(nil, clientModel)
+			if _, exists := routes.byClient[canonicalClient]; !exists {
+				routes.byClient[canonicalClient] = upstream
+			}
+			routes.byUpstream[upstream] = append(routes.byUpstream[upstream], clientModel)
+		}
+	}
+	for upstream := range routes.byUpstream {
+		sort.Strings(routes.byUpstream[upstream])
+		routes.routeKeysByUpstream[upstream] = internalconfig.QuotaRouteKey(upstream, routes.byUpstream[upstream])
+	}
+	return routes
+}
+
+func prefixedQuotaWindowClientModel(prefix, model string) string {
+	prefix = strings.Trim(strings.TrimSpace(prefix), "/")
+	model = strings.TrimLeft(strings.TrimSpace(model), "/")
+	if prefix != "" && model != "" {
+		model = prefix + "/" + model
+	}
+	return strings.ToLower(model)
+}
+
+func (m *Manager) quotaWindowSharedClientModels(routing *apiKeyModelRoutingSnapshot, auth *Auth, routeModel, clientModel, upstreamModel string) ([]string, string) {
+	upstreamModel = strings.ToLower(strings.TrimSpace(upstreamModel))
+	if isConfiguredModelRoutingAuth(auth) && routing != nil && auth != nil {
+		routes := routing.quotaRoutes[auth.ID]
+		if key := routes.routeKeysByUpstream[upstreamModel]; key != "" {
+			return nil, key
+		}
+	}
+	seen := make(map[string]struct{})
+	models := make([]string, 0, 4)
+	add := func(model string) {
+		model = strings.ToLower(strings.TrimSpace(model))
+		if model == "" {
+			return
+		}
+		if _, exists := seen[model]; exists {
+			return
+		}
+		seen[model] = struct{}{}
+		models = append(models, model)
+	}
+	add(routeModel)
+	add(clientModel)
+	if isConfiguredModelRoutingAuth(auth) {
+		if routing != nil && auth != nil {
+			for _, model := range routing.quotaRoutes[auth.ID].byUpstream[upstreamModel] {
+				add(model)
+			}
+		}
+	} else {
+		oauthModels, key, complete := m.oauthQuotaWindowClientModels(auth, upstreamModel)
+		if complete {
+			return nil, key
+		}
+		for _, model := range oauthModels {
+			add(model)
+		}
+	}
+	sort.Strings(models)
+	return models, ""
+}
+
+func (m *Manager) oauthQuotaWindowClientModels(auth *Auth, upstreamModel string) ([]string, string, bool) {
+	if m == nil || auth == nil || upstreamModel == "" {
+		return nil, "", false
+	}
+	channel := modelAliasChannel(auth)
+	if channel == "" {
+		return nil, "", false
+	}
+	perAuth := make(map[string]string)
+	for _, entry := range OAuthModelAliasesFromAttributes(authAttributes(auth)) {
+		alias := strings.ToLower(strings.TrimSpace(entry.Alias))
+		if alias == "" {
+			continue
+		}
+		if _, exists := perAuth[alias]; !exists {
+			perAuth[alias] = internalconfig.CanonicalQuotaModels(nil, entry.Name)
+		}
+	}
+	table, _ := m.oauthModelAlias.Load().(*oauthModelAliasTable)
+	if len(perAuth) == 0 && table != nil {
+		models := table.quotaRoutes[channel][upstreamModel]
+		if key := table.quotaRouteKeys[channel][upstreamModel]; key != "" {
+			return models, key, true
+		}
+	}
+	models := make([]string, 0, len(perAuth)+4)
+	seen := make(map[string]struct{})
+	add := func(model string) {
+		if _, exists := seen[model]; exists {
+			return
+		}
+		seen[model] = struct{}{}
+		models = append(models, model)
+	}
+	if table != nil {
+		for _, alias := range table.quotaRoutes[channel][upstreamModel] {
+			if overridden, exists := perAuth[alias]; exists && overridden != upstreamModel {
+				continue
+			}
+			add(alias)
+		}
+	}
+	for alias, upstream := range perAuth {
+		if upstream == upstreamModel {
+			add(alias)
+		}
+	}
+	sort.Strings(models)
+	return models, "", false
 }
 
 // QuotaWindowCooldown reports the ordinary cooldown state for a candidate set.
