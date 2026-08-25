@@ -123,9 +123,15 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 			AuthType:  authType,
 			AuthValue: authValue,
 		})
+		attemptCtx, errQuota := cliproxyauth.QuotaWindowContextForUpstreamAttempt(ctx)
+		if errQuota != nil {
+			return cliproxyexecutor.Response{}, errQuota
+		}
+		httpReq = httpReq.WithContext(attemptCtx)
 
 		httpResp, errDo := httpClient.Do(httpReq)
 		if errDo != nil {
+			cliproxyauth.FinishQuotaWindowUpstreamAttempt(attemptCtx)
 			helps.RecordAPIResponseError(ctx, e.cfg, errDo)
 			if errors.Is(errDo, context.Canceled) || errors.Is(errDo, context.DeadlineExceeded) {
 				return cliproxyexecutor.Response{}, errDo
@@ -146,9 +152,11 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 			log.Errorf("antigravity executor: close response body error: %v", errClose)
 		}
 		if errRead != nil {
+			cliproxyauth.FinishQuotaWindowUpstreamAttempt(attemptCtx)
 			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 			return cliproxyexecutor.Response{}, errRead
 		}
+		cliproxyauth.FinishQuotaWindowUpstreamAttempt(attemptCtx)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, bodyBytes)
 
 		if httpResp.StatusCode >= http.StatusOK && httpResp.StatusCode < http.StatusMultipleChoices {

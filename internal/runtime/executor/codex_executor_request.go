@@ -495,12 +495,15 @@ func normalizeCodexParallelToolCallsForTools(body []byte) []byte {
 }
 
 func publishCodexImageToolUsage(ctx context.Context, reporter *helps.UsageReporter, body []byte, completedData []byte) {
-	detail, ok := helps.ParseCodexImageToolUsage(completedData)
-	if !ok {
+	primary, primaryOK := helps.ParseCodexUsage(completedData)
+	additional, additionalOK := helps.ParseCodexImageToolUsage(completedData)
+	if !additionalOK {
+		if primaryOK {
+			reporter.Publish(ctx, primary)
+		}
 		return
 	}
-	reporter.EnsurePublished(ctx)
-	reporter.PublishAdditionalModel(ctx, codexImageGenerationToolModel(body), detail)
+	reporter.PublishWithAdditionalModel(ctx, primary, codexImageGenerationToolModel(body), additional)
 }
 
 func codexImageGenerationToolModel(body []byte) string {

@@ -63,6 +63,14 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	return cliproxyexecutor.Response{Payload: out}, nil
 }
 
+func (e *ClaudeExecutor) QuotaWindowCountTokensUsesUpstream(auth *cliproxyauth.Auth) bool {
+	apiKey, baseURL := claudeCreds(auth)
+	if baseURL == "" {
+		baseURL = "https://api.anthropic.com"
+	}
+	return shouldUseClaudeUpstreamTokenCount(apiKey, baseURL)
+}
+
 type claudeTokenCountValidationError struct {
 	statusErr
 }

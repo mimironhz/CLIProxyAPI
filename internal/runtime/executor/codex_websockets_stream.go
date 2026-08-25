@@ -34,7 +34,8 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	}
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
-	defer reporter.TrackFailure(ctx, &err)
+	usageCtx := ctx
+	defer func() { reporter.TrackFailure(usageCtx, &err) }()
 
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
@@ -125,6 +126,11 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	var closer *websocketConnectionCloser
 	var respHS *http.Response
 	var errDial error
+	attemptCtx, errQuota := cliproxyauth.QuotaWindowContextForUpstreamAttempt(ctx)
+	if errQuota != nil {
+		return nil, errQuota
+	}
+	usageCtx = attemptCtx
 	if cliproxyexecutor.RequiredUpstreamWebsocket(ctx) {
 		conn, closer = existingWebsocketSessionConn(sess, authID, wsURL)
 		if conn == nil {
@@ -134,7 +140,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			return nil, cliproxyexecutor.NewUpstreamWebsocketReplayRequiredError()
 		}
 	} else {
-		conn, closer, respHS, errDial = e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
+		conn, closer, respHS, errDial = e.ensureUpstreamConn(attemptCtx, auth, sess, authID, wsURL, wsHeaders)
 	}
 	var upstreamHeaders http.Header
 	if respHS != nil {
@@ -152,7 +158,13 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			if opts.ExecutionLifecycle != nil || cliproxyexecutor.DownstreamWebsocket(ctx) {
 				return nil, statusErr{code: respHS.StatusCode, msg: string(bodyErr)}
 			}
-			return e.CodexExecutor.ExecuteStream(ctx, auth, req, opts)
+			cliproxyauth.FinishQuotaWindowUpstreamAttempt(attemptCtx)
+			fallbackCtx, errFallbackQuota := cliproxyauth.QuotaWindowContextForUpstreamAttempt(ctx)
+			if errFallbackQuota != nil {
+				return nil, errFallbackQuota
+			}
+			usageCtx = fallbackCtx
+			return e.CodexExecutor.ExecuteStream(fallbackCtx, auth, req, opts)
 		}
 		if respHS != nil && respHS.StatusCode > 0 {
 			if sess != nil {
@@ -207,7 +219,13 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			}
 
 			// Retry once with a new websocket connection for the same execution session.
-			connRetry, closerRetry, respHSRetry, errDialRetry := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
+			cliproxyauth.FinishQuotaWindowUpstreamAttempt(attemptCtx)
+			retryCtx, errRetryQuota := cliproxyauth.QuotaWindowContextForUpstreamAttempt(ctx)
+			if errRetryQuota != nil {
+				return nil, errRetryQuota
+			}
+			usageCtx = retryCtx
+			connRetry, closerRetry, respHSRetry, errDialRetry := e.ensureUpstreamConn(retryCtx, auth, sess, authID, wsURL, wsHeaders)
 			if errDialRetry != nil || connRetry == nil {
 				closeHTTPResponseBody(respHSRetry, "codex websockets executor: close handshake response body error")
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "dial_retry", errDialRetry)
@@ -264,6 +282,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
+		defer reporter.EnsurePublished(usageCtx)
 		terminateReason := "completed"
 		var terminateErr error
 
@@ -316,7 +335,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				terminateReason = "read_error"
 				terminateErr = mappedErr
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "read", mappedErr)
-				reporter.PublishFailure(ctx, mappedErr)
+				reporter.PublishFailure(usageCtx, mappedErr)
 				_ = send(cliproxyexecutor.StreamChunk{Err: mappedErr})
 				return
 			}
@@ -326,7 +345,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					terminateReason = "unexpected_binary"
 					terminateErr = err
 					helps.RecordAPIWebsocketError(ctx, e.cfg, "unexpected_binary", err)
-					reporter.PublishFailure(ctx, err)
+					reporter.PublishFailure(usageCtx, err)
 					if sess != nil {
 						e.invalidateUpstreamConn(sess, conn, "unexpected_binary", err)
 					}
@@ -354,12 +373,12 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				if errClearReplay := clearCodexReasoningReplayOnWebsocketError(ctx, replayScope, payload); errClearReplay != nil {
 					terminateErr = errClearReplay
 					helps.RecordAPIWebsocketError(ctx, e.cfg, "replay_clear_error", errClearReplay)
-					reporter.PublishFailure(ctx, errClearReplay)
+					reporter.PublishFailure(usageCtx, errClearReplay)
 					_ = send(cliproxyexecutor.StreamChunk{Err: errClearReplay})
 					return
 				}
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", wsErr)
-				reporter.PublishFailure(ctx, wsErr)
+				reporter.PublishFailure(usageCtx, wsErr)
 				_ = send(cliproxyexecutor.StreamChunk{Err: wsErr})
 				return
 			}
@@ -373,12 +392,12 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
 					terminateErr = errClearReplay
 					helps.RecordAPIWebsocketError(ctx, e.cfg, "replay_clear_error", errClearReplay)
-					reporter.PublishFailure(ctx, errClearReplay)
+					reporter.PublishFailure(usageCtx, errClearReplay)
 					_ = send(cliproxyexecutor.StreamChunk{Err: errClearReplay})
 					return
 				}
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", streamErr)
-				reporter.PublishFailure(ctx, streamErr)
+				reporter.PublishFailure(usageCtx, streamErr)
 				_ = send(cliproxyexecutor.StreamChunk{Err: streamErr})
 				return
 			}
@@ -393,9 +412,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				completedPayload = normalizeCodexWebsocketCompletion(completedPayload)
 				completedPayload = patchCodexCompletedOutput(completedPayload, outputItemsByIndex, outputItemsFallback)
 				cacheCodexReasoningReplayFromCompleted(replayScope, completedPayload)
-				if detail, ok := helps.ParseCodexUsage(completedPayload); ok {
-					reporter.Publish(ctx, detail)
-				}
+				publishCodexImageToolUsage(usageCtx, reporter, clientBody, completedPayload)
 			}
 
 			clientPayload := applyCodexIdentityExposeResponsePayload(payload, identityState)

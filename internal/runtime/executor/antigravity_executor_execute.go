@@ -42,7 +42,8 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	}
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
-	defer reporter.TrackFailure(ctx, &err)
+	usageCtx := ctx
+	defer func() { reporter.TrackFailure(usageCtx, &err) }()
 
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
@@ -116,6 +117,13 @@ attemptLoop:
 				err = errReq
 				return resp, err
 			}
+			attemptCtx, errQuota := cliproxyauth.QuotaWindowContextForUpstreamAttempt(ctx)
+			if errQuota != nil {
+				err = errQuota
+				return resp, err
+			}
+			usageCtx = attemptCtx
+			httpReq = httpReq.WithContext(attemptCtx)
 
 			httpResp, errDo := httpClient.Do(httpReq)
 			if errDo != nil {
@@ -128,6 +136,7 @@ attemptLoop:
 				lastErr = errDo
 				if idx+1 < len(baseURLs) {
 					log.Debugf("antigravity executor: request error on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
+					cliproxyauth.FinishQuotaWindowUpstreamAttempt(attemptCtx)
 					continue
 				}
 				err = errDo
@@ -158,6 +167,7 @@ attemptLoop:
 								return resp, errWait
 							}
 						}
+						cliproxyauth.FinishQuotaWindowUpstreamAttempt(attemptCtx)
 						continue attemptLoop
 					}
 				case antigravity429DecisionShortCooldownSwitchAuth:
@@ -183,6 +193,7 @@ attemptLoop:
 				lastErr = nil
 				if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) {
 					log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
+					cliproxyauth.FinishQuotaWindowUpstreamAttempt(attemptCtx)
 					continue
 				}
 				if antigravityShouldRetryTransientResourceExhausted429(httpResp.StatusCode, bodyBytes) && attempt+1 < attempts {
@@ -191,11 +202,13 @@ attemptLoop:
 					if errWait := antigravityWait(ctx, delay); errWait != nil {
 						return resp, errWait
 					}
+					cliproxyauth.FinishQuotaWindowUpstreamAttempt(attemptCtx)
 					continue attemptLoop
 				}
 				if antigravityShouldRetryNoCapacity(httpResp.StatusCode, bodyBytes) {
 					if idx+1 < len(baseURLs) {
 						log.Debugf("antigravity executor: no capacity on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
+						cliproxyauth.FinishQuotaWindowUpstreamAttempt(attemptCtx)
 						continue
 					}
 					if attempt+1 < attempts {
@@ -204,6 +217,7 @@ attemptLoop:
 						if errWait := antigravityWait(ctx, delay); errWait != nil {
 							return resp, errWait
 						}
+						cliproxyauth.FinishQuotaWindowUpstreamAttempt(attemptCtx)
 						continue attemptLoop
 					}
 				}
@@ -214,6 +228,7 @@ attemptLoop:
 						if errWait := antigravityWait(ctx, delay); errWait != nil {
 							return resp, errWait
 						}
+						cliproxyauth.FinishQuotaWindowUpstreamAttempt(attemptCtx)
 						continue attemptLoop
 					}
 				}
@@ -231,11 +246,11 @@ attemptLoop:
 			}
 			cacheAntigravityReasoningReplayFromResponse(ctx, replayScope, requestPayload, bodyBytes)
 			bodyBytes = e.resolveWebSearchGroundingURLs(ctx, auth, from, originalPayload, translated, bodyBytes)
-			reporter.Publish(ctx, helps.ParseAntigravityUsage(bodyBytes))
+			reporter.Publish(attemptCtx, helps.ParseAntigravityUsage(bodyBytes))
 			var param any
 			converted := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, bodyBytes, &param)
 			resp = cliproxyexecutor.Response{Payload: converted, Headers: httpResp.Header.Clone()}
-			reporter.EnsurePublished(ctx)
+			reporter.EnsurePublished(attemptCtx)
 			return resp, nil
 		}
 
@@ -265,7 +280,8 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 	}
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
-	defer reporter.TrackFailure(ctx, &err)
+	usageCtx := ctx
+	defer func() { reporter.TrackFailure(usageCtx, &err) }()
 
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
@@ -339,6 +355,13 @@ attemptLoop:
 				err = errReq
 				return resp, err
 			}
+			attemptCtx, errQuota := cliproxyauth.QuotaWindowContextForUpstreamAttempt(ctx)
+			if errQuota != nil {
+				err = errQuota
+				return resp, err
+			}
+			usageCtx = attemptCtx
+			httpReq = httpReq.WithContext(attemptCtx)
 
 			httpResp, errDo := httpClient.Do(httpReq)
 			if errDo != nil {
@@ -351,6 +374,7 @@ attemptLoop:
 				lastErr = errDo
 				if idx+1 < len(baseURLs) {
 					log.Debugf("antigravity executor: request error on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
+					cliproxyauth.FinishQuotaWindowUpstreamAttempt(attemptCtx)
 					continue
 				}
 				err = errDo
@@ -377,6 +401,7 @@ attemptLoop:
 					lastErr = errRead
 					if idx+1 < len(baseURLs) {
 						log.Debugf("antigravity executor: read error on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
+						cliproxyauth.FinishQuotaWindowUpstreamAttempt(attemptCtx)
 						continue
 					}
 					err = errRead
@@ -396,6 +421,7 @@ attemptLoop:
 									return resp, errWait
 								}
 							}
+							cliproxyauth.FinishQuotaWindowUpstreamAttempt(attemptCtx)
 							continue attemptLoop
 						}
 					case antigravity429DecisionShortCooldownSwitchAuth:
@@ -419,6 +445,7 @@ attemptLoop:
 				lastErr = nil
 				if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) {
 					log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
+					cliproxyauth.FinishQuotaWindowUpstreamAttempt(attemptCtx)
 					continue
 				}
 				if antigravityShouldRetryTransientResourceExhausted429(httpResp.StatusCode, bodyBytes) && attempt+1 < attempts {
@@ -427,11 +454,13 @@ attemptLoop:
 					if errWait := antigravityWait(ctx, delay); errWait != nil {
 						return resp, errWait
 					}
+					cliproxyauth.FinishQuotaWindowUpstreamAttempt(attemptCtx)
 					continue attemptLoop
 				}
 				if antigravityShouldRetryNoCapacity(httpResp.StatusCode, bodyBytes) {
 					if idx+1 < len(baseURLs) {
 						log.Debugf("antigravity executor: no capacity on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
+						cliproxyauth.FinishQuotaWindowUpstreamAttempt(attemptCtx)
 						continue
 					}
 					if attempt+1 < attempts {
@@ -440,6 +469,7 @@ attemptLoop:
 						if errWait := antigravityWait(ctx, delay); errWait != nil {
 							return resp, errWait
 						}
+						cliproxyauth.FinishQuotaWindowUpstreamAttempt(attemptCtx)
 						continue attemptLoop
 					}
 				}
@@ -450,6 +480,7 @@ attemptLoop:
 						if errWait := antigravityWait(ctx, delay); errWait != nil {
 							return resp, errWait
 						}
+						cliproxyauth.FinishQuotaWindowUpstreamAttempt(attemptCtx)
 						continue attemptLoop
 					}
 				}
@@ -468,6 +499,7 @@ attemptLoop:
 			replayAccumulator := newAntigravityReasoningReplayAccumulator(replayScope, requestPayload)
 			out := make(chan cliproxyexecutor.StreamChunk)
 			go func(resp *http.Response) {
+				defer reporter.EnsurePublished(attemptCtx)
 				defer close(out)
 				defer func() {
 					if errClose := resp.Body.Close(); errClose != nil {
@@ -493,20 +525,20 @@ attemptLoop:
 					}
 
 					if detail, ok := helps.ParseAntigravityStreamUsage(payload); ok {
-						reporter.Publish(ctx, detail)
+						reporter.Publish(attemptCtx, detail)
 					}
 
 					out <- cliproxyexecutor.StreamChunk{Payload: payload}
 				}
 				if errScan := scanner.Err(); errScan != nil {
 					helps.RecordAPIResponseError(ctx, e.cfg, errScan)
-					reporter.PublishFailure(ctx, errScan)
+					reporter.PublishFailure(attemptCtx, errScan)
 					out <- cliproxyexecutor.StreamChunk{Err: errScan}
 				} else {
 					if replayAccumulator != nil {
 						replayAccumulator.Commit(ctx)
 					}
-					reporter.EnsurePublished(ctx)
+					reporter.EnsurePublished(attemptCtx)
 				}
 			}(httpResp)
 
@@ -523,11 +555,11 @@ attemptLoop:
 			resp = cliproxyexecutor.Response{Payload: e.convertStreamToNonStream(buffer.Bytes())}
 
 			resp.Payload = e.resolveWebSearchGroundingURLs(ctx, auth, from, originalPayload, translated, resp.Payload)
-			reporter.Publish(ctx, helps.ParseAntigravityUsage(resp.Payload))
+			reporter.Publish(attemptCtx, helps.ParseAntigravityUsage(resp.Payload))
 			var param any
 			converted := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, resp.Payload, &param)
 			resp = cliproxyexecutor.Response{Payload: converted, Headers: httpResp.Header.Clone()}
-			reporter.EnsurePublished(ctx)
+			reporter.EnsurePublished(attemptCtx)
 
 			return resp, nil
 		}

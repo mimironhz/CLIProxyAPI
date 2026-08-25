@@ -261,6 +261,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	}
 	out := make(chan cliproxyexecutor.StreamChunk, 1)
 	go func() {
+		defer reporter.EnsurePublished(ctx)
 		defer close(out)
 		defer func() {
 			if errClose := decodedBody.Close(); errClose != nil {

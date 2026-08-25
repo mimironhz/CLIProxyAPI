@@ -132,6 +132,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	}
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
+		defer reporter.EnsurePublished(ctx)
 		defer close(out)
 		defer func() {
 			if errClose := httpResp.Body.Close(); errClose != nil {
@@ -178,9 +179,6 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					collectCodexOutputItemDone(data, outputItemsByIndex, &outputItemsFallback)
 				case "response.completed", "response.incomplete":
 					terminalSuccess = true
-					if detail, ok := helps.ParseCodexUsage(data); ok {
-						reporter.Publish(ctx, detail)
-					}
 					publishCodexImageToolUsage(ctx, reporter, body, data)
 					data = patchCodexCompletedOutput(data, outputItemsByIndex, outputItemsFallback)
 					if eventType == "response.completed" {

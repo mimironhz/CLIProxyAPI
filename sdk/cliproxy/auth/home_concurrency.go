@@ -263,18 +263,30 @@ func verifyAccountedHomeConcurrencyIdentity(tuple homeConcurrencyTuple, auth *Au
 	return nil
 }
 
-// SafeResponseHeaders returns trusted response headers only for CPA's concrete Home busy error.
+// SafeResponseHeaders returns trusted response headers only for concrete local errors.
 func SafeResponseHeaders(err error) http.Header {
 	var busy *HomeConcurrencyBusyError
-	if !errors.As(err, &busy) || busy == nil {
-		return nil
+	if errors.As(err, &busy) && busy != nil {
+		return busy.SafeResponseHeaders()
 	}
-	return busy.SafeResponseHeaders()
+	var quotaWindow *quotaWindowError
+	if errors.As(err, &quotaWindow) && quotaWindow != nil {
+		return quotaWindow.Headers()
+	}
+	return nil
 }
 
 func safeRetryAfterHeader(retryAfter time.Duration) http.Header {
-	if retryAfter <= 0 {
+	seconds, ok := safeRetryAfterSeconds(retryAfter)
+	if !ok {
 		return nil
+	}
+	return http.Header{"Retry-After": []string{strconv.FormatInt(seconds, 10)}}
+}
+
+func safeRetryAfterSeconds(retryAfter time.Duration) (int64, bool) {
+	if retryAfter <= 0 {
+		return 0, false
 	}
 	seconds := int64(retryAfter / time.Second)
 	if retryAfter%time.Second != 0 {
@@ -283,7 +295,7 @@ func safeRetryAfterHeader(retryAfter time.Duration) http.Header {
 	if seconds < 1 {
 		seconds = 1
 	}
-	return http.Header{"Retry-After": []string{strconv.FormatInt(seconds, 10)}}
+	return seconds, true
 }
 
 func homeConcurrencyInstallError(err error) error {

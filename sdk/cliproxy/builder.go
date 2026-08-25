@@ -10,10 +10,12 @@ import (
 	configaccess "github.com/router-for-me/CLIProxyAPI/v7/internal/access/config_access"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/quotawindow"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
 
@@ -197,6 +199,9 @@ func (b *Builder) Build() (*Service, error) {
 	if errValidate := b.cfg.ValidateCredentialWeights(); errValidate != nil {
 		return nil, fmt.Errorf("cliproxy: validate credential weights: %w", errValidate)
 	}
+	if errValidate := b.cfg.ValidateProviderQuota(); errValidate != nil {
+		return nil, fmt.Errorf("cliproxy: validate provider quota: %w", errValidate)
+	}
 	b.cfg.NormalizePluginsConfig()
 	if errResolvePluginsDir := b.cfg.ResolvePluginsDir(); errResolvePluginsDir != nil && b.cfg.Plugins.Enabled {
 		return nil, fmt.Errorf("cliproxy: %w", errResolvePluginsDir)
@@ -260,6 +265,12 @@ func (b *Builder) Build() (*Service, error) {
 	coreManager.SetRoundTripperProvider(newDefaultRoundTripperProvider())
 	coreManager.SetConfig(b.cfg)
 	coreManager.SetOAuthModelAlias(b.cfg.OAuthModelAlias)
+	quotaWindows, errQuotaWindows := quotawindow.New(b.cfg, coreManager, b.cfg.AuthDir)
+	if errQuotaWindows != nil {
+		return nil, fmt.Errorf("cliproxy: initialize provider quota windows: %w", errQuotaWindows)
+	}
+	coreManager.SetQuotaWindowGate(quotaWindows)
+	coreusage.RegisterNamedPlugin("provider-quota-windows", quotaWindows.UsagePlugin())
 	if pluginHost != nil {
 		coreManager.SetPluginScheduler(pluginHost)
 	}
@@ -276,6 +287,7 @@ func (b *Builder) Build() (*Service, error) {
 		coreManager:         coreManager,
 		cooldownStateStore:  cooldownStateStore,
 		pluginHost:          pluginHost,
+		quotaWindows:        quotaWindows,
 		appliedRoutingState: appliedRoutingState,
 		serverOptions:       append([]api.ServerOption(nil), b.serverOptions...),
 	}
@@ -285,6 +297,7 @@ func (b *Builder) Build() (*Service, error) {
 	service.serverOptions = append(service.serverOptions,
 		api.WithPostAuthPersistHook(service.runtimeAuthSyncHook()),
 		api.WithPluginHost(pluginHost),
+		api.WithQuotaWindows(quotaWindows),
 		api.WithConfigReloadHook(func(_ context.Context, _ *config.Config) {
 			service.reloadConfigFromWatcher()
 		}),

@@ -206,6 +206,10 @@ func (e *XAIExecutor) executeCompactMediaFallback(ctx context.Context, auth *cli
 }
 
 func (e *XAIExecutor) executeNativeCompactAttempt(ctx context.Context, auth *cliproxyauth.Auth, prepared *xaiPreparedRequest, body []byte, requestKind, requestPhase, sessionID string) (data []byte, headers http.Header, status int, err error) {
+	ctx, err = cliproxyauth.QuotaWindowContextForUpstreamAttempt(ctx)
+	if err != nil {
+		return nil, nil, 0, err
+	}
 	token, _ := xaiCreds(auth)
 	baseURL := xaiCompactBaseURL(auth)
 	logXAIResolvedBaseURL(ctx, baseURL)

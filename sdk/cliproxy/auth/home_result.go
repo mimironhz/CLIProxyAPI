@@ -38,7 +38,7 @@ func (m *Manager) reportHomeUnauthorized(ctx context.Context, auth *Auth, provid
 	if alias == "" {
 		alias = model
 	}
-	coreusage.PublishRecord(ctx, coreusage.Record{
+	record := coreusage.Record{
 		Provider:          provider,
 		ExecutorType:      homeResultExecutorType,
 		Model:             model,
@@ -57,5 +57,6 @@ func (m *Manager) reportHomeUnauthorized(ctx context.Context, auth *Auth, provid
 			StatusCode: http.StatusUnauthorized,
 			Body:       "upstream unauthorized",
 		},
-	})
+	}
+	coreusage.PublishRecord(ctx, record)
 }

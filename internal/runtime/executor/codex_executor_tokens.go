@@ -52,6 +52,8 @@ func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth
 	return cliproxyexecutor.Response{Payload: translated}, nil
 }
 
+func (e *CodexExecutor) QuotaWindowCountTokensUsesUpstream(*cliproxyauth.Auth) bool { return false }
+
 func tokenizerForCodexModel(model string) (tokenizer.Codec, error) {
 	sanitized := strings.ToLower(strings.TrimSpace(model))
 	switch {

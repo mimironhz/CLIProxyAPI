@@ -653,6 +653,7 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
+		defer reporter.EnsurePublished(ctx)
 		defer close(out)
 		defer func() {
 			if errClose := httpResp.Body.Close(); errClose != nil {
@@ -799,6 +800,7 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
+		defer reporter.EnsurePublished(ctx)
 		defer close(out)
 		defer func() {
 			if errClose := httpResp.Body.Close(); errClose != nil {

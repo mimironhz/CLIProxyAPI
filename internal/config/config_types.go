@@ -653,6 +653,9 @@ type OpenAICompatibility struct {
 
 	// DisableCooling disables auth/model cooldown scheduling for this provider when true.
 	DisableCooling bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
+
+	// Quota optionally configures recurring spend-budget windows for this provider.
+	Quota *ProviderQuota `yaml:"quota,omitempty" json:"quota,omitempty"`
 }
 
 // OpenAICompatibilityAPIKey represents an API key configuration with optional proxy setting.
@@ -704,6 +707,45 @@ type OpenAICompatibilityModel struct {
 	// If nil, a matching static model definition is inherited; unknown models
 	// default to level-based reasoning with levels ["low", "medium", "high"].
 	Thinking *registry.ThinkingSupport `yaml:"thinking,omitempty" json:"thinking,omitempty"`
+
+	// Quota optionally replaces the provider schedule for this client-visible model.
+	Quota *QuotaWindows `yaml:"quota,omitempty" json:"quota,omitempty"`
+}
+
+// ProviderQuota configures recurring budget windows for one provider.
+type ProviderQuota struct {
+	QuotaWindows `yaml:",inline" json:",inline"`
+	// Scope selects the billing unit: "provider" or "credential".
+	Scope string `yaml:"scope,omitempty" json:"scope,omitempty"`
+	// Models replaces the provider schedule for individual client-visible model IDs.
+	Models map[string]QuotaWindows `yaml:"models,omitempty" json:"models,omitempty"`
+}
+
+// QuotaWindows configures recurring budget windows.
+type QuotaWindows struct {
+	// Timezone is the IANA location used to resolve wall-clock boundaries.
+	Timezone string `yaml:"timezone,omitempty" json:"timezone,omitempty"`
+	// Persist keeps consumption across restarts. The default is true.
+	Persist *bool `yaml:"persist,omitempty" json:"persist,omitempty"`
+	// Windows are non-overlapping; uncovered time is unmetered.
+	Windows []QuotaWindow `yaml:"windows,omitempty" json:"windows,omitempty"`
+}
+
+// QuotaWindow is one recurring wall-clock window with an optional budget.
+type QuotaWindow struct {
+	Name   string       `yaml:"name" json:"name"`
+	Start  string       `yaml:"start" json:"start"`
+	End    string       `yaml:"end" json:"end"`
+	Days   []string     `yaml:"days,omitempty" json:"days,omitempty"`
+	Budget *QuotaBudget `yaml:"budget,omitempty" json:"budget,omitempty"`
+}
+
+// QuotaBudget caps consumption within one window instance. Nil fields are unlimited.
+type QuotaBudget struct {
+	Requests     *int64 `yaml:"requests,omitempty" json:"requests,omitempty"`
+	InputTokens  *int64 `yaml:"input-tokens,omitempty" json:"input-tokens,omitempty"`
+	OutputTokens *int64 `yaml:"output-tokens,omitempty" json:"output-tokens,omitempty"`
+	TotalTokens  *int64 `yaml:"total-tokens,omitempty" json:"total-tokens,omitempty"`
 }
 
 func (m OpenAICompatibilityModel) GetName() string { return m.Name }

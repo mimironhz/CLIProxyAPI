@@ -31,6 +31,8 @@ func (e *XAIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, 
 	return cliproxyexecutor.Response{Payload: translated}, nil
 }
 
+func (e *XAIExecutor) QuotaWindowCountTokensUsesUpstream(*cliproxyauth.Auth) bool { return false }
+
 func countXAIInputTokens(enc tokenizer.Codec, body []byte) (int64, error) {
 	if enc == nil {
 		return 0, fmt.Errorf("encoder is nil")

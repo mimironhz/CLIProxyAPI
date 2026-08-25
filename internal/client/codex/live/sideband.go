@@ -1,6 +1,7 @@
 package live
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -20,6 +21,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 	xproxy "golang.org/x/net/proxy"
@@ -28,6 +30,10 @@ import (
 const (
 	defaultSidebandAPIBaseURL = "wss://api.openai.com/v1"
 	sessionLifetime           = time.Hour
+	maxObservedWebsocketFrame = 1 << 20
+	approximateBytesPerToken  = 4
+	truncatedQuotaTokenUsage  = int64((maxObservedWebsocketFrame + approximateBytesPerToken - 1) / approximateBytesPerToken)
+	maxQuotaTokenUsage        = int64(^uint64(0) >> 1)
 )
 
 var (
@@ -398,16 +404,21 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 
 	upstreamURL := buildSidebandURL(h.sidebandAPIBaseURL, style, callID)
 	upstreamHTTPURL := websocketHTTPURL(upstreamURL)
-	dialUpstream := func(current *auth.Auth) (*websocket.Conn, *http.Response, error) {
+	dialUpstream := func(current *auth.Auth) (*websocket.Conn, *http.Response, context.Context, error) {
 		req, errRequest := http.NewRequestWithContext(ctx, http.MethodGet, upstreamHTTPURL, nil)
 		if errRequest != nil {
-			return nil, nil, errRequest
+			return nil, nil, nil, errRequest
 		}
 		req.Header = protocolHeaders(c.Request.Header)
 		setAccountHeader(req.Header, current)
 		if errPrepare := h.authManager.PrepareHttpRequest(ctx, current, req); errPrepare != nil {
-			return nil, nil, errPrepare
+			return nil, nil, nil, errPrepare
 		}
+		attemptCtx, errQuota := h.authManager.AdmitQuotaWindowAttempt(ctx, current, session.model)
+		if errQuota != nil {
+			return nil, nil, nil, errQuota
+		}
+		req = req.WithContext(attemptCtx)
 		authType, authValue := current.AccountInfo()
 		helps.RecordAPIWebsocketRequest(ctx, runtimeConfig, helps.UpstreamRequestLog{
 			URL:       upstreamURL,
@@ -421,10 +432,14 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 		})
 		dialer := newProxyAwareSidebandDialer(runtimeConfig, current)
 		dialer.Subprotocols = websocket.Subprotocols(c.Request)
-		return dialer.DialContext(ctx, upstreamURL, req.Header)
+		upstream, response, errDial := dialer.DialContext(attemptCtx, upstreamURL, req.Header)
+		if errDial != nil {
+			auth.FinishQuotaWindowUpstreamAttempt(attemptCtx)
+		}
+		return upstream, response, attemptCtx, errDial
 	}
 
-	upstream, handshakeResponse, errDial := dialUpstream(selected)
+	upstream, handshakeResponse, quotaAttemptCtx, errDial := dialUpstream(selected)
 	if errDial != nil && selection != nil && handshakeResponse != nil && handshakeResponse.StatusCode == http.StatusUnauthorized {
 		h.authManager.ReportHomeUnauthorized(ctx, selected, "codex", session.model)
 		helps.RecordAPIWebsocketHandshake(ctx, runtimeConfig, handshakeResponse.StatusCode, callResponseHeaders(handshakeResponse.Header))
@@ -444,14 +459,24 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 		}
 		selected = refreshed
 		logging.SetGinCPATraceID(c, selected.EnsureIndex())
-		upstream, handshakeResponse, errDial = dialUpstream(selected)
+		upstream, handshakeResponse, quotaAttemptCtx, errDial = dialUpstream(selected)
 		if errDial != nil && handshakeResponse != nil && handshakeResponse.StatusCode == http.StatusUnauthorized {
 			h.authManager.ReportHomeUnauthorized(ctx, selected, "codex", session.model)
 		}
 	}
 	if errDial != nil {
+		if auth.IsQuotaWindowError(errDial) || auth.SafeResponseHeaders(errDial).Get("Retry-After") != "" {
+			writeSelectionError(c, errDial)
+			return
+		}
 		handleSidebandDialError(c, ctx, runtimeConfig, handshakeResponse, errDial)
 		return
+	}
+	var observeQuotaUsage func([]byte, bool)
+	if auth.QuotaWindowReservationFromContext(quotaAttemptCtx) != "" {
+		quotaUsage := &realtimeQuotaAccumulator{}
+		defer quotaUsage.Settle(quotaAttemptCtx)
+		observeQuotaUsage = quotaUsage.Observe
 	}
 	if handshakeResponse != nil {
 		helps.RecordAPIWebsocketHandshake(ctx, runtimeConfig, handshakeResponse.StatusCode, callResponseHeaders(handshakeResponse.Header))
@@ -496,7 +521,7 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 	}
 	consumeSession = true
 
-	if errRelay := relayWebsockets(downstream, upstream); errRelay != nil && !isNormalWebsocketClose(errRelay) {
+	if errRelay := relayWebsockets(downstream, upstream, observeQuotaUsage); errRelay != nil && !isNormalWebsocketClose(errRelay) {
 		helps.RecordAPIWebsocketError(ctx, runtimeConfig, "relay", errRelay)
 		log.WithError(errRelay).Debug("codex live sideband relay closed")
 	}
@@ -599,10 +624,10 @@ func websocketCloseFunc(name string, conn *websocket.Conn) func() error {
 	}
 }
 
-func relayWebsockets(downstream, upstream *websocket.Conn) error {
+func relayWebsockets(downstream, upstream *websocket.Conn, observeUpstream func([]byte, bool)) error {
 	results := make(chan error, 2)
-	go func() { results <- copyWebsocket(upstream, downstream) }()
-	go func() { results <- copyWebsocket(downstream, upstream) }()
+	go func() { results <- copyWebsocket(upstream, downstream, nil) }()
+	go func() { results <- copyWebsocket(downstream, upstream, observeUpstream) }()
 
 	firstErr := <-results
 	closeCode, closeReason := websocketCloseDetails(firstErr)
@@ -615,7 +640,7 @@ func relayWebsockets(downstream, upstream *websocket.Conn) error {
 	return firstErr
 }
 
-func copyWebsocket(destination, source *websocket.Conn) error {
+func copyWebsocket(destination, source *websocket.Conn, observe func([]byte, bool)) error {
 	for {
 		messageType, reader, errReader := source.NextReader()
 		if errReader != nil {
@@ -625,7 +650,13 @@ func copyWebsocket(destination, source *websocket.Conn) error {
 		if errWriter != nil {
 			return errWriter
 		}
-		_, errCopy := io.Copy(writer, reader)
+		var capture *boundedWebsocketCapture
+		copySource := reader
+		if observe != nil && messageType == websocket.TextMessage {
+			capture = &boundedWebsocketCapture{remaining: maxObservedWebsocketFrame}
+			copySource = io.TeeReader(reader, capture)
+		}
+		_, errCopy := io.Copy(writer, copySource)
 		errClose := writer.Close()
 		if errCopy != nil {
 			return errCopy
@@ -633,7 +664,76 @@ func copyWebsocket(destination, source *websocket.Conn) error {
 		if errClose != nil {
 			return errClose
 		}
+		if capture != nil {
+			observe(capture.Bytes(), capture.truncated)
+		}
 	}
+}
+
+type boundedWebsocketCapture struct {
+	bytes.Buffer
+	remaining int
+	truncated bool
+}
+
+func (c *boundedWebsocketCapture) Write(payload []byte) (int, error) {
+	written := len(payload)
+	if len(payload) > c.remaining {
+		payload = payload[:c.remaining]
+		c.truncated = true
+	}
+	if len(payload) > 0 {
+		_, _ = c.Buffer.Write(payload)
+		c.remaining -= len(payload)
+	}
+	return written, nil
+}
+
+type realtimeQuotaAccumulator struct {
+	detail   coreusage.Detail
+	observed bool
+}
+
+func (a *realtimeQuotaAccumulator) Observe(payload []byte, truncated bool) {
+	if a == nil {
+		return
+	}
+	if truncated {
+		// JSON member order is unconstrained, so a bounded prefix cannot prove that an
+		// oversized text frame is non-terminal. Charge it conservatively instead of
+		// allowing token-only budgets to be bypassed by placing usage after the cap.
+		a.observed = true
+		a.detail.InputTokens = saturatingQuotaTokenAdd(a.detail.InputTokens, truncatedQuotaTokenUsage)
+		a.detail.OutputTokens = saturatingQuotaTokenAdd(a.detail.OutputTokens, truncatedQuotaTokenUsage)
+		a.detail.TotalTokens = saturatingQuotaTokenAdd(a.detail.TotalTokens, truncatedQuotaTokenUsage)
+		return
+	}
+	detail, ok := helps.ParseCodexUsage(payload)
+	if !ok {
+		return
+	}
+	a.observed = true
+	a.detail.InputTokens = saturatingQuotaTokenAdd(a.detail.InputTokens, detail.InputTokens)
+	a.detail.OutputTokens = saturatingQuotaTokenAdd(a.detail.OutputTokens, detail.OutputTokens)
+	a.detail.TotalTokens = saturatingQuotaTokenAdd(a.detail.TotalTokens, detail.TotalTokens)
+}
+
+func saturatingQuotaTokenAdd(current, increment int64) int64 {
+	if increment <= 0 {
+		return current
+	}
+	if current >= maxQuotaTokenUsage-increment {
+		return maxQuotaTokenUsage
+	}
+	return current + increment
+}
+
+func (a *realtimeQuotaAccumulator) Settle(ctx context.Context) {
+	if a != nil && a.observed {
+		auth.SettleQuotaWindowUpstreamAttempt(ctx, a.detail)
+		return
+	}
+	auth.FinishQuotaWindowUpstreamAttempt(ctx)
 }
 
 func websocketCloseDetails(err error) (int, string) {

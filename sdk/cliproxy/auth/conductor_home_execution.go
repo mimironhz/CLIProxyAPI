@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -16,9 +17,15 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 	routeModel := authSelectionModelFromOptions(opts, req.Model)
 	responseAlias := requestedModelAliasFromOptions(opts, routeModel)
 	executionModel, restoreExecutionModel := executionModelForAuthSelection(opts, req.Model)
+	quotaModel := routeModel
+	if restoreExecutionModel {
+		quotaModel = executionModel
+	}
+	opts = withQuotaWindowBillingModel(opts, quotaModel)
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	tried := make(map[string]struct{})
 	var lastErr error
+homeSelectionLoop:
 	for homeAuthCount := 1; ; homeAuthCount++ {
 		selection, errSelection := m.pickHomeDispatchSelection(ctx, routeModel, withHomeAuthCount(opts, homeAuthCount))
 		if errSelection != nil {
@@ -135,11 +142,24 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 			}
 			execute := func() (cliproxyexecutor.Response, error) {
 				if countTokens {
-					return selection.Executor.CountTokens(executorCtx, preparedAuth, execReq, execOpts)
+					return m.countQuotaAttempt(executorCtx, selection.Executor, preparedAuth, quotaModel, execReq, execOpts)
 				}
-				return selection.Executor.Execute(execCtx, preparedAuth, execReq, execOpts)
+				return m.executeQuotaAttempt(execCtx, selection.Executor, preparedAuth, quotaModel, execReq, execOpts)
 			}
 			response, errExecute = execute()
+			if isQuotaWindowError(errExecute) {
+				releaseAttempt()
+				selection.End("quota_window_exhausted")
+				return cliproxyexecutor.Response{}, errExecute
+			}
+			if errors.Is(errExecute, errQuotaWindowCredentialExhausted) {
+				releaseAttempt()
+				if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "quota_window_credential_exhausted"); errEnd != nil {
+					return cliproxyexecutor.Response{}, errEnd
+				}
+				lastErr = errExecute
+				continue homeSelectionLoop
+			}
 			refreshAuth := preparedAuth
 			if countTokens {
 				if observedAuth, fingerprint := getEffectiveAuth(); isUnauthorizedError(errExecute) {
@@ -159,6 +179,19 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 					publishSelectedAuthMetadata(opts.Metadata, preparedAuth)
 					setEffectiveAuth(preparedAuth)
 					response, errExecute = execute()
+					if isQuotaWindowError(errExecute) {
+						releaseAttempt()
+						selection.End("quota_window_exhausted")
+						return cliproxyexecutor.Response{}, errExecute
+					}
+					if errors.Is(errExecute, errQuotaWindowCredentialExhausted) {
+						releaseAttempt()
+						if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "quota_window_credential_exhausted"); errEnd != nil {
+							return cliproxyexecutor.Response{}, errEnd
+						}
+						lastErr = errExecute
+						continue homeSelectionLoop
+					}
 					if countTokens && isUnauthorizedError(errExecute) {
 						_, fingerprint := getEffectiveAuth()
 						m.reportHomeUnauthorized(execCtx, preparedAuth, selection.Provider, resultModel, fingerprint)

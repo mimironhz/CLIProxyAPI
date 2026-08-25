@@ -477,7 +477,8 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 	}
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, prepared.baseModel, auth)
-	defer reporter.TrackFailure(ctx, &err)
+	usageCtx := ctx
+	defer func() { reporter.TrackFailure(usageCtx, &err) }()
 
 	httpURL := strings.TrimSuffix(baseURL, "/") + "/responses"
 	wsURL, err := buildXAIResponsesWebsocketURL(httpURL)
@@ -535,6 +536,11 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 	var closer *websocketConnectionCloser
 	var respHS *http.Response
 	var errDial error
+	attemptCtx, errQuota := cliproxyauth.QuotaWindowContextForUpstreamAttempt(ctx)
+	if errQuota != nil {
+		return nil, errQuota
+	}
+	usageCtx = attemptCtx
 	if cliproxyexecutor.RequiredUpstreamWebsocket(ctx) {
 		conn, closer = existingWebsocketSessionConn(sess, authID, wsURL)
 		if conn == nil {
@@ -544,7 +550,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 			return nil, cliproxyexecutor.NewUpstreamWebsocketReplayRequiredError()
 		}
 	} else {
-		conn, closer, respHS, errDial = e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
+		conn, closer, respHS, errDial = e.ensureUpstreamConn(attemptCtx, auth, sess, authID, wsURL, wsHeaders)
 	}
 	var upstreamHeaders http.Header
 	if respHS != nil {
@@ -605,7 +611,13 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 				sess.reqMu.Unlock()
 				return nil, errSend
 			}
-			connRetry, closerRetry, respHSRetry, errDialRetry := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
+			cliproxyauth.FinishQuotaWindowUpstreamAttempt(attemptCtx)
+			retryCtx, errRetryQuota := cliproxyauth.QuotaWindowContextForUpstreamAttempt(ctx)
+			if errRetryQuota != nil {
+				return nil, errRetryQuota
+			}
+			usageCtx = retryCtx
+			connRetry, closerRetry, respHSRetry, errDialRetry := e.ensureUpstreamConn(retryCtx, auth, sess, authID, wsURL, wsHeaders)
 			if errDialRetry != nil || connRetry == nil {
 				bodyErrRetry := websocketHandshakeBody(respHSRetry)
 				closeHTTPResponseBody(respHSRetry, "xai websockets executor: close handshake response body error")
@@ -665,6 +677,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 		stateRequestLockTransferred = true
 	}
 	go func() {
+		defer reporter.EnsurePublished(usageCtx)
 		if stateRequestLocked {
 			defer state.requestMu.Unlock()
 		}
@@ -722,7 +735,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 				terminateReason = "read_error"
 				terminateErr = mappedErr
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "read", mappedErr)
-				reporter.PublishFailure(ctx, mappedErr)
+				reporter.PublishFailure(usageCtx, mappedErr)
 				_ = send(cliproxyexecutor.StreamChunk{Err: mappedErr})
 				return
 			}
@@ -732,7 +745,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 					terminateReason = "unexpected_binary"
 					terminateErr = errBinary
 					helps.RecordAPIWebsocketError(ctx, e.cfg, "unexpected_binary", errBinary)
-					reporter.PublishFailure(ctx, errBinary)
+					reporter.PublishFailure(usageCtx, errBinary)
 					if sess != nil {
 						e.invalidateUpstreamConn(sess, conn, "unexpected_binary", errBinary)
 					}
@@ -753,7 +766,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 				terminateReason = "upstream_error"
 				terminateErr = wsErr
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", wsErr)
-				reporter.PublishFailure(ctx, wsErr)
+				reporter.PublishFailure(usageCtx, wsErr)
 				if sess != nil {
 					e.invalidateUpstreamConnWithoutDisconnectNotify(sess, conn, "upstream_error", wsErr)
 				}
@@ -792,7 +805,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 						terminateReason = "reasoning_only_completion"
 						terminateErr = completionErr
 						helps.RecordAPIWebsocketError(ctx, e.cfg, terminateReason, completionErr)
-						reporter.PublishFailure(ctx, completionErr)
+						reporter.PublishFailure(usageCtx, completionErr)
 						if sess != nil {
 							e.invalidateUpstreamConnWithoutDisconnectNotify(sess, conn, terminateReason, completionErr)
 						}
@@ -800,7 +813,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 						return
 					}
 					if detail, ok := helps.ParseCodexUsage(payload); ok {
-						reporter.Publish(ctx, detail)
+						reporter.Publish(usageCtx, detail)
 					}
 					cacheXAIReasoningReplayFromCompleted(ctx, prepared.replayScope, payload)
 					if !warmupRequest && idMapper != nil && idMapper.state != nil && !recordedTranscript {
@@ -810,7 +823,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 				case "response.done":
 					logXAIWebsocketTerminalResponse(executionSessionID, authID, wsURL, eventType, payload)
 					if detail, ok := helps.ParseCodexUsage(payload); ok {
-						reporter.Publish(ctx, detail)
+						reporter.Publish(usageCtx, detail)
 					}
 					if !warmupRequest && idMapper != nil && idMapper.state != nil && !recordedTranscript {
 						idMapper.state.recordTranscriptTurn(transcriptRequestBody, payload, transcriptReset)
@@ -1645,6 +1658,8 @@ func (e *XAIAutoExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Au
 	}
 	return e.httpExec.CountTokens(ctx, auth, req, opts)
 }
+
+func (e *XAIAutoExecutor) QuotaWindowCountTokensUsesUpstream(*cliproxyauth.Auth) bool { return false }
 
 func (e *XAIAutoExecutor) CloseExecutionSession(sessionID string) {
 	if e == nil || e.wsExec == nil {
