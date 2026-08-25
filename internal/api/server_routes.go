@@ -63,6 +63,8 @@ func (s *Server) setupRoutes() {
 	v1.Use(AuthMiddleware(s.accessManager))
 	{
 		v1.GET("/models", s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers))
+		v1.GET("/quota", s.quotaWindowsHandler(false))
+		v1.GET("/quota/models/availability", s.quotaWindowsHandler(true))
 		v1.POST("/chat/completions", openaiHandlers.ChatCompletions)
 		v1.POST("/completions", openaiHandlers.Completions)
 		v1.POST("/images/generations", openaiHandlers.ImagesGenerations)
@@ -394,6 +396,7 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 		routeModel = strings.TrimSpace(routing.Model)
 	}
 	performRequest := func(current *auth.Auth) (*http.Response, error) {
+		requestCtx := auth.WithQuotaWindowModel(ctx, routeModel)
 		headers := baseHeaders.Clone()
 		if accountID, ok := current.Metadata["account_id"].(string); ok && strings.TrimSpace(accountID) != "" {
 			headers.Set("Chatgpt-Account-Id", accountID)
@@ -415,7 +418,7 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 				requestBody = rewriteCodexAlphaSearchModel(upstreamRequestBody, upstreamModel)
 			}
 		}
-		req, errRequest := s.handlers.AuthManager.NewHttpRequest(ctx, current, http.MethodPost, upstreamURL, requestBody, headers)
+		req, errRequest := s.handlers.AuthManager.NewHttpRequest(requestCtx, current, http.MethodPost, upstreamURL, requestBody, headers)
 		if errRequest != nil {
 			return nil, errRequest
 		}
@@ -431,7 +434,7 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 			AuthType:  authType,
 			AuthValue: authValue,
 		})
-		return s.handlers.AuthManager.HttpRequest(ctx, current, req)
+		return s.handlers.AuthManager.HttpRequest(requestCtx, current, req)
 	}
 
 	if errCtx := ctx.Err(); errCtx != nil {
@@ -454,6 +457,9 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 			selection.End("request_failed")
 		}
 		helps.RecordAPIResponseError(ctx, s.cfg, err)
+		for _, value := range auth.SafeResponseHeaders(err).Values("Retry-After") {
+			c.Writer.Header().Add("Retry-After", value)
+		}
 		c.JSON(clienterror.HTTPStatusFromErrorOr(err, http.StatusBadGateway), gin.H{"error": err.Error()})
 		return
 	}
@@ -486,6 +492,9 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 			}
 			selection.End("retry_failed")
 			helps.RecordAPIResponseError(ctx, s.cfg, err)
+			for _, value := range auth.SafeResponseHeaders(err).Values("Retry-After") {
+				c.Writer.Header().Add("Retry-After", value)
+			}
 			c.JSON(clienterror.HTTPStatusFromErrorOr(err, http.StatusBadGateway), gin.H{"error": err.Error()})
 			return
 		}

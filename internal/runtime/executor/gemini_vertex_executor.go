@@ -666,6 +666,7 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
+		defer reporter.EnsurePublished(ctx)
 		defer close(out)
 		defer reporter.EnsurePublished(ctx)
 		defer func() {
@@ -815,6 +816,7 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
+		defer reporter.EnsurePublished(ctx)
 		defer close(out)
 		defer reporter.EnsurePublished(ctx)
 		defer func() {

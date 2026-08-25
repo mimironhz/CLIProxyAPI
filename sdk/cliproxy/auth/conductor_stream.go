@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -210,6 +211,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		return nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
 	}
 	ctx = contextWithRequestedModelAlias(ctx, opts, routeModel)
+	quotaModel := quotaWindowBillingModel(opts, routeModel)
 	var lastErr error
 	didRefreshOnUnauthorized := false
 	if auth != nil && unauthorizedRefreshTried != nil {

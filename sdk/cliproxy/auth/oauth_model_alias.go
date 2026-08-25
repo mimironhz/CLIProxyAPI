@@ -2,6 +2,7 @@ package auth
 
 import (
 	"encoding/json"
+	"sort"
 	"strings"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -26,6 +27,10 @@ type oauthModelAliasEntry struct {
 type oauthModelAliasTable struct {
 	// reverse maps channel -> alias (lower) -> entry with upstream model and flags.
 	reverse map[string]map[string]oauthModelAliasEntry
+	// quotaRoutes maps channel -> canonical upstream -> client-visible aliases.
+	quotaRoutes map[string]map[string][]string
+	// quotaRouteKeys maps channel -> canonical upstream -> stable route identity.
+	quotaRouteKeys map[string]map[string]string
 }
 
 // OAuthModelAliasResult contains the resolved upstream model and mapping metadata.
@@ -40,7 +45,9 @@ func compileOAuthModelAliasTable(aliases map[string][]internalconfig.OAuthModelA
 		return &oauthModelAliasTable{}
 	}
 	out := &oauthModelAliasTable{
-		reverse: make(map[string]map[string]oauthModelAliasEntry, len(aliases)),
+		reverse:        make(map[string]map[string]oauthModelAliasEntry, len(aliases)),
+		quotaRoutes:    make(map[string]map[string][]string, len(aliases)),
+		quotaRouteKeys: make(map[string]map[string]string, len(aliases)),
 	}
 	for rawChannel, entries := range aliases {
 		channel := strings.ToLower(strings.TrimSpace(rawChannel))
@@ -69,10 +76,32 @@ func compileOAuthModelAliasTable(aliases map[string][]internalconfig.OAuthModelA
 		}
 		if len(rev) > 0 {
 			out.reverse[channel] = rev
+			byUpstream := make(map[string][]string)
+			for alias, entry := range rev {
+				upstream := internalconfig.CanonicalQuotaModels(nil, entry.upstreamModel)
+				if upstream != "" {
+					byUpstream[upstream] = append(byUpstream[upstream], alias)
+				}
+			}
+			for upstream := range byUpstream {
+				sort.Strings(byUpstream[upstream])
+			}
+			out.quotaRoutes[channel] = byUpstream
+			keys := make(map[string]string, len(byUpstream))
+			for upstream, models := range byUpstream {
+				keys[upstream] = internalconfig.QuotaRouteKey(upstream, models)
+			}
+			out.quotaRouteKeys[channel] = keys
 		}
 	}
 	if len(out.reverse) == 0 {
 		out.reverse = nil
+	}
+	if len(out.quotaRoutes) == 0 {
+		out.quotaRoutes = nil
+	}
+	if len(out.quotaRouteKeys) == 0 {
+		out.quotaRouteKeys = nil
 	}
 	return out
 }

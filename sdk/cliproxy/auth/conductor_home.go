@@ -278,6 +278,9 @@ func shouldReturnLastErrorOnPickFailure(homeMode bool, lastErr error, errPick er
 	if lastErr == nil {
 		return false
 	}
+	if isQuotaWindowError(errPick) {
+		return false
+	}
 	if !homeMode {
 		return true
 	}
@@ -1278,6 +1281,9 @@ func shouldAttemptAntigravityCreditsFallback(m *Manager, lastErr error, provider
 	if isRequestTerminatedError(lastErr) {
 		return false
 	}
+	if isQuotaWindowError(lastErr) {
+		return false
+	}
 	status := statusCodeFromError(lastErr)
 	log.WithFields(log.Fields{
 		"lastErr":   errorString(lastErr),
@@ -1405,6 +1411,9 @@ func (m *Manager) tryAntigravityCreditsExecuteStream(ctx context.Context, req cl
 		}
 		result, errStream := m.executeStreamWithModelPool(creditsCtx, c.executor, c.auth, c.provider, req, creditsOpts, routeModel, "", models, pooled, aliasResult, routing, true, false, nil)
 		if errStream != nil {
+			if isQuotaWindowError(errStream) {
+				return nil, false, errStream
+			}
 			continue
 		}
 		return result, true, nil

@@ -64,6 +64,11 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 	routeModel := authSelectionModelFromOptions(opts, req.Model)
 	responseAlias := requestedModelAliasFromOptions(opts, routeModel)
 	executionModel, restoreExecutionModel := executionModelForAuthSelection(opts, req.Model)
+	quotaModel := routeModel
+	if restoreExecutionModel {
+		quotaModel = executionModel
+	}
+	opts = withQuotaWindowBillingModel(opts, quotaModel)
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	tried := make(map[string]struct{})
 	attempted := make(map[string]struct{})
@@ -207,9 +212,9 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			}
 			execute := func() (cliproxyexecutor.Response, error) {
 				if countTokens {
-					return selection.Executor.CountTokens(executorCtx, preparedAuth, execReq, execOpts)
+					return m.countQuotaAttempt(executorCtx, selection.Executor, preparedAuth, quotaModel, execReq, execOpts)
 				}
-				return selection.Executor.Execute(execCtx, preparedAuth, execReq, execOpts)
+				return m.executeQuotaAttempt(execCtx, selection.Executor, preparedAuth, quotaModel, execReq, execOpts)
 			}
 			startHomeExec := time.Now()
 			response, errExecute = execute()

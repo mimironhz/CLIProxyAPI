@@ -325,8 +325,20 @@ func (m *Manager) availableAuthsForRouteModelAcrossPriorities(auths []*Auth, pro
 }
 
 func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, provider, routeModel string, now time.Time, allPriorities bool) ([]*Auth, error) {
+	return m.availableAuthsForRouteModelWithQuotaModel(auths, provider, routeModel, routeModel, now, allPriorities)
+}
+
+func (m *Manager) availableAuthsForRouteModelWithQuotaModel(auths []*Auth, provider, routeModel, quotaModel string, now time.Time, allPriorities bool) ([]*Auth, error) {
 	if len(auths) == 0 {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth candidates"}
+	}
+	if gate := m.quotaWindowGateSnapshot(); gate != nil {
+		var block QuotaWindowBlock
+		var exhausted bool
+		auths, block, exhausted = evaluateQuotaWindowAuths(gate, auths, quotaModel, now)
+		if exhausted {
+			return nil, newQuotaWindowError(quotaModel, block, now)
+		}
 	}
 
 	availableByPriority := make(map[int][]*Auth)
@@ -372,8 +384,13 @@ func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, pro
 // priority tiers so an established binding can be validated instead of being preempted by a
 // recovered higher-priority credential.
 func (m *Manager) availableAuthsForSelector(selector Selector, auths []*Auth, provider, routeModel string, now time.Time) (priorityAuths, selectorAuths []*Auth, err error) {
+	return m.availableAuthsForSelectorWithQuotaModel(selector, auths, provider, routeModel, routeModel, now)
+}
+
+func (m *Manager) availableAuthsForSelectorWithQuotaModel(selector Selector, auths []*Auth, provider, routeModel, quotaModel string, now time.Time) (priorityAuths, selectorAuths []*Auth, err error) {
+	auths = selectorAvailabilityCandidates(selector, auths)
 	if _, sessionAffinity := selector.(*SessionAffinitySelector); !sessionAffinity {
-		priorityAuths, err = m.availableAuthsForRouteModel(auths, provider, routeModel, now)
+		priorityAuths, err = m.availableAuthsForRouteModelWithQuotaModel(auths, provider, routeModel, quotaModel, now, false)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -383,12 +400,24 @@ func (m *Manager) availableAuthsForSelector(selector Selector, auths []*Auth, pr
 
 	// One availability pass and one clone pass serve both lists: the highest priority tier is a
 	// subset of the across-priority candidates, so it is narrowed from the same cloned auths.
-	selectorAuths, err = m.availableAuthsForRouteModelAcrossPriorities(auths, provider, routeModel, now)
+	selectorAuths, err = m.availableAuthsForRouteModelWithQuotaModel(auths, provider, routeModel, quotaModel, now, true)
 	if err != nil {
 		return nil, nil, err
 	}
 	selectorAuths = cloneAuthSlice(selectorAuths)
 	return highestPriorityAuths(selectorAuths), selectorAuths, nil
+}
+
+func selectorAvailabilityCandidates(selector Selector, auths []*Auth) []*Auth {
+	switch selected := selector.(type) {
+	case *WeightedRoundRobinSelector:
+		return positiveWeightAuths(auths)
+	case *SessionAffinitySelector:
+		if _, weighted := selected.fallback.(*WeightedRoundRobinSelector); weighted {
+			return positiveWeightAuths(auths)
+		}
+	}
+	return auths
 }
 
 func selectionArgForSelector(selector Selector, routeModel string) string {
@@ -924,6 +953,9 @@ func (m *Manager) shouldRetryAfterErrorWithHomeRetryLimit(ctx context.Context, o
 	if err == nil {
 		return 0, false
 	}
+	if isQuotaWindowError(err) {
+		return 0, false
+	}
 	var homeBusy *HomeConcurrencyBusyError
 	if errors.As(err, &homeBusy) && homeBusy != nil {
 		return 0, false
@@ -1203,6 +1235,9 @@ func shouldRetrySchedulerPick(err error) bool {
 	if err == nil {
 		return false
 	}
+	if isQuotaWindowError(err) {
+		return false
+	}
 	var cooldownErr *modelCooldownError
 	if errors.As(err, &cooldownErr) {
 		return true
@@ -1233,6 +1268,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	eligibility := authSelectionEligibilityForRequest(ctx, opts)
+	quotaModel := quotaWindowBillingModel(opts, model)
 
 	m.mu.RLock()
 	selector := m.selector
@@ -1270,11 +1306,12 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		}
 		candidates = append(candidates, candidate)
 	}
+	candidates = selectorAvailabilityCandidates(selector, candidates)
 	if len(candidates) == 0 {
 		m.mu.RUnlock()
 		return nil, nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	available, selectorAuths, errAvailable := m.availableAuthsForSelector(selector, candidates, provider, model, time.Now())
+	available, selectorAuths, errAvailable := m.availableAuthsForSelectorWithQuotaModel(selector, candidates, provider, model, quotaModel, time.Now())
 	if errAvailable != nil {
 		m.mu.RUnlock()
 		m.warnLogAuthUnavailable(ctx, []string{provider}, model, opts, tried, errAvailable)
@@ -1289,6 +1326,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 	}
 	if !handled {
 		selectorCtx := withWeightedSelectorStateModel(ctx, selector, model)
+		selectorCtx = withQuotaWindowSelectorGateBypass(selectorCtx)
 		selected, errPick = selector.Pick(selectorCtx, provider, selectionArgForSelector(selector, model), opts, selectorAuths)
 		if errPick != nil {
 			if isBuiltInSelector(selector) {
@@ -1491,8 +1529,12 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 		return m.pickNextLegacy(ctx, provider, model, opts, tried)
 	}
 	eligibility := authSelectionEligibilityForRequest(ctx, opts)
+	quotaModel := quotaWindowBillingModel(opts, model)
 	if strings.TrimSpace(model) != "" {
+		quotaCandidates := make([]*Auth, 0)
 		m.mu.RLock()
+		selector := m.selector
+		registryRef := registry.GetGlobalRegistry()
 		for _, candidate := range m.auths {
 			if candidate == nil || executorKeyFromAuth(candidate) != provider || candidate.Disabled {
 				continue
@@ -1500,6 +1542,10 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 			if !eligibility.allows(candidate) {
 				continue
 			}
+			if !m.authSupportsRouteModel(registryRef, candidate, model) {
+				continue
+			}
+			quotaCandidates = append(quotaCandidates, candidate)
 			if _, used := tried[candidate.ID]; used {
 				continue
 			}
@@ -1509,6 +1555,17 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 			}
 		}
 		m.mu.RUnlock()
+		quotaCandidates = selectorAvailabilityCandidates(selector, quotaCandidates)
+		if gate := m.quotaWindowGateSnapshot(); gate != nil {
+			now := time.Now()
+			available, block, exhausted := evaluateQuotaWindowAuths(gate, quotaCandidates, quotaModel, now)
+			if exhausted {
+				return nil, nil, newQuotaWindowError(quotaModel, block, now)
+			}
+			if len(available) != len(quotaCandidates) {
+				return m.pickNextLegacy(ctx, provider, model, opts, tried)
+			}
+		}
 	}
 	executor, okExecutor := m.Executor(provider)
 	if !okExecutor {
@@ -1549,6 +1606,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	eligibility := authSelectionEligibilityForRequest(ctx, opts)
+	quotaModel := quotaWindowBillingModel(opts, model)
 
 	providerSet := make(map[string]struct{}, len(providers))
 	for _, provider := range providers {
@@ -1566,6 +1624,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 	selector := m.selector
 	pluginScheduler := m.pluginScheduler
 	candidates := make([]*Auth, 0, len(m.auths))
+	quotaCandidates := make([]*Auth, 0, len(m.auths))
 	modelKey := strings.TrimSpace(model)
 	// Always use base model name (without thinking suffix) for auth matching.
 	if modelKey != "" {
@@ -1592,22 +1651,32 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		if _, ok := providerSet[providerKey]; !ok {
 			continue
 		}
-		if _, used := tried[candidate.ID]; used {
-			continue
-		}
 		if _, ok := m.executors[providerKey]; !ok {
 			continue
 		}
 		if modelKey != "" && !m.authSupportsRouteModel(registryRef, candidate, model) {
 			continue
 		}
+		quotaCandidates = append(quotaCandidates, candidate)
+		if _, used := tried[candidate.ID]; used {
+			continue
+		}
 		candidates = append(candidates, candidate)
+	}
+	quotaCandidates = selectorAvailabilityCandidates(selector, quotaCandidates)
+	candidates = selectorAvailabilityCandidates(selector, candidates)
+	if gate := m.quotaWindowGateSnapshot(); gate != nil {
+		now := time.Now()
+		if block, exhausted := gate.BlockedForModel(quotaCandidates, quotaModel, now); exhausted {
+			m.mu.RUnlock()
+			return nil, nil, "", newQuotaWindowError(quotaModel, block, now)
+		}
 	}
 	if len(candidates) == 0 {
 		m.mu.RUnlock()
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	available, selectorAuths, errAvailable := m.availableAuthsForSelector(selector, candidates, "mixed", model, time.Now())
+	available, selectorAuths, errAvailable := m.availableAuthsForSelectorWithQuotaModel(selector, candidates, "mixed", model, quotaModel, time.Now())
 	if errAvailable != nil {
 		m.mu.RUnlock()
 		m.warnLogAuthUnavailable(ctx, providers, model, opts, tried, errAvailable)
@@ -1622,6 +1691,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 	}
 	if !handled {
 		selectorCtx := withWeightedSelectorStateModel(ctx, selector, model)
+		selectorCtx = withQuotaWindowSelectorGateBypass(selectorCtx)
 		selected, errPick = selector.Pick(selectorCtx, "mixed", selectionArgForSelector(selector, model), opts, selectorAuths)
 		if errPick != nil {
 			if isBuiltInSelector(selector) {
@@ -1683,12 +1753,16 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
 	eligibility := authSelectionEligibilityForRequest(ctx, opts)
+	quotaModel := quotaWindowBillingModel(opts, model)
 	if strings.TrimSpace(model) != "" {
 		providerSet := make(map[string]struct{}, len(eligibleProviders))
+		registryRef := registry.GetGlobalRegistry()
 		for _, providerKey := range eligibleProviders {
 			providerSet[providerKey] = struct{}{}
 		}
+		quotaCandidates := make([]*Auth, 0)
 		m.mu.RLock()
+		selector := m.selector
 		for _, candidate := range m.auths {
 			if candidate == nil || candidate.Disabled {
 				continue
@@ -1699,6 +1773,10 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 			if !eligibility.allows(candidate) {
 				continue
 			}
+			if !m.authSupportsRouteModel(registryRef, candidate, model) {
+				continue
+			}
+			quotaCandidates = append(quotaCandidates, candidate)
 			if _, used := tried[candidate.ID]; used {
 				continue
 			}
@@ -1708,6 +1786,17 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 			}
 		}
 		m.mu.RUnlock()
+		quotaCandidates = selectorAvailabilityCandidates(selector, quotaCandidates)
+		if gate := m.quotaWindowGateSnapshot(); gate != nil {
+			now := time.Now()
+			available, block, exhausted := evaluateQuotaWindowAuths(gate, quotaCandidates, quotaModel, now)
+			if exhausted {
+				return nil, nil, "", newQuotaWindowError(quotaModel, block, now)
+			}
+			if len(available) != len(quotaCandidates) {
+				return m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
+			}
+		}
 	}
 
 	selected, providerKey, errPick := m.scheduler.pickMixed(ctx, eligibleProviders, model, opts, tried)

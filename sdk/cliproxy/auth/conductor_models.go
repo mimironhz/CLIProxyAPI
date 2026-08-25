@@ -535,6 +535,8 @@ func (m *Manager) rebuildAPIKeyModelAliasLocked(cfg *internalconfig.Config) {
 
 	out := make(apiKeyModelAliasTable)
 	capabilities := make(apiKeyModelCapabilityTable)
+	quotaRoutes := make(quotaWindowRouteTable)
+	quotaRouteFingerprints := make(map[string]string)
 	for _, auth := range m.auths {
 		if auth == nil {
 			continue
@@ -545,6 +547,7 @@ func (m *Manager) rebuildAPIKeyModelAliasLocked(cfg *internalconfig.Config) {
 		if !isConfiguredModelRoutingAuth(auth) {
 			continue
 		}
+		quotaRouteFingerprints[auth.ID] = quotaWindowRoutingFingerprint(auth)
 
 		byAlias := make(map[string]string)
 		provider := strings.ToLower(strings.TrimSpace(auth.Provider))
@@ -594,12 +597,17 @@ func (m *Manager) rebuildAPIKeyModelAliasLocked(cfg *internalconfig.Config) {
 		if byCapability := compileAPIKeyModelCapabilitiesForAuth(cfg, auth); len(byCapability) > 0 {
 			capabilities[auth.ID] = byCapability
 		}
+		if routes := compileQuotaWindowRoutesForAuth(cfg, auth); len(routes.byClient) > 0 || len(routes.byUpstream) > 0 {
+			quotaRoutes[auth.ID] = routes
+		}
 	}
 
 	m.apiKeyModelRouting.Store(&apiKeyModelRoutingSnapshot{
-		config:       cfg,
-		aliases:      out,
-		capabilities: capabilities,
+		config:                 cfg,
+		aliases:                out,
+		capabilities:           capabilities,
+		quotaRoutes:            quotaRoutes,
+		quotaRouteFingerprints: quotaRouteFingerprints,
 	})
 }
 

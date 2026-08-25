@@ -473,6 +473,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
 	}
 	go func() {
+		defer reporter.EnsurePublished(ctx)
 		defer close(out)
 		defer func() {
 			if errClose := httpResp.Body.Close(); errClose != nil {
@@ -783,6 +784,10 @@ func (e *OpenAICompatExecutor) CountTokens(ctx context.Context, auth *cliproxyau
 	usageJSON := helps.BuildOpenAIUsageJSON(count)
 	translatedUsage := sdktranslator.TranslateTokenCount(ctx, to, responseFormat, count, usageJSON)
 	return cliproxyexecutor.Response{Payload: translatedUsage}, nil
+}
+
+func (e *OpenAICompatExecutor) QuotaWindowCountTokensUsesUpstream(*cliproxyauth.Auth) bool {
+	return false
 }
 
 // Refresh is a no-op for API-key based compatibility providers.

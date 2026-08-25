@@ -310,6 +310,11 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	}
 	routeModel := authSelectionModelFromOptions(opts, req.Model)
 	executionModel, restoreExecutionModel := executionModelForAuthSelection(opts, req.Model)
+	quotaModel := routeModel
+	if restoreExecutionModel {
+		quotaModel = executionModel
+	}
+	opts = withQuotaWindowBillingModel(opts, quotaModel)
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	homeMode := m.HomeEnabled()
 	homeAuthCount := 1
@@ -671,6 +676,11 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	routeModel := authSelectionModelFromOptions(opts, req.Model)
 	responseAlias := requestedModelAliasFromOptions(opts, routeModel)
 	executionModel, restoreExecutionModel := executionModelForAuthSelection(opts, req.Model)
+	quotaModel := routeModel
+	if restoreExecutionModel {
+		quotaModel = executionModel
+	}
+	opts = withQuotaWindowBillingModel(opts, quotaModel)
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	homeMode := m.HomeEnabled()
 	homeAuthCount := 1
@@ -895,6 +905,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		}
 		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, execReq, execOpts, routeModel, streamExecutionModel, models, pooled, aliasResult, routing, !homeMode || selection != nil, selection != nil, unauthorizedRefreshTried)
 		if errStream != nil {
+			if errors.Is(errStream, errQuotaWindowCredentialExhausted) {
+				delete(attempted, auth.ID)
+			}
 			if selection != nil {
 				excludeAuth := shouldExcludeHomeAuthAfterStreamError(execCtx, auth, errStream)
 				if _, refreshedAlready := unauthorizedRefreshTried[auth.ID]; refreshedAlready || homeSameAuthRetries[auth.ID] > 0 {
@@ -1712,5 +1725,12 @@ func (m *Manager) HttpRequest(ctx context.Context, auth *Auth, req *http.Request
 	if exec == nil {
 		return nil, &Error{Code: "provider_not_found", Message: "executor not registered for provider: " + providerKey}
 	}
-	return exec.HttpRequest(ctx, auth, req)
+	attemptCtx, errAdmit := m.quotaWindowAttemptContext(ctx, auth, quotaWindowModelFromContext(ctx))
+	if errAdmit != nil {
+		return nil, errAdmit
+	}
+	req = req.WithContext(attemptCtx)
+	response, errRequest := exec.HttpRequest(attemptCtx, auth, req)
+	FinishQuotaWindowUpstreamAttempt(attemptCtx)
+	return response, errRequest
 }

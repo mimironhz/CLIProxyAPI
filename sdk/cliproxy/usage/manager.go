@@ -51,6 +51,11 @@ type Record struct {
 	Failed      bool
 	Fail        Failure
 	Detail      Detail
+	// AdditionalUsagePending marks a primary record that must be combined with
+	// the immediately following AdditionalUsage record before quota settlement.
+	AdditionalUsagePending bool
+	// AdditionalUsage identifies a secondary model's token usage for the same request.
+	AdditionalUsage bool
 	// ResponseHeaders stores a snapshot of upstream response headers for usage sinks.
 	ResponseHeaders http.Header
 }
@@ -224,6 +229,8 @@ type Manager struct {
 	once     sync.Once
 	stopOnce sync.Once
 	cancel   context.CancelFunc
+	done     chan struct{}
+	started  bool
 
 	mu     sync.Mutex
 	cond   *sync.Cond
@@ -237,7 +244,7 @@ type Manager struct {
 
 // NewManager constructs a manager with a buffered queue.
 func NewManager(buffer int) *Manager {
-	m := &Manager{}
+	m := &Manager{done: make(chan struct{})}
 	m.cond = sync.NewCond(&m.mu)
 	return m
 }
@@ -253,6 +260,9 @@ func (m *Manager) Start(ctx context.Context) {
 		}
 		var workerCtx context.Context
 		workerCtx, m.cancel = context.WithCancel(ctx)
+		m.mu.Lock()
+		m.started = true
+		m.mu.Unlock()
 		go m.run(workerCtx)
 	})
 }
@@ -271,6 +281,29 @@ func (m *Manager) Stop() {
 		m.mu.Unlock()
 		m.cond.Broadcast()
 	})
+}
+
+// StopContext stops the dispatcher and waits for queued records within ctx.
+func (m *Manager) StopContext(ctx context.Context) error {
+	if m == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	m.Stop()
+	m.mu.Lock()
+	started := m.started
+	m.mu.Unlock()
+	if !started {
+		return nil
+	}
+	select {
+	case <-m.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // Register appends a plugin to the delivery list.
@@ -326,6 +359,7 @@ func (m *Manager) Publish(ctx context.Context, record Record) {
 }
 
 func (m *Manager) run(ctx context.Context) {
+	defer close(m.done)
 	for {
 		m.mu.Lock()
 		for !m.closed && len(m.queue) == 0 {
@@ -386,3 +420,6 @@ func StartDefault(ctx context.Context) { DefaultManager().Start(ctx) }
 
 // StopDefault stops the default manager's dispatcher.
 func StopDefault() { DefaultManager().Stop() }
+
+// StopDefaultContext stops and drains the default manager within ctx.
+func StopDefaultContext(ctx context.Context) error { return DefaultManager().StopContext(ctx) }
