@@ -1,822 +1,148 @@
-# Root / Relay cutover
+# Root / Relay deployment state
 
-This runbook switches ChatGPT Desktop from the monolithic CPA listener to the
-split topology without changing Desktop's configured base URL:
-
-```text
-ChatGPT Desktop -> Root 127.0.0.1:8317
-                         |-- stock -> chatgpt.com/backend-api/codex
-                         `-- third party -> authenticated CPA Relay 127.0.0.1:8318
-
-OrbStack clients -> 192.168.139.3:8318 -> CPA Relay 127.0.0.1:8318
-```
-
-The live `192.168.139.3:8317` bridge must be stopped before Root starts. If it
-remains active, it exposes the Desktop bearer-validation boundary to OrbStack.
-
-## Cutover candidate
-
-Use the exact private deployment directory recorded in the handoff manifest.
-Verify every SHA-256 in `manifest.sha256` before loading a job. Do not rebuild
-or edit an artifact in place; create a new versioned directory instead.
-
-### Current Root deployment: diagnostic capture disabled
-
-Root-only bundle activated on 2026-08-10:
+This runbook manages the local split proxy without accumulating an unbounded deployment history.
 
 ```text
-/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810T095458Z-root-debug-off
+Codex Desktop -> Root 127.0.0.1:8317
+                       |-- stock -> chatgpt.com/backend-api/codex
+                       `-- third party -> Relay 127.0.0.1:8318
+
+OrbStack clients -> 192.168.139.3:8318 -> Relay 127.0.0.1:8318
 ```
 
-Relay remains on:
+The repository helper is `scripts/root-relay-cutover.zsh`. Run any operation that restarts Root from an external Terminal during a quiet interval. Restarting Root from a Codex task routed through Root disconnects that task, and the helper refuses to restart Root while it sees established inbound clients.
+
+## State model
+
+`$HOME/.local/state/cliproxyapi/root-relay-cutover/deployment-state.json` is the sole reachability index. It records exactly two generations for each service: `active` and `rollback`.
+
+The managed layout is:
 
 ```text
-/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810T093216Z-official-agent-message-safe-v2
+root-relay-cutover/
+  deployment-state.json
+  20...-root-.../                 # immutable Root bundle
+  20...-relay-.../                # immutable Relay bundle
+  runtime/
+    root/root.yaml                # mutable installed Root config
+    root/.env                     # mutable installed Root environment
+    relay/relay.yaml              # mutable installed Relay config
+  rollback-snapshots/
+    root/<generation>/            # exact pre-switch config, plist, and .env
+    relay/<generation>/           # exact pre-switch config and plist
+  receipts/
+    root/current.{json,log}
+    relay/current.{json,log}
+    failed/latest.{json,log}
+  transactions/                   # empty outside an interrupted operation
 ```
 
-Root already used the info log level (`debug: false`). This deployment also
-turns off complete stock request/response payload capture with
-`stock-request-response-log: false`, while retaining the metadata-only access
-log. It was activated with the repository helper's `--activate-root` mode,
-which verified that Relay PID `45527` and bridge PID `4462` did not change.
+Relay keeps its existing working directory at `$HOME/.local/state/cliproxyapi/relay`; only its installed config moves to the stable runtime path. Service logs remain outside immutable bundles and must have a finite `logs-max-total-size-mb` policy in Relay configuration. Receipts overwrite fixed filenames.
 
-The live verification request advanced `access.ndjson` while
-`stock-traffic.ndjson` retained the same byte size and modification time.
+Immutable bundles are never edited in place. A successful activation snapshots the exact installed service files, advances the selected service's `active` and `rollback` slots atomically, verifies both services and the OrbStack bridge, and then removes every unreferenced bundle and rollback snapshot. The garbage collector also removes legacy loose activation scripts and the old `activation-logs` directory.
 
-### Deployed compatibility base: official subagent plaintext
+## Safety properties
 
-Activated paired compatibility candidate:
+- Root and Relay activate independently; a Relay-only change never restarts Root.
+- The other service and `192.168.139.3:8318` bridge must retain their listener PIDs during a single-service activation.
+- Runtime config is copied from the candidate and is never a symlink into an immutable bundle.
+- Rollback restores the exact files captured before the preceding switch, including Root's `.env`.
+- A pending transaction fails closed. Inspect its journal and reconcile live jobs, runtime files, and `deployment-state.json` before removing it.
+- Garbage collection derives its keep set only from the four state slots. It first moves candidates to a private Trash quarantine, re-verifies live state, and deletes the quarantine only after verification succeeds.
+- Exit status `3` means the service and state change committed but post-commit finalization failed. Inspect the current receipt first; if cleanup did not complete, run `--gc-dry-run` and `--gc` after investigating.
+
+## Candidate contract
+
+Candidates are service-specific direct children of `root-relay-cutover` with a UTC deployment basename matching `20*T*Z-*`; paired bundles that duplicate both binaries and both configs are rejected for new activations. The basename contract is also the garbage collector's discovery boundary, so a bundle that cannot be collected cannot be accepted.
+
+A Root candidate contains:
 
 ```text
-/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810T093216Z-official-agent-message-safe-v2
+manifest.json                      # includes "service": "root"
+manifest.sha256
+bin/root-proxy
+root/root.yaml
+root/.env
+launchd/com.user.cliproxy-root.plist
 ```
 
-Scope:
+A Relay candidate contains:
 
-- Restart `com.user.cliproxy-relay` first and `com.user.cliproxy-root` second.
-- Do not touch `com.user.cliproxy-orbstack-relay-v2`.
-- Roll back both jobs to `20260810T061815Z-followup-plaintext-safe`.
-- Root and Relay configuration files are carried forward byte-for-byte.
-- The first frozen candidate was rejected after Relay failed its health gate:
-  its launchd argument arrays accidentally retained both candidate and rollback
-  paths. Automatic rollback restored both services. This v2 candidate has exact
-  argument arrays, and preflight now rejects any duplicate or reordered entry.
+```text
+manifest.json                      # includes "service": "relay"
+manifest.sha256
+bin/cli-proxy-api-relay
+relay/relay.yaml
+launchd/com.user.cliproxy-relay.plist
+```
 
-Failure and change:
+`manifest.sha256` must cover exactly `manifest.json` plus the binary, config, plist, and Root `.env` where applicable. The bundle may contain no extra files or symlinks. The helper verifies this closed payload set before preflight or activation and normalizes the candidate plist to the immutable binary plus stable runtime config.
 
-- After the delegated-payload cutover, official `gpt-5.6-luna` subagents
-  received a native `agent_message` whose delivery envelope was `input_text`
-  but whose ordinary task body was mislabeled `encrypted_content`. The official
-  service tried to decrypt that plaintext and ended the turn with `Encrypted
-  function output content could not be decrypted or decoded.`
-- Root now promotes only structurally verified plaintext delegation parts to
-  `input_text` before forwarding official HTTP or WebSocket turns. It keeps the
-  outer native `agent_message`, metadata, ordering, and genuine opaque
-  `encrypted_content` unchanged for the official service to decrypt.
-- Relay's xAI/DeepSeek compatibility remains provider-local: it still converts
-  `agent_message` to a user message and removes opaque parts rather than
-  exposing them. Broad optional multi-agent optimization remains disabled.
+## One-time migration
 
-Run only from an external Terminal during a quiet interval:
+Migration preserves exact live config bytes even when an old whole-bundle manifest no longer matches because its config was edited after activation. It uses the named legacy active bundles only to identify the running binaries, normalizes the named legacy rollback bundle plists onto stable runtime paths for generation 1, restarts Relay and then Root, writes state, and prunes deeper history. Subsequent snapshots preserve the exact installed plist bytes.
+
+Run this only from an external Terminal when Root has no active clients:
 
 ```bash
-CANDIDATE=/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810T093216Z-official-agent-message-safe-v2
-ROLLBACK=/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810T061815Z-followup-plaintext-safe
 HELPER=/Users/dwolf/Projects/CLIProxyAPI-mimironhz/scripts/root-relay-cutover.zsh
+CUTOVER=$HOME/.local/state/cliproxyapi/root-relay-cutover
 
-"$HELPER" \
-  --candidate "$CANDIDATE" \
-  --root-rollback "$ROLLBACK" \
-  --relay-rollback "$ROLLBACK" \
-  --preflight
-
-"$HELPER" \
-  --candidate "$CANDIDATE" \
-  --root-rollback "$ROLLBACK" \
-  --relay-rollback "$ROLLBACK" \
-  --activate
+"$HELPER" --migrate-state \
+  --root-active "$CUTOVER/<current-root-bundle>" \
+  --root-rollback "$CUTOVER/<previous-root-bundle>" \
+  --relay-active "$CUTOVER/<current-relay-bundle>" \
+  --relay-rollback "$CUTOVER/<previous-relay-bundle>"
 ```
 
-Acceptance requires all of the following:
-
-1. Both health endpoints return `{"status":"ok"}`, both launchd jobs target
-   the candidate, and the OrbStack bridge PID is unchanged.
-2. A fresh `gpt-5.6-luna/max` subagent receives a long initial task and repeats
-   its unique sentinel exactly instead of returning the encrypted-output error.
-3. The same Luna worker receives a `followup_task` sentinel exactly.
-4. Fresh DeepSeek initial and same-worker follow-up sentinels remain visible,
-   and a fresh Grok delegation completes without HTTP 422.
-5. Sanitized Root access metadata shows HTTP 200 and upstream 200 completion
-   for the official and Relay probes.
-
-If any gate fails, roll back both jobs from the same external Terminal:
+Migration refuses to overwrite an existing state file. Verify the result with:
 
 ```bash
-"$HELPER" \
-  --candidate "$CANDIDATE" \
-  --root-rollback "$ROLLBACK" \
-  --relay-rollback "$ROLLBACK" \
-  --rollback
+"$HELPER" --status
+"$HELPER" --gc-dry-run
 ```
 
-### Current deployment: delegated payload compatibility
+## Normal activation
 
-Activated and verified Root + Relay candidate as of 2026-08-10:
-
-```text
-/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810T061815Z-followup-plaintext-safe
-```
-
-Scope:
-
-- Restart `com.user.cliproxy-relay` and `com.user.cliproxy-root` together.
-- Do not touch `com.user.cliproxy-orbstack-relay-v2`.
-- Roll back Root to `20260805T052624Z-b6ff2fbc`.
-- Roll back Relay to `20260810T034432Z-398f082c`.
-- Root and Relay configuration files are carried forward byte-for-byte.
-
-Change:
-
-- Root maps the reserved `collaboration` namespace to
-  `collaboration-optimize` before removing the `message.encrypted` marker from
-  `spawn_agent`, `followup_task`, and `send_message`, then restores the original
-  namespace on official HTTP/SSE and WebSocket responses. This avoids official
-  reserved-schema validation while keeping Desktop's tool names unchanged.
-- Stock-only multi-agent traffic, unrelated message tools, tool descriptions,
-  model lists, and opaque tool arguments are unchanged.
-- xAI and DeepSeek convert Codex-only `agent_message` into a standard user
-  message without enabling the optional broad multi-agent optimization.
-- Codex Desktop can still label a plaintext `<codex_delegation>` task envelope
-  or a plaintext follow-up as `encrypted_content` after the parent tool call.
-  DeepSeek and xAI promote only a structurally verified task envelope, or
-  text-safe follow-up content paired with the exact four-line Codex delivery
-  envelope, into model-visible `input_text`. Control-bearing text, known
-  encrypted prefixes, long decodable base64/base64url blobs, malformed delivery
-  envelopes, and unrelated encrypted parts are removed.
-
-This pairing is required. Relay alone cannot recover an already sealed task,
-and Root alone would still send `agent_message` to an incompatible worker.
-
-### Root + Relay activation
-
-The reusable external helper is stored in this repository at
-`scripts/root-relay-cutover.zsh`. Run it only from an external Terminal after
-the preparing task has completed.
-Never invoke `launchctl bootout` for Root from a Codex task routed through Root:
-that necessarily disconnects the task's own `/v1/responses` stream. The bundled
-helper waits for launchd's asynchronous removal transaction, retries transient
-bootstrap error 5, and automatically restores both rollback bundles if either
-candidate service fails health. Choose a quiet interval with no active
-delegated turns.
+Preflight is read-only:
 
 ```bash
-CANDIDATE=/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810T061815Z-followup-plaintext-safe
-ROOT_ROLLBACK=/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260805T052624Z-b6ff2fbc
-RELAY_ROLLBACK=/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810T034432Z-398f082c
-HELPER=/Users/dwolf/Projects/CLIProxyAPI-mimironhz/scripts/root-relay-cutover.zsh
+"$HELPER" --service relay --candidate "$CUTOVER/<relay-candidate>" --preflight
+"$HELPER" --service root --candidate "$CUTOVER/<root-candidate>" --preflight
 ```
 
-1. Verify all immutable artifacts:
-
-   ```bash
-   (cd "$CANDIDATE" && shasum -a 256 -c manifest.sha256)
-   (cd "$ROOT_ROLLBACK" && shasum -a 256 -c manifest.sha256)
-   (cd "$RELAY_ROLLBACK" && shasum -a 256 -c manifest.sha256)
-   ```
-
-2. Preflight the external activation helper. It validates all three manifests,
-   requires the expected rollback baseline, and does not change services:
-
-   ```bash
-   "$HELPER" \
-     --candidate "$CANDIDATE" \
-     --root-rollback "$ROOT_ROLLBACK" \
-     --relay-rollback "$RELAY_ROLLBACK" \
-     --preflight
-   ```
-
-3. Run the helper from that external Terminal. It activates and health-checks
-   Relay first, then Root, and leaves the bridge untouched:
-
-   ```bash
-   "$HELPER" \
-     --candidate "$CANDIDATE" \
-     --root-rollback "$ROOT_ROLLBACK" \
-     --relay-rollback "$RELAY_ROLLBACK" \
-     --activate
-   ```
-
-4. Verify the installed job targets, both loopback health endpoints, and the
-   unchanged bridge PID:
-
-   ```bash
-   test "$(plutil -extract ProgramArguments.0 raw -o - "$HOME/Library/LaunchAgents/com.user.cliproxy-root.plist")" = "$CANDIDATE/bin/root-proxy"
-   test "$(plutil -extract ProgramArguments.0 raw -o - "$HOME/Library/LaunchAgents/com.user.cliproxy-relay.plist")" = "$CANDIDATE/bin/cli-proxy-api-relay"
-   curl -fsS http://127.0.0.1:8317/healthz | jq -e '.status == "ok"'
-   curl -fsS http://127.0.0.1:8318/healthz | jq -e '.status == "ok"'
-   test "$(lsof -nP -iTCP@192.168.139.3:8318 -sTCP:LISTEN -t)" = "$BRIDGE_PID"
-   ```
-
-5. From Codex Desktop, create a fresh `deepseek-v4-flash/max` subagent with a
-   unique sentinel in a long task body. Require the worker to repeat that
-   sentinel, then send a follow-up with a second sentinel and require that one.
-   Repeat a short delegated probe with `grok-4.5/high`; require completion with
-   no HTTP 422. Do not accept a generic acknowledgement as payload proof.
-
-6. If either probe fails, roll back both jobs from the same external Terminal:
-
-   ```bash
-   "$HELPER" \
-     --candidate "$CANDIDATE" \
-     --root-rollback "$ROOT_ROLLBACK" \
-     --relay-rollback "$RELAY_ROLLBACK" \
-     --rollback
-   ```
-
-The repository helper requires immutable candidate and rollback directories,
-validates all three manifests before changing services, activates Relay before
-Root, preserves the bridge PID, and writes mode-0600 sanitized status metadata
-under `~/.local/state/cliproxyapi/root-relay-cutover/activation-logs`. The
-candidate-bundled helper used for the 2026-08-10 activation had SHA-256
-`8ed4c5eb104063e1cf6a83e1a78e2918cad545bd5598343da4d05c1149a3d226`;
-the repository copy is the maintained source for future candidates.
-
-### Activation record: 2026-08-10
-
-Candidate commit:
-
-```text
-4e72870fa9851ae3db3fa19af187bbfe0564dd02
-```
-
-The external helper activated Relay first and Root second. Relay PID `6583`
-and Root PID `6642` served the candidate while bridge PID `4462` remained
-unchanged. Both health endpoints returned `{"status":"ok"}`.
-
-Live model-visible payload proof:
-
-- DeepSeek initial delegation returned
-  `DEEPSEEK_INITIAL_20260810T0627Z_M6P3K` exactly.
-- The same DeepSeek worker's `followup_task` returned
-  `DEEPSEEK_FOLLOWUP_20260810T0628Z_R9T4V` exactly.
-- A fresh Grok delegation returned `GROK_DELEGATION_20260810T0629Z_B7N2F`
-  exactly with HTTP 200 and no HTTP 422.
-- Sanitized Root access metadata recorded both DeepSeek requests, the Grok
-  request, and recent official `gpt-5.6-sol` traffic with HTTP 200 and upstream
-  200 completion evidence.
-
-No rollback was triggered. These PIDs and health observations are historical
-activation evidence, not invariants for a later cutover.
-
-The repository helper's non-mutating `--preflight` path was exercised at
-2026-08-10T06:40:45Z against the live immutable bundle. It revalidated the
-manifest, both job targets, both health endpoints, and bridge PID, then wrote
-`preflight_passed` with `No services changed.`
-
-### Rejected candidate: follow-up payload loss
-
-The candidate below delivered the initial structured task successfully, but the
-same-worker `followup_task` returned `PAYLOAD_NOT_VISIBLE`. The follow-up body
-was ordinary plaintext directly labeled `encrypted_content`, not a structured
-`<codex_delegation>` envelope. It was rolled back on 2026-08-10 and must not be
-reused:
-
-```text
-/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810T055724Z-plaintext-delegation-safe
-```
-
-### Rejected candidate: initial payload loss
-
-The candidate below passed HTTP health and official reserved-schema validation,
-but a real DeepSeek worker received only the short `Payload:` envelope and
-returned `PAYLOAD_NOT_VISIBLE`. The full task remained in a plaintext
-`<codex_delegation>` part mislabeled as `encrypted_content`. It was rolled back
-on 2026-08-10 and must not be reused:
-
-```text
-/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810T051259Z-reserved-schema-safe
-```
-
-### Rejected candidate: do not activate
-
-The candidate below was activated briefly, rejected by the official upstream,
-and rolled back on 2026-08-10. It must not be reused:
-
-```text
-/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810T044233Z-delegation-compat
-```
-
-It removed `message.encrypted` in place from the reserved `collaboration`
-namespace. Official Codex returned HTTP 400 with `Function
-'collaboration.followup_task' is reserved for use by this model and must match
-the configured schema.` Ten consecutive official requests failed with the same
-249-byte response; after paired rollback, official requests returned HTTP 200.
-
-### Previous live handoff (Relay-only): xAI `agent_message` compatibility
-
-Frozen Relay-only candidate:
-
-```text
-/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810T034432Z-398f082c
-```
-
-Scope:
-
-- **Restart only** `com.user.cliproxy-relay`
-- **Do not touch** `com.user.cliproxy-root` or `com.user.cliproxy-orbstack-relay-v2`
-- Live Root remains `20260805T052624Z-b6ff2fbc` (multi-agent v2 advertisement)
-- Rollback Relay is `20260807T031713Z-90e19091` (previous live Relay)
-
-Change:
-
-- Codex delegated turns may contain the Codex-only `agent_message` input item
-- For Grok/xAI upstream only, the proxy converts it to a user `message`
-- Nested `encrypted_content` parts become ordinary `input_text`
-- Broader multi-agent optimization remains optional
-- `relay.yaml` is carried forward unchanged from the previous live Relay bundle
-
-Defect this fixes:
-
-Grok's strict Responses `ModelInput` decoder rejects `agent_message`, returning
-HTTP 422 before inference. The existing compatibility rewrite was gated behind
-`codex.optimize-multi-agent-v2`, so delegated Grok turns failed whenever that
-optional setting was disabled.
-
-### Previous Relay-only activation (already completed)
-
-Restart only Relay after verifying candidate hashes. Preserve Root and bridge
-process identity throughout.
+Activate only the service carried by the candidate. Automatic pruning is the default:
 
 ```bash
-RELAY_CANDIDATE=/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260810T034432Z-398f082c
-RELAY_ROLLBACK=/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260807T031713Z-90e19091
-ROOT_LIVE=/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260805T052624Z-b6ff2fbc
+"$HELPER" --service relay --candidate "$CUTOVER/<relay-candidate>" --activate
+"$HELPER" --service root --candidate "$CUTOVER/<root-candidate>" --activate
 ```
 
-1. Verify the candidate and immutable references:
+Use `--no-prune` only for a diagnosed cleanup problem; it is not a normal deployment option.
 
-   ```bash
-   (cd "$RELAY_CANDIDATE" && shasum -a 256 -c manifest.sha256)
-   (cd "$RELAY_ROLLBACK" && shasum -a 256 -c manifest.sha256)
-   # Root is not restarted; confirm the live Root binary still matches the pin.
-   shasum -a 256 "$ROOT_LIVE/bin/root-proxy" "$RELAY_CANDIDATE/bin/root-proxy"
-   ```
+## Rollback
 
-   Expect the two `root-proxy` hashes to be identical
-   (`b6ff2fbcb5473773f7d3eb0507049ce343a6624af9eaecc64b45b00ab35c46b0`).
-
-2. Record pre-cutover PIDs and listeners. Require Root on `127.0.0.1:8317`, Relay
-   on `127.0.0.1:8318`, and the only bridge on `192.168.139.3:8318`:
-
-   ```bash
-   lsof -nP -iTCP@127.0.0.1:8317 -sTCP:LISTEN
-   lsof -nP -iTCP@127.0.0.1:8318 -sTCP:LISTEN
-   lsof -nP -iTCP@192.168.139.3:8318 -sTCP:LISTEN
-   ps -p "$(lsof -nP -iTCP@127.0.0.1:8317 -sTCP:LISTEN -t)" -o pid=,command=
-   ps -p "$(lsof -nP -iTCP@127.0.0.1:8318 -sTCP:LISTEN -t)" -o pid=,command=
-   ```
-
-3. Replace only Relay:
-
-   ```bash
-   ROOT_PID=$(lsof -nP -iTCP@127.0.0.1:8317 -sTCP:LISTEN -t)
-   BRIDGE_PID=$(lsof -nP -iTCP@192.168.139.3:8318 -sTCP:LISTEN -t)
-   launchctl bootout "gui/$(id -u)/com.user.cliproxy-relay"
-   test -z "$(lsof -nP -iTCP@127.0.0.1:8318 -sTCP:LISTEN)"
-   install -m 600 "$RELAY_CANDIDATE/launchd/com.user.cliproxy-relay.plist" \
-     "$HOME/Library/LaunchAgents/com.user.cliproxy-relay.plist"
-   launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.user.cliproxy-relay.plist"
-   ```
-
-4. Verify identity and topology:
-
-   ```bash
-   # New Relay binary/config
-   shasum -a 256 "$(plutil -extract ProgramArguments.0 raw -o - "$HOME/Library/LaunchAgents/com.user.cliproxy-relay.plist")"
-   # Expect: 2d97b07d2643ec8bb7d78f502f5ffc012e475ec476a331ef86da1ce922336602
-
-   # Root + bridge PIDs must be unchanged
-   test "$(lsof -nP -iTCP@127.0.0.1:8317 -sTCP:LISTEN -t)" = "$ROOT_PID"
-   test "$(lsof -nP -iTCP@192.168.139.3:8318 -sTCP:LISTEN -t)" = "$BRIDGE_PID"
-
-   # Catalog through Root (Desktop path)
-   curl -fsS -H 'Authorization: Bearer desktop-preflight' \
-     'http://127.0.0.1:8317/v1/models?client_version=0.146.0' \
-     | jq -r '.models[].slug'
-
-   # Direct Relay smoke: grok-4.5 must complete
-   set -a; . "$ROOT_LIVE/root/.env"; set +a
-   curl -fsSN -H "Authorization: Bearer $CPA_RELAY_API_KEY" \
-     -H 'Content-Type: application/json' \
-     --data '{"model":"grok-4.5","stream":true,"input":"Reply exactly RELAY_READY_OK."}' \
-     http://127.0.0.1:8318/v1/responses | rg -q '"type":"response.completed"'
-   ```
-
-5. Delegation acceptance:
-
-   - Send a `grok-4.5` delegated turn containing `agent_message` through Root.
-   - Require `response.completed` and no HTTP 422.
-   - Check the Relay request log structurally: upstream input must contain a user
-     `message` with `input_text`, never `agent_message` or nested
-     `encrypted_content`.
-
-6. If Relay verification fails, roll back Relay only:
-
-   ```bash
-   launchctl bootout "gui/$(id -u)/com.user.cliproxy-relay"
-   install -m 600 "$RELAY_ROLLBACK/launchd/com.user.cliproxy-relay.plist" \
-     "$HOME/Library/LaunchAgents/com.user.cliproxy-relay.plist"
-   launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.user.cliproxy-relay.plist"
-   ```
-
-   Reverify the rollback Relay binary hash
-   (`75bc1116f02f4a3aaef730ec3fbb37c3f8b027042c21cb0cdb9a218acd7f2d40`) and that
-   Root/bridge PIDs never changed.
-
-### Previous Root-only multi-agent v2 candidate (already live)
-
-```text
-/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260805T052624Z-b6ff2fbc
-```
-
-This Root-only bundle remains the live Root process. It is not part of the
-Relay activation above; it is listed so rollback and dependency pins stay
-discoverable.
-
-### Historical Root-only readable-logging candidate
-
-```text
-/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260730T070219Z-c7a1cca9
-```
-
-Preserved for history. Do not use it as the current handoff target.
-
-## Stable log and state layout
-
-No mutable file belongs inside a versioned bundle. A bundle is an immutable,
-hash-verified rollback artifact; anything that grows or is rewritten at runtime
-must live under a bundle-independent path, or its location silently changes at
-every cutover and its writes invalidate `manifest.sha256`.
-
-Root always satisfied this through the absolute `logging.directory` in
-`root.yaml`. Relay and the bridge did not, and were corrected in
-`20260731T074512Z-72df0b9e`. The stable roots are now:
-
-```text
-/Users/dwolf/.local/state/cliproxyapi/root/
-  bootstrap.{stdout,stderr}.log   launchd capture
-  logs/                           root.log, access.ndjson, stock-traffic.ndjson
-/Users/dwolf/.local/state/cliproxyapi/relay/
-  bootstrap.{stdout,stderr}.log   launchd capture; the primary Relay log
-  logs/                           error-api-*.log
-  static/                         management assets
-  auth/                           credentials
-/Users/dwolf/.local/state/cliproxyapi/bridge/
-  orbstack-relay-v2.log           socat capture
-```
-
-Relay has four sinks, not one, and only the first is a launchd path. Because
-`logging-to-file: false`, its logrus output goes to stdout, so launchd's capture
-*is* the application log. The other three follow `ResolveLogDirectory`
-(`internal/logging/global_logger.go:139`) and `managementasset`, neither of
-which has a config key — both derive from `util.WritablePath()`, then the
-working directory, then `auth-dir`. Setting `WRITABLE_PATH` in the Relay plist
-pins `logs/` and `static/` deterministically; without it they fell back to
-`<auth-dir>/logs` and `<cwd>/static`, i.e. back inside the bundle. Setting
-`WRITABLE_PATH` also redirects Postgres/object/git store local paths, which is
-inert here because Relay uses the file store.
-
-Two consequences. Relay's launchd capture never rotates and is no longer
-implicitly reset by each cutover, so it needs a `newsyslog.d` entry before it
-matters. And `auth-dir` is stable, so a credential refresh no longer reports
-manifest drift against the bundle — the drift caveat in the Root-only
-activation below applies to bundles staged before this change.
-
-The production catalog intentionally contains:
-
-- stock: `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`
-- Relay: `deepseek-v4-flash`, `grok-4.5`
-
-`deepseek-v4-pro` was removed from both `root.yaml` and `relay.yaml` on
-2026-07-31 because DeepSeek's Responses API does not serve it: the request is
-rejected with HTTP `400` and "Codex integration with deepseek-v4-pro will be
-available starting early August 2026." Restoring it means adding the model back
-to `routing.relay-models` and `routing.relay-model-providers` in `root.yaml` and
-to the `deepseek` provider's `models` list in `relay.yaml` — nothing else, since
-the provider already speaks the Responses API for every model it carries.
-
-The Relay reaches DeepSeek through `api: responses` on its
-`openai-compatibility` entry, so requests go to `/responses` instead of being
-translated into `/chat/completions`. Three consequences are worth knowing during
-verification. Reasoning arrives as the item's own `content` and is rewritten
-into the `summary` form Codex renders, then sealed into `encrypted_content` as
-before. A replayed reasoning item is unsealed back into `content`, which
-DeepSeek does read, so the chain of thought survives a tool call. And the stream
-ends on `response.completed` with no `data: [DONE]` marker, so a body that stops
-earlier is reported as a truncated turn rather than an empty success.
-
-`kimi-k3` was the original Relay entry and was removed in
-`20260731T074512Z-72df0b9e`. Removal is by exclusion, not deletion:
-`relay.yaml` now lists all seven registry Kimi models under
-`oauth-excluded-models.kimi`, so the Kimi credential remains present but serves
-nothing. Re-enabling `kimi-k3` means dropping that one exclusion entry and
-restoring both `routing.relay-models` and `routing.relay-model-providers` in
-`root.yaml`. Any Desktop thread still pinned to `kimi-k3` cannot be resumed
-while the exclusion stands.
-
-`grok-4.5` is live on the Relay arm via xAI OAuth. It is no longer excluded
-from the production catalog. Image-generation Grok models remain excluded under
-`oauth-excluded-models.xai`.
-
-The Root config uses `websocket.mode: http-fallback`. The installed Codex client
-attempts WebSocket, accepts Root's authenticated HTTP `426`, and switches the
-session to HTTP/SSE. `first-message` remains an experimental opt-in for the
-turn-aware WebSocket controller.
-
-Synthesized Relay entries omit OpenAI's optional `comp_hash`. This prevents an
-ordinary model switch from forcing an old-provider compact and lets Codex replay
-full history across stock and Relay. DeepSeek context-limit compaction is handled
-provider-locally: Relay summarizes through native Responses, returns one
-`deepseek-compaction-v1:` item, and expands that item only for later DeepSeek
-turns. The summary remains provider-bound and cannot cross to another model
-family.
-
-## Historical: Root-only readable logging activation
-
-Preserved as the completed Root logging cutover. Do not run it for the
-current Relay `inspect_image` handoff.
-
-
-Run this only from an external Terminal after the Codex task that prepared the
-candidate has durably completed. Do not run it in-band through the serving Root.
-
-1. Verify the new candidate and both immutable references:
-
-   ```bash
-   ROOT_CANDIDATE=/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260730T070219Z-c7a1cca9
-   ROOT_ROLLBACK=/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260730T051458Z-30d98ff9
-   RELAY_CANDIDATE=/Users/dwolf/.local/state/cliproxyapi/root-relay-cutover/20260730T063922Z-33d64b1e
-   (cd "$ROOT_CANDIDATE" && shasum -a 256 -c manifest.sha256)
-   (cd "$ROOT_ROLLBACK" && shasum -a 256 -c manifest.sha256)
-   (cd "$RELAY_CANDIDATE" && shasum -a 256 -c manifest.sha256)
-   ```
-
-   A mutable Relay auth file can legitimately drift from its old manifest after
-   credential refresh. That does not authorize replacing, copying, or restarting
-   Relay; verify the pinned binary/config/plist identities in
-   `dependencies/relay.json` separately.
-
-2. Record the current Root, Relay, and bridge listener PIDs and executable paths.
-   Require Root on `127.0.0.1:8317`, Relay on `127.0.0.1:8318`, and the only
-   bridge on `192.168.139.3:8318`. Then replace only Root:
-
-   ```bash
-   launchctl bootout "gui/$(id -u)/com.user.cliproxy-root"
-   test -z "$(lsof -nP -iTCP@127.0.0.1:8317 -sTCP:LISTEN)"
-   install -m 600 "$ROOT_CANDIDATE/launchd/com.user.cliproxy-root.plist" "$HOME/Library/LaunchAgents/com.user.cliproxy-root.plist"
-   launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.user.cliproxy-root.plist"
-   ```
-
-3. Verify the new Root executable and config hashes, loopback-only `8317`, the
-   unchanged Relay/bridge PIDs and hashes, health, catalog, one stock turn, and a
-   fresh `root.stock-traffic.v2` record with `payload_encoding: "utf-8"`. The
-   existing active traffic file may contain older v1 records before the new v2
-   records. Leave Relay and both bridge labels untouched.
-
-4. If Root verification fails, roll back Root only:
-
-   ```bash
-   launchctl bootout "gui/$(id -u)/com.user.cliproxy-root"
-   install -m 600 "$ROOT_ROLLBACK/launchd/com.user.cliproxy-root.plist" "$HOME/Library/LaunchAgents/com.user.cliproxy-root.plist"
-   launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.user.cliproxy-root.plist"
-   ```
-
-   Reverify the rollback binary/config hashes and `8317`; do not boot out,
-   bootstrap, reload, or edit Relay or the OrbStack bridge.
-
-## Initial split-deployment reference
-
-The following Phase A/Phase B procedure documents the completed initial split.
-Do not rerun it for the Root-only readable-logging activation above.
-
-Its commands are preserved as the historical record of what was actually run and
-are deliberately not rewritten. They assert the then-current `kimi-k3` catalog
-and the then-current bundle-scoped log paths, both of which are now wrong; see
-the catalog and stable-layout sections above for the current expectations.
-
-### Phase A: stage Relay without Desktop impact
-
-Run this phase from Terminal. Set `DEPLOYMENT_DIR` to the manifest directory and
-read the Relay key from its private Root environment file without printing it:
+Rollback swaps the selected service's two slots and captures the pre-rollback live files as the new immediate rollback:
 
 ```bash
-DEPLOYMENT_DIR=/absolute/private/deployment/path
-set -a
-. "$DEPLOYMENT_DIR/root/.env"
-set +a
+"$HELPER" --service relay --rollback
+"$HELPER" --service root --rollback
 ```
 
-1. Verify the manifest, permissions, and free ports:
+Root rollback has the same quiet-client requirement as Root activation.
 
-   ```bash
-   (cd "$DEPLOYMENT_DIR" && shasum -a 256 -c manifest.sha256)
-   stat -f '%Sp %N' "$DEPLOYMENT_DIR/relay/relay.yaml" "$DEPLOYMENT_DIR/root/root.yaml" "$DEPLOYMENT_DIR/root/.env"
-   lsof -nP -iTCP:8318 -sTCP:LISTEN
-   ```
+## Garbage collection and inspection
 
-   All three secret-bearing files must be `-rw-------`, and the final command
-   must return no listener before staging.
-
-2. Install the inactive Relay and bridge plists, then load Relay first:
-
-   ```bash
-   install -m 600 "$DEPLOYMENT_DIR/launchd/com.user.cliproxy-relay.plist" "$HOME/Library/LaunchAgents/com.user.cliproxy-relay.plist"
-   install -m 600 "$DEPLOYMENT_DIR/launchd/com.user.cliproxy-orbstack-relay-v2.plist" "$HOME/Library/LaunchAgents/com.user.cliproxy-orbstack-relay-v2.plist"
-   launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.user.cliproxy-relay.plist"
-   ```
-
-3. Prove the authenticated Relay boundary:
-
-   ```bash
-   test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8318/v1/models)" = 401
-   curl -fsS -H "Authorization: Bearer $CPA_RELAY_API_KEY" http://127.0.0.1:8318/v1/models | jq -e '[.data[].id] == ["kimi-k3"]'
-   curl -fsSN -H "Authorization: Bearer $CPA_RELAY_API_KEY" -H 'Content-Type: application/json' \
-     --data '{"model":"kimi-k3","stream":true,"input":"Reply exactly RELAY_READY_OK."}' \
-     http://127.0.0.1:8318/v1/responses | rg -q '"type":"response.completed"'
-   ```
-
-   Do not proceed unless the authenticated turn reaches `response.completed`.
-
-4. Load the new OrbStack bridge and repeat the authenticated model and Kimi
-   checks from the OrbStack client:
-
-   ```bash
-   launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.user.cliproxy-orbstack-relay-v2.plist"
-   ```
-
-5. Update Hermes to `http://192.168.139.3:8318/v1`, install the same CPA key in
-   its mode-`0600` config, gracefully reload `hermes-gateway.service`, and prove
-   an authenticated Kimi turn. Confirm no Hermes connection still uses port
-   `8317`.
-
-### Phase B: switch Desktop
-
-Only run this phase from an external Terminal during a quiescent window. Do not
-run it from a Codex task whose connection traverses the serving `8317` proxy.
-
-1. Install the inactive Root plist:
-
-   ```bash
-   install -d -m 700 /Users/dwolf/.local/state/cliproxyapi/root
-   install -m 600 "$DEPLOYMENT_DIR/launchd/com.user.cliproxy-root.plist" "$HOME/Library/LaunchAgents/com.user.cliproxy-root.plist"
-   ```
-
-2. Remove the old OrbStack exposure before freeing loopback `8317`:
-
-   ```bash
-   launchctl bootout "gui/$(id -u)/com.user.cliproxy-orbstack-relay"
-   test -z "$(lsof -nP -iTCP@192.168.139.3:8317 -sTCP:LISTEN)"
-   ```
-
-3. Stop the old monolithic CPA and start Root:
-
-   ```bash
-   launchctl bootout "gui/$(id -u)/com.user.cliproxy-api"
-   test -z "$(lsof -nP -iTCP@127.0.0.1:8317 -sTCP:LISTEN)"
-   launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.user.cliproxy-root.plist"
-   ```
-
-   `bootout` lasts only for the current login session. Both old plists remain
-   installed for rollback with `RunAtLoad`, so without the following step they
-   restart at the next login: `com.user.cliproxy-api` would race Root for
-   loopback `8317`, and `com.user.cliproxy-orbstack-relay` would re-bind
-   `192.168.139.3:8317` and forward OrbStack straight into Root. Persist the
-   removal in the per-user override database:
-
-   ```bash
-   launchctl disable "gui/$(id -u)/com.user.cliproxy-api"
-   launchctl disable "gui/$(id -u)/com.user.cliproxy-orbstack-relay"
-   launchctl print-disabled "gui/$(id -u)" | rg 'cliproxy-(api|orbstack-relay)"'
-   ```
-
-   Both labels must report `=> disabled`. This is state, not a file: it survives
-   reboot and is not undone by reinstalling a plist.
-
-4. Verify identity and topology before opening Desktop:
-
-   ```bash
-   launchctl print "gui/$(id -u)/com.user.cliproxy-root"
-   lsof -nP -iTCP:8317 -sTCP:LISTEN
-   lsof -nP -iTCP:8318 -sTCP:LISTEN
-   curl -fsS http://127.0.0.1:8317/healthz
-   curl -fsS -H 'Authorization: Bearer desktop-preflight' 'http://127.0.0.1:8317/v1/models?client_version=0.146.0' | jq -e '[.models[].slug] == ["gpt-5.6-sol","gpt-5.6-terra","gpt-5.6-luna","kimi-k3"]'
-   ```
-
-   The only `8317` listener must be `127.0.0.1`; the bridge must expose only
-   `192.168.139.3:8318`.
-
-5. Run the exact installed Codex client through Root for one stock turn and one
-   Kimi turn. Confirm the client logs one `426` WebSocket fallback per process,
-   both turns reach `turn.completed`, and Root never falls back across provider
-   arms. Then verify a stock-to-Kimi and Kimi-to-stock model change in Desktop.
-
-6. Verify native logging without printing credentials:
-
-   ```bash
-   ROOT_LOG_DIR=/Users/dwolf/.local/state/cliproxyapi/root/logs
-   stat -f '%Sp %N' "$ROOT_LOG_DIR" "$ROOT_LOG_DIR/root.log" "$ROOT_LOG_DIR/access.ndjson" "$ROOT_LOG_DIR/stock-traffic.ndjson"
-   jq -e 'select(.schema == "root.access.v1")' "$ROOT_LOG_DIR/access.ndjson" >/dev/null
-   jq -s -e 'length > 0 and all(.schema == "root.stock-traffic.v1" or .schema == "root.stock-traffic.v2") and any(.schema == "root.stock-traffic.v2" and .kind == "end" and .capture_complete == true) and any(.schema == "root.stock-traffic.v2" and .payload_encoding == "utf-8" and has("payload_text"))' "$ROOT_LOG_DIR/stock-traffic.ndjson" >/dev/null
-   set -a
-   . "$DEPLOYMENT_DIR/root/.env"
-   set +a
-   ! rg --search-zip -F --quiet "$CPA_RELAY_API_KEY" "$ROOT_LOG_DIR"
-   ```
-
-   The directory must be `drwx------` and each active file `-rw-------`.
-   Access records must cover health, model discovery, `426`, stock, and Relay
-   requests. Traffic records must name only configured stock models. Inspect a
-   selected v2 `payload_text` field with `jq '.payload_text'` so untrusted control
-   bytes stay escaped; use `jq -r` only when redirecting exact content to a
-   private file. Decode `payload_base64` only for binary fallback records. Do not
-   copy the complete traffic file into tickets or chat.
-
-## Initial split rollback
-
-Use launchd `bootout`/`bootstrap`; do not `kill` a KeepAlive job.
-
-1. Boot out `com.user.cliproxy-root` and verify loopback `8317` is free.
-2. Restore the snapshotted `com.user.cliproxy-api` binary, config, and plist only
-   if their hashes differ from the rollback manifest. Preserve the executable
-   mode explicitly:
-
-   ```bash
-   install -m 700 "$DEPLOYMENT_DIR/rollback/cli-proxy-api.live" /Users/dwolf/Projects/CLIProxyAPI-mimironhz/cli-proxy-api
-   install -m 600 "$DEPLOYMENT_DIR/rollback/config.yaml.live" /Users/dwolf/Projects/CLIProxyAPI-mimironhz/config.yaml
-   install -m 600 "$DEPLOYMENT_DIR/rollback/com.user.cliproxy-api.plist.live" "$HOME/Library/LaunchAgents/com.user.cliproxy-api.plist"
-   ```
-3. Re-enable the label before bootstrapping it. Phase B disabled it in the
-   per-user override database, and `bootstrap` on a disabled label does not
-   bring the job up:
-
-   ```bash
-   launchctl enable "gui/$(id -u)/com.user.cliproxy-api"
-   ```
-
-   Then bootstrap `com.user.cliproxy-api`, verify its exact binary/config hashes
-   and `GET /healthz`, and reopen Desktop.
-4. For a Desktop-only rollback, leave Hermes on the functioning authenticated
-   Relay `8318`; the Root job must remain booted out.
-5. For a full rollback, first restore Hermes's old `8317` config and reload it.
-   Then remove the new bridge and Relay before restoring the old bridge:
-
-   ```bash
-   launchctl bootout "gui/$(id -u)/com.user.cliproxy-orbstack-relay-v2"
-   launchctl bootout "gui/$(id -u)/com.user.cliproxy-relay"
-   test -z "$(lsof -nP -iTCP:8318 -sTCP:LISTEN)"
-   launchctl enable "gui/$(id -u)/com.user.cliproxy-orbstack-relay"
-   launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.user.cliproxy-orbstack-relay.plist"
-   ```
-
-   The `enable` is required for the same reason as step 3.
-
-6. The three new plist files may remain installed as inactive staged artifacts,
-   but booting them out is not sufficient: all three carry `RunAtLoad`, so a
-   retained file does return as a process and a listener at the next login.
-   Disable each label, then verify it is both absent and disabled:
-
-   ```bash
-   for label in com.user.cliproxy-root com.user.cliproxy-relay com.user.cliproxy-orbstack-relay-v2; do
-     launchctl disable "gui/$(id -u)/$label"
-     ! launchctl print "gui/$(id -u)/$label"
-     launchctl print-disabled "gui/$(id -u)" | rg -q "\"$label\" => disabled"
-   done
-   ```
-
-   Retaining the files is intentional; the `disable` state is what keeps them
-   inert. Re-enable a label before any later attempt to bootstrap it.
-
-7. Native Root logs are not deleted during rollback. They remain private under
-   `/Users/dwolf/.local/state/cliproxyapi/root/logs` for diagnosis and expire by
-   the configured retention policy. Remove them only through a separately
-   authorized sensitive-data cleanup.
-
-Desktop-only rollback is complete when old CPA health and identity are restored.
-Full rollback additionally requires the recorded pre-cutover listeners, process
-paths, and artifact hashes, with no listener on `8318`.
-
-Either way, confirm the surviving login-time state explicitly. Every installed
-`com.user.cliproxy-*` label must be either loaded on purpose or disabled; a
-label that is merely booted out is a reboot away from returning:
+Preview and apply reachability-based cleanup with:
 
 ```bash
-for f in "$HOME"/Library/LaunchAgents/com.user.cliproxy-*.plist; do
-  label=$(plutil -extract Label raw -o - "$f")
-  launchctl list | awk '{print $3}' | grep -qx "$label" && continue
-  launchctl print-disabled "gui/$(id -u)" | rg -q "\"$label\" => disabled" \
-    || echo "HAZARD: $label is neither loaded nor disabled"
-done
+"$HELPER" --gc-dry-run
+"$HELPER" --gc
+"$HELPER" --status
 ```
 
-Never inspect these plists with `plutil -extract` without `-o -`; omitting it
-rewrites the plist in place with the extracted value and destroys the artifact.
+`--gc` is safe to repeat. It does not delete the stable runtime directory, state, receipts, pending transactions, service logs, installed plists, or any of the four state-referenced bundles.
+
+## Interrupted operations
+
+Do not delete a non-empty `transactions` entry just to clear the guard. Read `journal.json`, compare the active bundle recorded in state with the programs reported by `launchctl print`, verify both health endpoints, and compare the stable runtime files with the transaction's `before-*` and `staged-*` copies. Restore or commit the intended side first, verify the bridge, and only then remove the reconciled transaction and run `--gc`.
