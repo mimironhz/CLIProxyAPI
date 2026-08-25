@@ -325,7 +325,8 @@ func TestHandleDirectWebsocketQuotaAdmissionPreservesUnknownRecoveryBody(t *test
 		t.Fatalf("response JSON = %v; body=%s", errJSON, body)
 	}
 	errorBody, _ := payload["error"].(map[string]any)
-	if errorBody["code"] != "quota_window_exhausted" || errorBody["available_at"] != nil {
+	param, hasParam := errorBody["param"]
+	if errorBody["code"] != "quota_window_exhausted" || errorBody["type"] != "rate_limit_error" || !hasParam || param != nil || errorBody["available_at"] != nil {
 		t.Fatalf("error body = %#v", errorBody)
 	}
 	select {
@@ -387,10 +388,23 @@ func TestRealtimeQuotaAccumulatorBoundsTruncatedFrames(t *testing.T) {
 	accumulator := &realtimeQuotaAccumulator{}
 	accumulator.Observe([]byte(`{"type":"session.updated"}`), true)
 	accumulator.Observe([]byte(`{"type":"session.updated"}`), true)
-	if accumulator.detail.InputTokens != truncatedQuotaTokenUsage || accumulator.detail.OutputTokens != truncatedQuotaTokenUsage || accumulator.detail.TotalTokens != truncatedQuotaTokenUsage {
-		t.Fatalf("truncated usage = %+v, want bounded sentinel %d", accumulator.detail, truncatedQuotaTokenUsage)
+	want := 2 * truncatedQuotaTokenUsage
+	if accumulator.detail.InputTokens != want || accumulator.detail.OutputTokens != want || accumulator.detail.TotalTokens != want {
+		t.Fatalf("truncated usage = %+v, want %d per dimension", accumulator.detail, want)
 	}
 	if accumulator.detail.TotalTokens == maxQuotaTokenUsage {
 		t.Fatal("truncated usage exhausted the int64 range")
+	}
+}
+
+func TestRealtimeQuotaAccumulatorAddsTruncationAfterParsedUsage(t *testing.T) {
+	accumulator := &realtimeQuotaAccumulator{detail: coreusage.Detail{
+		InputTokens:  truncatedQuotaTokenUsage + 1,
+		OutputTokens: truncatedQuotaTokenUsage + 2,
+		TotalTokens:  truncatedQuotaTokenUsage + 3,
+	}}
+	accumulator.Observe([]byte(`{"type":"response.completed"}`), true)
+	if accumulator.detail.InputTokens != 2*truncatedQuotaTokenUsage+1 || accumulator.detail.OutputTokens != 2*truncatedQuotaTokenUsage+2 || accumulator.detail.TotalTokens != 2*truncatedQuotaTokenUsage+3 {
+		t.Fatalf("truncated usage after parsed usage = %+v", accumulator.detail)
 	}
 }

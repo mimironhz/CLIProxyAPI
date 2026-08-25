@@ -20,6 +20,7 @@ type providerSchedule struct {
 	disabled  bool
 	base      *Schedule
 	models    map[string]*Schedule
+	uniform   bool
 	upstreams map[string]*Schedule
 	raw       config.ProviderQuota
 }
@@ -285,8 +286,8 @@ func validateSharedUpstreamSchedules(cfg *config.Config, providers map[string]*p
 			model string
 			key   string
 		}
-		byUpstream := make(map[string]policy)
-		add := func(upstream, model string, schedule *Schedule) error {
+		providerPoliciesByUpstream := make(map[string]policy)
+		add := func(byUpstream map[string]policy, upstream, model string, schedule *Schedule) error {
 			if upstream == "" || schedule == nil {
 				return nil
 			}
@@ -296,10 +297,13 @@ func validateSharedUpstreamSchedules(cfg *config.Config, providers map[string]*p
 				return fmt.Errorf("provider-quota.%s.models: %q and %q resolve to shared upstream %q with conflicting schedules", providerName, previous.model, model, upstream)
 			}
 			byUpstream[upstream] = policy{model: model, key: policyKey}
-			provider.upstreams[upstream] = schedule
 			return nil
 		}
 		for _, routes := range routeGroups[providerName] {
+			byUpstream := providerPoliciesByUpstream
+			if provider.scope == "credential" {
+				byUpstream = make(map[string]policy)
+			}
 			seenUpstreams := make(map[string]struct{}, len(routes))
 			for _, upstream := range routes {
 				if _, seen := seenUpstreams[upstream]; seen {
@@ -309,38 +313,72 @@ func validateSharedUpstreamSchedules(cfg *config.Config, providers map[string]*p
 				matchedOverride := false
 				for model, schedule := range provider.models {
 					resolved := routes[strings.ToLower(strings.TrimSpace(model))]
-					if resolved == "" {
-						resolved = config.CanonicalQuotaModels(nil, model)
-					}
 					if resolved != upstream {
 						continue
 					}
 					matchedOverride = true
-					if errAdd := add(upstream, model, schedule); errAdd != nil {
+					if errAdd := add(byUpstream, upstream, model, schedule); errAdd != nil {
 						return errAdd
 					}
 				}
 				if !matchedOverride {
-					if errAdd := add(upstream, "<provider default>", provider.base); errAdd != nil {
+					if errAdd := add(byUpstream, upstream, "<provider default>", provider.base); errAdd != nil {
 						return errAdd
 					}
 				}
 			}
 		}
-		for model, schedule := range provider.models {
-			if errAdd := add(config.CanonicalQuotaModels(nil, model), model, schedule); errAdd != nil {
-				return errAdd
+		provider.uniform = providerSchedulesUniform(provider)
+		if provider.uniform {
+			for _, routes := range routeGroups[providerName] {
+				for model, upstream := range routes {
+					schedule := provider.models[strings.ToLower(strings.TrimSpace(model))]
+					if schedule == nil {
+						schedule = provider.base
+					}
+					if schedule != nil {
+						provider.upstreams[upstream] = schedule
+					}
+				}
 			}
 		}
 	}
 	return nil
 }
 
+// providerSchedulesUniform proves that unseen per-auth routes cannot introduce
+// a different policy behind an upstream-only cache entry.
+func providerSchedulesUniform(provider *providerSchedule) bool {
+	if provider == nil {
+		return false
+	}
+	policyKey := ""
+	check := func(schedule *Schedule) bool {
+		if schedule == nil {
+			return true
+		}
+		if policyKey == "" {
+			policyKey = schedulePolicyKey(schedule)
+			return true
+		}
+		return schedulePolicyKey(schedule) == policyKey
+	}
+	if !check(provider.base) {
+		return false
+	}
+	for _, schedule := range provider.models {
+		if !check(schedule) {
+			return false
+		}
+	}
+	return policyKey != ""
+}
+
 func schedulePolicyKey(schedule *Schedule) string {
 	if schedule == nil {
 		return ""
 	}
-	return config.QuotaWindowsPolicyKey(schedule.raw)
+	return schedule.policyKey
 }
 
 func compileProvider(name string, raw config.ProviderQuota, defaultScope string, disabled bool) (*providerSchedule, error) {
@@ -525,10 +563,14 @@ func (g *Gate) sharedUpstreamSchedule(provider *providerSchedule, auth *coreauth
 	if g == nil || g.resolver == nil || provider == nil {
 		return nil, false
 	}
-	if schedule := provider.upstreams[strings.ToLower(strings.TrimSpace(target.UpstreamModel))]; schedule != nil {
-		return schedule, false
+	if provider.uniform {
+		if schedule := provider.models[strings.ToLower(strings.TrimSpace(target.ClientModel))]; schedule != nil {
+			return schedule, false
+		}
+		if schedule := provider.upstreams[strings.ToLower(strings.TrimSpace(target.UpstreamModel))]; schedule != nil {
+			return schedule, false
+		}
 	}
-	// Fall back to live routing for identities not predictable from configured routes.
 	models := make([]string, 0, len(provider.models))
 	for model := range provider.models {
 		models = append(models, model)

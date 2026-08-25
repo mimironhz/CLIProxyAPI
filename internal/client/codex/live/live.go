@@ -824,7 +824,7 @@ func writeResponseHeaders(destination, source http.Header) {
 }
 
 func writeLiveError(c *gin.Context, status int, message string) {
-	if c != nil && c.Request != nil && c.Request.URL != nil && strings.HasPrefix(c.Request.URL.Path, "/v1/realtime") {
+	if isRealtimeRequest(c) {
 		errorType := "api_error"
 		if status >= http.StatusBadRequest && status < http.StatusInternalServerError {
 			errorType = "invalid_request_error"
@@ -836,6 +836,36 @@ func writeLiveError(c *gin.Context, status int, message string) {
 		return
 	}
 	c.JSON(status, gin.H{"error": message})
+}
+
+func isRealtimeRequest(c *gin.Context) bool {
+	return c != nil && c.Request != nil && c.Request.URL != nil && strings.HasPrefix(c.Request.URL.Path, "/v1/realtime")
+}
+
+func quotaWindowErrorBody(c *gin.Context, err error) []byte {
+	body := []byte(err.Error())
+	if !isRealtimeRequest(c) {
+		return body
+	}
+	var payload map[string]any
+	if errJSON := json.Unmarshal(body, &payload); errJSON != nil {
+		return body
+	}
+	errorBody, ok := payload["error"].(map[string]any)
+	if !ok {
+		return body
+	}
+	if _, exists := errorBody["type"]; !exists {
+		errorBody["type"] = "rate_limit_error"
+	}
+	if _, exists := errorBody["param"]; !exists {
+		errorBody["param"] = nil
+	}
+	encoded, errMarshal := json.Marshal(payload)
+	if errMarshal != nil {
+		return body
+	}
+	return encoded
 }
 
 func writeSelectionError(c *gin.Context, err error) {
@@ -851,7 +881,7 @@ func writeSelectionError(c *gin.Context, err error) {
 		if contentType == "" {
 			contentType = "application/json"
 		}
-		c.Data(status, contentType, []byte(err.Error()))
+		c.Data(status, contentType, quotaWindowErrorBody(c, err))
 		return
 	}
 	writeLiveError(c, status, err.Error())

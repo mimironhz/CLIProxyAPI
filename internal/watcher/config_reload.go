@@ -100,6 +100,7 @@ func (w *Watcher) reloadConfig() bool {
 	} else {
 		if resolvedAuthDir, errResolveAuthDir := util.ResolveAuthDir(newConfig.AuthDir); errResolveAuthDir != nil {
 			log.Errorf("failed to resolve auth directory from config: %v", errResolveAuthDir)
+			return false
 		} else {
 			newConfig.AuthDir = resolvedAuthDir
 		}

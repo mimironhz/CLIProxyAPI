@@ -1343,6 +1343,39 @@ func TestReloadConfigUsesMirroredAuthDir(t *testing.T) {
 	}
 }
 
+func TestReloadConfigRejectsAuthDirResolutionFailure(t *testing.T) {
+	t.Setenv("HOME", "")
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if errMkdir := os.MkdirAll(authDir, 0o755); errMkdir != nil {
+		t.Fatalf("create auth dir: %v", errMkdir)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if errWrite := os.WriteFile(configPath, []byte("port: 8317\n"), 0o644); errWrite != nil {
+		t.Fatalf("write config: %v", errWrite)
+	}
+	callbackCalls := 0
+	w := &Watcher{
+		configPath:     configPath,
+		authDir:        authDir,
+		lastAuthHashes: make(map[string]string),
+		reloadCallback: func(*config.Config) { callbackCalls++ },
+	}
+	w.SetConfig(&config.Config{AuthDir: authDir, Port: 8316})
+	if ok := w.reloadConfig(); ok {
+		t.Fatal("reloadConfig() = true, want auth-dir resolution failure rejected")
+	}
+	if callbackCalls != 0 {
+		t.Fatalf("reload callback calls = %d, want 0", callbackCalls)
+	}
+	w.clientsMutex.RLock()
+	current := w.config
+	w.clientsMutex.RUnlock()
+	if current == nil || current.AuthDir != authDir || current.Port != 8316 {
+		t.Fatalf("installed config changed after rejected reload: %#v", current)
+	}
+}
+
 func TestReloadConfigFiltersAffectedOAuthProviders(t *testing.T) {
 	tmpDir := t.TempDir()
 	authDir := filepath.Join(tmpDir, "auth")

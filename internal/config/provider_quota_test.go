@@ -91,9 +91,24 @@ func TestValidateProviderQuota(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "provider base conflicts with prefixed override on shared upstream",
+			name: "credential scoped base and prefixed override use distinct budgets",
 			cfg: Config{
 				ProviderQuota: map[string]ProviderQuota{"codex": {
+					Scope:        "credential",
+					QuotaWindows: QuotaWindows{Timezone: "UTC", Windows: []QuotaWindow{{Name: "base", Start: "00:00", End: "23:59", Budget: &QuotaBudget{Requests: &one}}}},
+					Models:       map[string]QuotaWindows{"team-a/gpt-5": {Timezone: "UTC", Windows: []QuotaWindow{{Name: "override", Start: "00:00", End: "23:59", Budget: &QuotaBudget{Requests: &zero}}}}},
+				}},
+				CodexKey: []CodexKey{
+					{APIKey: "base", Models: []CodexModel{{Name: "gpt-5", Alias: "gpt-5"}}},
+					{APIKey: "prefixed", Prefix: "team-a", Models: []CodexModel{{Name: "gpt-5", Alias: "gpt-5"}}},
+				},
+			},
+		},
+		{
+			name: "provider scoped base conflicts with prefixed override on shared upstream",
+			cfg: Config{
+				ProviderQuota: map[string]ProviderQuota{"codex": {
+					Scope:        "provider",
 					QuotaWindows: QuotaWindows{Timezone: "UTC", Windows: []QuotaWindow{{Name: "base", Start: "00:00", End: "23:59", Budget: &QuotaBudget{Requests: &one}}}},
 					Models:       map[string]QuotaWindows{"team-a/gpt-5": {Timezone: "UTC", Windows: []QuotaWindow{{Name: "override", Start: "00:00", End: "23:59", Budget: &QuotaBudget{Requests: &zero}}}}},
 				}},
@@ -118,7 +133,7 @@ func TestValidateProviderQuota(t *testing.T) {
 			},
 		},
 		{
-			name: "OAuth aliases do not override API key base schedules",
+			name: "credential scoped OAuth and API key schedules remain independent",
 			cfg: Config{
 				ProviderQuota: map[string]ProviderQuota{"codex": {
 					QuotaWindows: QuotaWindows{Timezone: "UTC", Windows: []QuotaWindow{{Name: "base", Start: "00:00", End: "23:59", Budget: &QuotaBudget{Requests: &one}}}},
@@ -127,7 +142,6 @@ func TestValidateProviderQuota(t *testing.T) {
 				OAuthModelAlias: map[string][]OAuthModelAlias{"codex": {{Name: "gpt-5", Alias: "oauth-alias"}}},
 				CodexKey:        []CodexKey{{APIKey: "key", Models: []CodexModel{{Name: "gpt-5", Alias: "api-alias"}}}},
 			},
-			wantErr: true,
 		},
 		{
 			name: "compat quota rejects built in provider identity collision",

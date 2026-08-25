@@ -228,7 +228,7 @@ func TestGateRejectsConflictingSchedulesForSharedUpstreamAliases(t *testing.T) {
 	zero := int64(0)
 	one := int64(1)
 	cfg := &config.Config{
-		ProviderQuota: map[string]config.ProviderQuota{"deepseek": {Models: map[string]config.QuotaWindows{
+		ProviderQuota: map[string]config.ProviderQuota{"deepseek": {Scope: "credential", Models: map[string]config.QuotaWindows{
 			"alias-a": {Windows: []config.QuotaWindow{{Name: "peak", Start: "00:00", End: "12:00", Budget: &config.QuotaBudget{Requests: &zero}}}},
 			"alias-b": {Windows: []config.QuotaWindow{{Name: "peak", Start: "00:00", End: "12:00", Budget: &config.QuotaBudget{Requests: &one}}}},
 		}}},
@@ -251,6 +251,7 @@ func TestGateRejectsProviderBaseConflictWithPrefixedOverride(t *testing.T) {
 	zero, one := int64(0), int64(1)
 	cfg := &config.Config{
 		ProviderQuota: map[string]config.ProviderQuota{"codex": {
+			Scope:        "provider",
 			QuotaWindows: config.QuotaWindows{Timezone: "UTC", Windows: []config.QuotaWindow{{Name: "base", Start: "00:00", End: "23:59", Budget: &config.QuotaBudget{Requests: &one}}}},
 			Models:       map[string]config.QuotaWindows{"team-a/gpt-5": {Timezone: "UTC", Windows: []config.QuotaWindow{{Name: "override", Start: "00:00", End: "23:59", Budget: &config.QuotaBudget{Requests: &zero}}}}},
 		}},
@@ -266,9 +267,94 @@ func TestGateRejectsProviderBaseConflictWithPrefixedOverride(t *testing.T) {
 	}
 }
 
+func TestGateAllowsCredentialScopedBaseAndPrefixedOverride(t *testing.T) {
+	zero, one := int64(0), int64(1)
+	cfg := &config.Config{
+		ProviderQuota: map[string]config.ProviderQuota{"codex": {
+			QuotaWindows: config.QuotaWindows{Timezone: "UTC", Windows: []config.QuotaWindow{{Name: "base", Start: "00:00", End: "23:59", Budget: &config.QuotaBudget{Requests: &one}}}},
+			Models:       map[string]config.QuotaWindows{"team-a/gpt-5": {Timezone: "UTC", Windows: []config.QuotaWindow{{Name: "override", Start: "00:00", End: "23:59", Budget: &config.QuotaBudget{Requests: &zero}}}}},
+		}},
+		CodexKey: []config.CodexKey{
+			{APIKey: "base", Models: []config.CodexModel{{Name: "gpt-5", Alias: "gpt-5"}}},
+			{APIKey: "prefixed", Prefix: "team-a", Models: []config.CodexModel{{Name: "gpt-5", Alias: "gpt-5"}}},
+		},
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.SetConfig(cfg)
+	gate, errNew := New(cfg, manager, t.TempDir())
+	if errNew != nil {
+		t.Fatalf("New() error = %v", errNew)
+	}
+	defer gate.Close()
+	baseAuth := &coreauth.Auth{ID: "base", Provider: "codex", FileName: "base.json"}
+	prefixedAuth := &coreauth.Auth{ID: "prefixed", Provider: "codex", Prefix: "team-a", FileName: "prefixed.json"}
+	base, baseConfigured := gate.resolve(baseAuth, "gpt-5")
+	prefixed, prefixedConfigured := gate.resolve(prefixedAuth, "team-a/gpt-5")
+	if !baseConfigured || !prefixedConfigured || base.schedule != gate.providers["codex"].base || prefixed.schedule != gate.providers["codex"].models["team-a/gpt-5"] {
+		t.Fatalf("resolved schedules = base:%#v prefixed:%#v", base.schedule, prefixed.schedule)
+	}
+	if base.budgetKey == prefixed.budgetKey {
+		t.Fatalf("credential-scoped routes share budget key %q", base.budgetKey)
+	}
+}
+
+func TestGateDetectsPerAuthOAuthAliasConflictBeyondConfiguredRoutes(t *testing.T) {
+	one, two := int64(1), int64(2)
+	cfg := &config.Config{
+		ProviderQuota: map[string]config.ProviderQuota{"codex": {Scope: "provider", Models: map[string]config.QuotaWindows{
+			"alias-a": {Timezone: "UTC", Windows: []config.QuotaWindow{{Name: "first", Start: "00:00", End: "23:59", Budget: &config.QuotaBudget{Requests: &one}}}},
+			"alias-b": {Timezone: "UTC", Windows: []config.QuotaWindow{{Name: "second", Start: "00:00", End: "23:59", Budget: &config.QuotaBudget{Requests: &two}}}},
+		}}},
+		OAuthModelAlias: map[string][]config.OAuthModelAlias{"codex": {{Name: "gpt-5", Alias: "alias-a"}}},
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.SetConfig(cfg)
+	manager.SetOAuthModelAlias(cfg.OAuthModelAlias)
+	auth := &coreauth.Auth{ID: "oauth", Provider: "codex", FileName: "oauth.json", Attributes: map[string]string{coreauth.AttributeAuthKind: coreauth.AuthKindOAuth}}
+	coreauth.SetOAuthModelAliasesAttribute(auth, []config.OAuthModelAlias{{Name: "gpt-5", Alias: "alias-b"}})
+	gate, errNew := New(cfg, manager, t.TempDir())
+	if errNew != nil {
+		t.Fatalf("New() error = %v", errNew)
+	}
+	defer gate.Close()
+	targetA := manager.ResolveQuotaWindowTarget(auth, "alias-a")
+	targetB := manager.ResolveQuotaWindowTarget(auth, "alias-b")
+	block, blocked := gate.BlockedForModel([]*coreauth.Auth{auth}, "alias-b", time.Date(2026, time.August, 21, 12, 0, 0, 0, time.UTC))
+	if !blocked || block.Window != "configuration-conflict" {
+		t.Fatalf("BlockedForModel() = %#v, %t; targets = %#v, %#v; want configuration conflict", block, blocked, targetA, targetB)
+	}
+}
+
+func TestGateDoesNotTreatClientOverrideAsUnrelatedUpstreamSchedule(t *testing.T) {
+	one := int64(1)
+	cfg := &config.Config{
+		ProviderQuota: map[string]config.ProviderQuota{"codex": {Models: map[string]config.QuotaWindows{
+			"gpt-5": {Timezone: "UTC", Windows: []config.QuotaWindow{{Name: "override", Start: "00:00", End: "23:59", Budget: &config.QuotaBudget{Requests: &one}}}},
+		}}},
+		CodexKey: []config.CodexKey{{APIKey: "key", Models: []config.CodexModel{
+			{Name: "gpt-5-codex", Alias: "gpt-5"},
+			{Name: "gpt-5", Alias: "legacy"},
+		}}},
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.SetConfig(cfg)
+	auth := &coreauth.Auth{ID: "api-key", Provider: "codex", Attributes: map[string]string{coreauth.AttributeAuthKind: coreauth.AuthKindAPIKey, coreauth.AttributeAPIKey: "key"}}
+	gate, errNew := New(cfg, manager, t.TempDir())
+	if errNew != nil {
+		t.Fatalf("New() error = %v", errNew)
+	}
+	defer gate.Close()
+	if resolved, configured := gate.resolve(auth, "legacy"); configured || resolved.schedule != nil {
+		t.Fatalf("legacy route unexpectedly configured: %#v", resolved)
+	}
+	if resolved, configured := gate.resolve(auth, "gpt-5"); !configured || resolved.schedule == nil {
+		t.Fatalf("gpt-5 override missing: %#v", resolved)
+	}
+}
+
 func TestSchedulePolicyKeyMatchesRawConfigPolicy(t *testing.T) {
 	persist := true
-	windows := config.QuotaWindows{Timezone: "UTC", Persist: &persist, Windows: []config.QuotaWindow{{Name: "peak", Start: "09:00", End: "17:00", Days: []string{"fri", "mon"}}}}
+	windows := config.QuotaWindows{Timezone: "America/Los_Angeles", Persist: &persist, Windows: []config.QuotaWindow{{Name: "peak", Start: "09:00", End: "17:00", Days: []string{"fri", "mon"}}}}
 	schedule, errCompile := compileProviderSchedule("codex", "codex|provider", windows)
 	if errCompile != nil {
 		t.Fatalf("compileProviderSchedule() error = %v", errCompile)

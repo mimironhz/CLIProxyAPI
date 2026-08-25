@@ -222,8 +222,8 @@ func validateSharedUpstreamQuotaSchedules(cfg *Config) error {
 			model string
 			key   string
 		}
-		byUpstream := make(map[string]policy)
-		add := func(upstream, model string, windows QuotaWindows) error {
+		providerPoliciesByUpstream := make(map[string]policy)
+		add := func(byUpstream map[string]policy, upstream, model string, windows QuotaWindows) error {
 			policyKey := QuotaWindowsPolicyKey(windows)
 			previous, exists := byUpstream[upstream]
 			if exists && previous.key != policyKey {
@@ -233,32 +233,32 @@ func validateSharedUpstreamQuotaSchedules(cfg *Config) error {
 			return nil
 		}
 		for _, routes := range routeGroups[provider] {
+			byUpstream := providerPoliciesByUpstream
+			if policies.scope == "credential" {
+				byUpstream = make(map[string]policy)
+			}
+			seenUpstreams := make(map[string]struct{}, len(routes))
 			for _, upstream := range routes {
+				if _, seen := seenUpstreams[upstream]; seen {
+					continue
+				}
+				seenUpstreams[upstream] = struct{}{}
 				matchedOverride := false
 				for model, windows := range policies.models {
 					resolved := routes[strings.ToLower(strings.TrimSpace(model))]
-					if resolved == "" {
-						resolved = CanonicalQuotaModels(nil, model)
-					}
 					if resolved != upstream {
 						continue
 					}
 					matchedOverride = true
-					if errAdd := add(upstream, model, windows); errAdd != nil {
+					if errAdd := add(byUpstream, upstream, model, windows); errAdd != nil {
 						return errAdd
 					}
 				}
 				if !matchedOverride && policies.base != nil {
-					if errAdd := add(upstream, "<provider default>", *policies.base); errAdd != nil {
+					if errAdd := add(byUpstream, upstream, "<provider default>", *policies.base); errAdd != nil {
 						return errAdd
 					}
 				}
-			}
-		}
-		for model, windows := range policies.models {
-			upstream := CanonicalQuotaModels(nil, model)
-			if errAdd := add(upstream, model, windows); errAdd != nil {
-				return errAdd
 			}
 		}
 	}
@@ -266,6 +266,7 @@ func validateSharedUpstreamQuotaSchedules(cfg *Config) error {
 }
 
 type effectiveProviderQuotaPolicy struct {
+	scope  string
 	base   *QuotaWindows
 	models map[string]QuotaWindows
 }
@@ -274,7 +275,11 @@ func effectiveProviderQuotaPolicies(cfg *Config) map[string]effectiveProviderQuo
 	out := make(map[string]effectiveProviderQuotaPolicy)
 	for rawProvider, quota := range cfg.ProviderQuota {
 		provider := strings.ToLower(strings.TrimSpace(rawProvider))
-		out[provider] = effectiveQuotaPolicy(quota)
+		defaultScope := "credential"
+		if _, builtIn := builtInQuotaProviders[provider]; !builtIn {
+			defaultScope = "provider"
+		}
+		out[provider] = effectiveQuotaPolicy(quota, defaultScope)
 	}
 	for i := range cfg.OpenAICompatibility {
 		entry := &cfg.OpenAICompatibility[i]
@@ -292,9 +297,9 @@ func effectiveProviderQuotaPolicies(cfg *Config) map[string]effectiveProviderQuo
 			quota = *entry.Quota
 			hasQuota = true
 		}
-		policy := effectiveProviderQuotaPolicy{models: make(map[string]QuotaWindows)}
+		policy := effectiveProviderQuotaPolicy{scope: "provider", models: make(map[string]QuotaWindows)}
 		if hasQuota {
-			policy = effectiveQuotaPolicy(quota)
+			policy = effectiveQuotaPolicy(quota, "provider")
 		}
 		for j := range entry.Models {
 			model := &entry.Models[j]
@@ -315,8 +320,12 @@ func effectiveProviderQuotaPolicies(cfg *Config) map[string]effectiveProviderQuo
 	return out
 }
 
-func effectiveQuotaPolicy(quota ProviderQuota) effectiveProviderQuotaPolicy {
-	policy := effectiveProviderQuotaPolicy{models: inheritedQuotaModelWindows(quota)}
+func effectiveQuotaPolicy(quota ProviderQuota, defaultScope string) effectiveProviderQuotaPolicy {
+	scope := strings.ToLower(strings.TrimSpace(quota.Scope))
+	if scope == "" {
+		scope = defaultScope
+	}
+	policy := effectiveProviderQuotaPolicy{scope: scope, models: inheritedQuotaModelWindows(quota)}
 	if len(quota.Windows) > 0 {
 		base := quota.QuotaWindows
 		policy.base = &base

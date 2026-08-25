@@ -702,15 +702,9 @@ func (a *realtimeQuotaAccumulator) Observe(payload []byte, truncated bool) {
 		// oversized text frame is non-terminal. Charge it conservatively instead of
 		// allowing token-only budgets to be bypassed by placing usage after the cap.
 		a.observed = true
-		if a.detail.InputTokens < truncatedQuotaTokenUsage {
-			a.detail.InputTokens = truncatedQuotaTokenUsage
-		}
-		if a.detail.OutputTokens < truncatedQuotaTokenUsage {
-			a.detail.OutputTokens = truncatedQuotaTokenUsage
-		}
-		if a.detail.TotalTokens < truncatedQuotaTokenUsage {
-			a.detail.TotalTokens = truncatedQuotaTokenUsage
-		}
+		a.detail.InputTokens = saturatingQuotaTokenAdd(a.detail.InputTokens, truncatedQuotaTokenUsage)
+		a.detail.OutputTokens = saturatingQuotaTokenAdd(a.detail.OutputTokens, truncatedQuotaTokenUsage)
+		a.detail.TotalTokens = saturatingQuotaTokenAdd(a.detail.TotalTokens, truncatedQuotaTokenUsage)
 		return
 	}
 	detail, ok := helps.ParseCodexUsage(payload)

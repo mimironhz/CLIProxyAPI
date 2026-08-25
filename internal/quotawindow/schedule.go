@@ -24,6 +24,7 @@ type Schedule struct {
 	location        *time.Location
 	persist         bool
 	windows         []compiledWindow
+	policyKey       string
 	raw             config.QuotaWindows
 }
 
@@ -78,6 +79,7 @@ func CompileSchedule(id string, raw config.QuotaWindows) (*Schedule, error) {
 			budget:      cloneBudget(window.Budget),
 		})
 	}
+	schedule.policyKey = config.QuotaWindowsPolicyKey(raw)
 	return schedule, nil
 }
 
