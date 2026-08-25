@@ -3354,6 +3354,31 @@
       }
     },
     {
+      "id": "deepseek-v4-flash-vision-exp",
+      "object": "model",
+      "created": 1776988800,
+      "owned_by": "deepseek",
+      "type": "deepseek",
+      "display_name": "DS/v4 Flash Vision Exp",
+      "description": "DS/v4 Flash Vision Exp",
+      "context_length": 1048576,
+      "max_completion_tokens": 393216,
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "thinking": {
+        "zero_allowed": false,
+        "levels": [
+          "high",
+          "max"
+        ]
+      }
+    },
+    {
       "id": "deepseek-v4-pro",
       "object": "model",
       "created": 1776988800,
