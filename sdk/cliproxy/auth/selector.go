@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"math"
@@ -78,25 +79,62 @@ type blockReason int
 const (
 	blockReasonNone blockReason = iota
 	blockReasonCooldown
+	blockReasonTransient
 	blockReasonDisabled
 	blockReasonOther
 )
 
-type modelCooldownError struct {
-	model    string
-	resetIn  time.Duration
-	provider string
+// blockPrecedence orders tied timed blocks so the most specific classification wins.
+// Quota outranks a transient upstream failure, which in turn outranks an
+// unclassified credential block.
+func blockPrecedence(reason blockReason) int {
+	switch reason {
+	case blockReasonCooldown:
+		return 2
+	case blockReasonTransient:
+		return 1
+	default:
+		return 0
+	}
 }
 
-func newModelCooldownError(model, provider string, resetIn time.Duration) *modelCooldownError {
+// modelCooldownError reports that every candidate credential sits inside a finite
+// proxy-local cooldown window. A quota or rate cooldown keeps the 429 rate-limit
+// contract; a window opened by a transient upstream or transport failure is a local
+// service condition and answers 503 with a distinct error code. 529 is never
+// synthesized here — it is only ever passed through from an upstream response.
+type modelCooldownError struct {
+	model     string
+	resetIn   time.Duration
+	provider  string
+	transient bool
+}
+
+func newCooldownError(model, provider string, resetIn time.Duration, transient bool) *modelCooldownError {
 	if resetIn < 0 {
 		resetIn = 0
 	}
 	return &modelCooldownError{
-		model:    model,
-		provider: provider,
-		resetIn:  resetIn,
+		model:     model,
+		provider:  provider,
+		resetIn:   resetIn,
+		transient: transient,
 	}
+}
+
+func (e *modelCooldownError) code() string {
+	if e.transient {
+		return "transient_cooldown"
+	}
+	return "model_cooldown"
+}
+
+func (e *modelCooldownError) resetSeconds() int {
+	seconds := int(math.Ceil(e.resetIn.Seconds()))
+	if seconds < 0 {
+		seconds = 0
+	}
+	return seconds
 }
 
 func (e *modelCooldownError) Error() string {
@@ -105,13 +143,13 @@ func (e *modelCooldownError) Error() string {
 		modelName = "requested model"
 	}
 	message := fmt.Sprintf("All credentials for model %s are cooling down", modelName)
+	if e.transient {
+		message = fmt.Sprintf("All credentials for model %s are in a transient failure cooldown", modelName)
+	}
 	if e.provider != "" {
 		message = fmt.Sprintf("%s via provider %s", message, e.provider)
 	}
-	resetSeconds := int(math.Ceil(e.resetIn.Seconds()))
-	if resetSeconds < 0 {
-		resetSeconds = 0
-	}
+	resetSeconds := e.resetSeconds()
 	displayDuration := e.resetIn
 	if displayDuration > 0 && displayDuration < time.Second {
 		displayDuration = time.Second
@@ -119,7 +157,7 @@ func (e *modelCooldownError) Error() string {
 		displayDuration = displayDuration.Round(time.Second)
 	}
 	errorBody := map[string]any{
-		"code":          "model_cooldown",
+		"code":          e.code(),
 		"message":       message,
 		"model":         e.model,
 		"reset_time":    displayDuration.String(),
@@ -131,24 +169,82 @@ func (e *modelCooldownError) Error() string {
 	payload := map[string]any{"error": errorBody}
 	data, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Sprintf(`{"error":{"code":"model_cooldown","message":"%s"}}`, message)
+		return fmt.Sprintf(`{"error":{"code":"%s","message":"%s"}}`, e.code(), message)
 	}
 	return string(data)
 }
 
 func (e *modelCooldownError) StatusCode() int {
+	if e.transient {
+		return http.StatusServiceUnavailable
+	}
 	return http.StatusTooManyRequests
 }
 
 func (e *modelCooldownError) Headers() http.Header {
 	headers := make(http.Header)
 	headers.Set("Content-Type", "application/json")
-	resetSeconds := int(math.Ceil(e.resetIn.Seconds()))
-	if resetSeconds < 0 {
-		resetSeconds = 0
-	}
-	headers.Set("Retry-After", strconv.Itoa(resetSeconds))
+	headers.Set("Retry-After", strconv.Itoa(e.resetSeconds()))
 	return headers
+}
+
+// IsTransientCooldownError reports whether err is a proxy-local transient cooldown
+// denial, i.e. every candidate credential is inside a recoverable failure window.
+func IsTransientCooldownError(err error) bool {
+	var cooldownErr *modelCooldownError
+	return errors.As(err, &cooldownErr) && cooldownErr != nil && cooldownErr.transient
+}
+
+// cooldownSummary tracks how many candidates are cooling and which class owns the
+// earliest recovery, so callers can choose between the 429 quota contract and the 503
+// transient cooldown contract.
+type cooldownSummary struct {
+	cooling         int
+	earliest        time.Time
+	earliestIsQuota bool
+}
+
+func (s *cooldownSummary) observe(reason blockReason, next time.Time) {
+	quota := false
+	switch reason {
+	case blockReasonCooldown:
+		quota = true
+	case blockReasonTransient:
+	default:
+		return
+	}
+	s.cooling++
+	if next.IsZero() {
+		return
+	}
+	// The earliest recovery is the one the caller can actually act on, so it also owns
+	// the reported class. Ties resolve to quota deterministically, independent of
+	// candidate iteration order.
+	if s.earliest.IsZero() || next.Before(s.earliest) || (next.Equal(s.earliest) && quota) {
+		s.earliest = next
+		s.earliestIsQuota = quota
+	}
+}
+
+// cooldownError returns the aggregate cooldown error when every candidate is cooling
+// with a known recovery time, and nil when the caller must report auth_unavailable.
+// The deadline is the earliest recovery across every cooling candidate, so the
+// advertised wait is never longer than the actionable one, and the class of that same
+// earliest candidate decides the contract: the credential that unblocks first is the
+// one the client is actually waiting on. A quota candidate that recovers first keeps
+// the 429 rate-limit contract; a transient one that recovers first answers 503.
+func (s cooldownSummary) cooldownError(model, provider string, candidates int, now time.Time) error {
+	if candidates == 0 || s.cooling != candidates || s.earliest.IsZero() {
+		return nil
+	}
+	if provider == "mixed" {
+		provider = ""
+	}
+	resetIn := s.earliest.Sub(now)
+	if resetIn < 0 {
+		resetIn = 0
+	}
+	return newCooldownError(model, provider, resetIn, !s.earliestIsQuota)
 }
 
 func authPriority(auth *Auth) int {
@@ -256,7 +352,7 @@ func preferCodexWebsocketAuths(ctx context.Context, provider string, available [
 	return available
 }
 
-func collectAvailableByPriority(auths []*Auth, model string, now time.Time) (available map[int][]*Auth, cooldownCount int, earliest time.Time) {
+func collectAvailableByPriority(auths []*Auth, model string, now time.Time) (available map[int][]*Auth, summary cooldownSummary) {
 	available = make(map[int][]*Auth)
 	for i := 0; i < len(auths); i++ {
 		candidate := auths[i]
@@ -266,14 +362,9 @@ func collectAvailableByPriority(auths []*Auth, model string, now time.Time) (ava
 			available[priority] = append(available[priority], candidate)
 			continue
 		}
-		if reason == blockReasonCooldown {
-			cooldownCount++
-			if !next.IsZero() && (earliest.IsZero() || next.Before(earliest)) {
-				earliest = next
-			}
-		}
+		summary.observe(reason, next)
 	}
-	return available, cooldownCount, earliest
+	return available, summary
 }
 
 func getAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]*Auth, error) {
@@ -297,18 +388,10 @@ func getAvailableAuthsWithPriorityMode(auths []*Auth, provider, model string, no
 		}
 	}
 
-	availableByPriority, cooldownCount, earliest := collectAvailableByPriority(auths, model, now)
+	availableByPriority, summary := collectAvailableByPriority(auths, model, now)
 	if len(availableByPriority) == 0 {
-		if cooldownCount == len(auths) && !earliest.IsZero() {
-			providerForError := provider
-			if providerForError == "mixed" {
-				providerForError = ""
-			}
-			resetIn := earliest.Sub(now)
-			if resetIn < 0 {
-				resetIn = 0
-			}
-			return nil, newModelCooldownError(model, providerForError, resetIn)
+		if errCooldown := summary.cooldownError(model, provider, len(auths), now); errCooldown != nil {
+			return nil, errCooldown
 		}
 		return nil, &Error{Code: "auth_unavailable", Message: "no auth available"}
 	}
@@ -617,14 +700,14 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 				if state.Status == StatusDisabled {
 					return true, blockReasonDisabled, time.Time{}
 				}
-				stateBlocked, reason, next := availabilityBlock(state.Unavailable, state.Quota.Exceeded, state.NextRetryAfter, state.Quota.NextRecoverAt, now)
+				stateBlocked, reason, next := availabilityBlock(state.Unavailable, state.Quota.Exceeded, state.NextRetryAfter, state.Quota.NextRecoverAt, now, state.LastError)
 				if !stateBlocked {
 					continue
 				}
 				if next.IsZero() {
 					return true, reason, time.Time{}
 				}
-				if !blocked || next.After(nextRetry) || (next.Equal(nextRetry) && reason == blockReasonCooldown) {
+				if !blocked || next.After(nextRetry) || (next.Equal(nextRetry) && blockPrecedence(reason) > blockPrecedence(blockedReason)) {
 					blocked = true
 					blockedReason = reason
 					nextRetry = next
@@ -635,12 +718,46 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 			}
 			return false, blockReasonNone, time.Time{}
 		}
-		return availabilityBlock(auth.Unavailable, auth.Quota.Exceeded, auth.NextRetryAfter, auth.Quota.NextRecoverAt, now)
+		return availabilityBlock(auth.Unavailable, auth.Quota.Exceeded, auth.NextRetryAfter, auth.Quota.NextRecoverAt, now, aggregateBlockProvenance(auth, now))
 	}
-	return availabilityBlock(auth.Unavailable, auth.Quota.Exceeded, auth.NextRetryAfter, auth.Quota.NextRecoverAt, now)
+	return availabilityBlock(auth.Unavailable, auth.Quota.Exceeded, auth.NextRetryAfter, auth.Quota.NextRecoverAt, now, aggregateBlockProvenance(auth, now))
 }
 
-func availabilityBlock(unavailable, quotaExceeded bool, nextRetryAfter, nextRecoverAt, now time.Time) (bool, blockReason, time.Time) {
+// aggregateBlockProvenance returns the failure that classifies an auth-level block.
+// auth.LastError is deliberately never consulted: it is last-write-wins across models
+// and is also overwritten by the refresh loop, so it cannot be tied to the aggregate
+// deadline. The aggregate instead inherits per-model provenance only when every model
+// state that is currently blocking agrees on the transient class, which is the only
+// case where the aggregate has an unambiguous cause. Callers without per-model state
+// get nil and keep the generic unavailability contract.
+func aggregateBlockProvenance(auth *Auth, now time.Time) *Error {
+	if auth == nil || len(auth.ModelStates) == 0 {
+		return nil
+	}
+	var agreed *Error
+	for _, state := range auth.ModelStates {
+		if state == nil {
+			continue
+		}
+		blocked, reason, _ := availabilityBlock(state.Unavailable, state.Quota.Exceeded, state.NextRetryAfter, state.Quota.NextRecoverAt, now, state.LastError)
+		if !blocked {
+			continue
+		}
+		if reason != blockReasonTransient {
+			return nil
+		}
+		if agreed == nil {
+			agreed = state.LastError
+		}
+	}
+	return agreed
+}
+
+// availabilityBlock classifies one availability record. lastErr is the failure that
+// opened this exact window and decides whether a timed block is a recoverable
+// transient cooldown or a durable credential fault; a window with no reliable
+// provenance keeps the pre-existing blockReasonOther behavior.
+func availabilityBlock(unavailable, quotaExceeded bool, nextRetryAfter, nextRecoverAt, now time.Time, lastErr *Error) (bool, blockReason, time.Time) {
 	if !unavailable && !quotaExceeded {
 		return false, blockReasonNone, time.Time{}
 	}
@@ -653,8 +770,16 @@ func availabilityBlock(unavailable, quotaExceeded bool, nextRetryAfter, nextReco
 		}
 	}
 	if !next.IsZero() {
-		if quotaExceeded {
+		transient := isTransientCooldownResultError(lastErr)
+		// Quota owns the block while its own window is still open. A quota flag whose
+		// window already lapsed is stale bookkeeping (it is only cleared on success),
+		// so when the recorded failure is transient the live block is the transient one
+		// and must not be reported as a rate limit.
+		if quotaExceeded && (!transient || nextRecoverAt.After(now)) {
 			return true, blockReasonCooldown, next
+		}
+		if transient {
+			return true, blockReasonTransient, next
 		}
 		return true, blockReasonOther, next
 	}

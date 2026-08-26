@@ -15,6 +15,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
 
@@ -86,23 +87,76 @@ func TestWriteErrorResponseDirectResponse(t *testing.T) {
 	}
 }
 
-func TestInternalConcurrencyBusyWritesRetryAfterWithoutPassthrough(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	recorder := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(recorder)
-	c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
-
-	handler := NewBaseAPIHandlers(nil, nil)
-	handler.WriteErrorResponse(c, &interfaces.ErrorMessage{
-		StatusCode: http.StatusTooManyRequests,
-		Error:      coreauth.NewHomeConcurrencyBusyError("busy", 750*time.Millisecond),
-	})
-
-	if recorder.Code != http.StatusTooManyRequests {
-		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusTooManyRequests)
+// transientCooldownSelectionError drives a real Manager until every credential for the
+// model sits in a transient failure cooldown, then returns the resulting selection error.
+func transientCooldownSelectionError(t *testing.T) error {
+	t.Helper()
+	executor := &bootstrapStreamExecutor{stream: func(_ context.Context, _ int) (*coreexecutor.StreamResult, error) {
+		return nil, &coreauth.Error{Message: "upstream unavailable", HTTPStatus: http.StatusBadGateway}
+	}}
+	_, manager := registerBootstrapExecutor(t, executor)
+	for _, authID := range []string{"bootstrap-auth", "bootstrap-auth-retry"} {
+		manager.MarkResult(context.Background(), coreauth.Result{
+			AuthID:   authID,
+			Provider: executor.Identifier(),
+			Model:    "bootstrap-model",
+			Success:  false,
+			Error:    &coreauth.Error{Message: "upstream unavailable", HTTPStatus: http.StatusBadGateway},
+		})
 	}
-	if got := recorder.Header().Get("Retry-After"); got != "1" {
-		t.Fatalf("Retry-After = %q, want 1", got)
+	_, err := manager.ExecuteStream(context.Background(), []string{executor.Identifier()},
+		coreexecutor.Request{Model: "bootstrap-model"}, coreexecutor.Options{})
+	if !coreauth.IsTransientCooldownError(err) {
+		t.Fatalf("selection error = %T %v, want transient cooldown", err, err)
+	}
+	return err
+}
+
+func TestInternalConcurrencyBusyWritesRetryAfterWithoutPassthrough(t *testing.T) {
+	cases := []struct {
+		name       string
+		statusCode int
+		retryAfter string
+		newErr     func(t *testing.T) error
+	}{
+		{
+			name:       "home concurrency busy",
+			statusCode: http.StatusTooManyRequests,
+			retryAfter: "1",
+			newErr: func(*testing.T) error {
+				return coreauth.NewHomeConcurrencyBusyError("busy", 750*time.Millisecond)
+			},
+		},
+		{
+			name:       "transient cooldown",
+			statusCode: http.StatusServiceUnavailable,
+			retryAfter: "60",
+			newErr:     transientCooldownSelectionError,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.newErr(t)
+			if got := statusFromError(err); got != tc.statusCode {
+				t.Fatalf("statusFromError() = %d, want %d", got, tc.statusCode)
+			}
+
+			gin.SetMode(gin.TestMode)
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
+
+			handler := NewBaseAPIHandlers(nil, nil)
+			handler.WriteErrorResponse(c, &interfaces.ErrorMessage{StatusCode: tc.statusCode, Error: err})
+
+			if recorder.Code != tc.statusCode {
+				t.Fatalf("status = %d, want %d", recorder.Code, tc.statusCode)
+			}
+			if got := recorder.Header().Get("Retry-After"); got != tc.retryAfter {
+				t.Fatalf("Retry-After = %q, want %q", got, tc.retryAfter)
+			}
+		})
 	}
 }
 

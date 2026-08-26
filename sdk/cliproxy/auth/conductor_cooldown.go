@@ -1558,6 +1558,28 @@ func isModelSupportResultError(err *Error) bool {
 	return isModelSupportErrorMessage(err.Message)
 }
 
+// isTransientCooldownResultError reports whether a recorded failure opened a
+// recoverable cooldown window rather than a durable credential block. It mirrors the
+// branch selection in MarkResult and applyAuthFailureState: model-not-supported,
+// invalid_grant, cloudflare challenges, and the 401/402/403/404/429 credential
+// statuses keep their existing non-transient unavailability, while 408/500/502/503/504
+// and generic recoverable transport/execution failures are transient. A window with no
+// recorded classification is deliberately not treated as transient.
+func isTransientCooldownResultError(err *Error) bool {
+	if err == nil {
+		return false
+	}
+	if isModelSupportResultError(err) || isInvalidGrantResultError(err) || isCloudflareChallengeResultError(err) {
+		return false
+	}
+	switch statusCodeFromResult(err) {
+	case http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden,
+		http.StatusNotFound, http.StatusTooManyRequests:
+		return false
+	}
+	return true
+}
+
 func isCloudflareChallengeErrorMessage(message string) bool {
 	lower := strings.ToLower(strings.TrimSpace(message))
 	return strings.Contains(lower, "challenge-platform") ||

@@ -842,30 +842,59 @@ func isRealtimeRequest(c *gin.Context) bool {
 	return c != nil && c.Request != nil && c.Request.URL != nil && strings.HasPrefix(c.Request.URL.Path, "/v1/realtime")
 }
 
-func quotaWindowErrorBody(c *gin.Context, err error) []byte {
-	body := []byte(err.Error())
-	if !isRealtimeRequest(c) {
-		return body
+// localAdmissionErrorBody renders a proxy-local admission denial that already carries a
+// structured JSON body (quota window, model/transient cooldown). It reports false for
+// anything else, so upstream-authored error text can never become the client-facing
+// realtime contract and keeps the plain proxy-owned envelope instead. For realtime
+// requests the protocol's type/param fields are filled in without disturbing the local
+// code, message, or retry fields.
+func localAdmissionErrorBody(c *gin.Context, err error, status int) ([]byte, bool) {
+	// Trust is type-based: only errors the auth layer vouches for as local admission
+	// denials are eligible. A structural "looks like JSON" test alone would also match
+	// an upstream body surfaced through a refresh or dial failure.
+	if !auth.IsQuotaWindowError(err) && auth.SafeResponseHeaders(err).Get("Retry-After") == "" {
+		return nil, false
 	}
+	body := []byte(err.Error())
 	var payload map[string]any
 	if errJSON := json.Unmarshal(body, &payload); errJSON != nil {
-		return body
+		return nil, false
 	}
 	errorBody, ok := payload["error"].(map[string]any)
 	if !ok {
-		return body
+		return nil, false
+	}
+	if !isRealtimeRequest(c) {
+		return body, true
 	}
 	if _, exists := errorBody["type"]; !exists {
-		errorBody["type"] = "rate_limit_error"
+		errorBody["type"] = realtimeErrorTypeForStatus(status)
 	}
 	if _, exists := errorBody["param"]; !exists {
 		errorBody["param"] = nil
 	}
 	encoded, errMarshal := json.Marshal(payload)
 	if errMarshal != nil {
-		return body
+		return body, true
 	}
-	return encoded
+	return encoded, true
+}
+
+// realtimeErrorTypeForStatus maps a status onto the realtime protocol's error type,
+// matching writeLiveError while keeping the more specific rate-limit type for 429.
+func realtimeErrorTypeForStatus(status int) string {
+	switch {
+	case status == http.StatusTooManyRequests:
+		return "rate_limit_error"
+	case status == http.StatusUnauthorized:
+		return "authentication_error"
+	case status >= http.StatusInternalServerError:
+		return "api_error"
+	case status >= http.StatusBadRequest:
+		return "invalid_request_error"
+	default:
+		return "api_error"
+	}
 }
 
 func writeSelectionError(c *gin.Context, err error) {
@@ -876,12 +905,15 @@ func writeSelectionError(c *gin.Context, err error) {
 			c.Writer.Header().Add(name, value)
 		}
 	}
-	if auth.IsQuotaWindowError(err) {
+	// Proxy-local admission denials already carry a structured code, message, and reset
+	// fields; forward that body verbatim so realtime clients keep the machine-readable
+	// contract instead of a flattened message string.
+	if body, ok := localAdmissionErrorBody(c, err, status); ok {
 		contentType := headers.Get("Content-Type")
 		if contentType == "" {
 			contentType = "application/json"
 		}
-		c.Data(status, contentType, quotaWindowErrorBody(c, err))
+		c.Data(status, contentType, body)
 		return
 	}
 	writeLiveError(c, status, err.Error())

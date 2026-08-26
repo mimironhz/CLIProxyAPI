@@ -3120,13 +3120,98 @@ func TestResponsesWebsocketHidesNonClientUpstreamDisconnectErrors(t *testing.T) 
 // production shape from main.log: the identical cyber_policy rejection arrives
 // with status 400 on the stream path and 502 through the disconnect channel. Both
 // must reach the client, because no credential rotation can satisfy the request.
+// transientCooldownErrorForTest drives a throwaway manager until every credential for
+// its model is inside a proven transient cooldown, then returns the selection error a
+// fresh request would receive.
+func transientCooldownErrorForTest(t *testing.T) error {
+	t.Helper()
+	const provider = "codex"
+	const model = "ws-transient-cooldown-model"
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(&websocketUpstreamDisconnectExecutor{provider: provider, subscribed: make(chan string, 1)})
+	authEntry := &coreauth.Auth{ID: "ws-transient-cooldown-auth", Provider: provider, Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), authEntry); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(authEntry.ID, provider, []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authEntry.ID) })
+	manager.MarkResult(context.Background(), coreauth.Result{
+		AuthID:   authEntry.ID,
+		Provider: provider,
+		Model:    model,
+		Success:  false,
+		Error:    &coreauth.Error{Message: "upstream unavailable", HTTPStatus: http.StatusBadGateway},
+	})
+	_, err := manager.ExecuteStream(context.Background(), []string{provider}, coreexecutor.Request{Model: model}, coreexecutor.Options{})
+	if !coreauth.IsTransientCooldownError(err) {
+		t.Fatalf("selection error = %T %v, want transient cooldown", err, err)
+	}
+	return err
+}
+
 func TestResponsesWebsocketExposesCyberPolicyRegardlessOfStatus(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	const cyberPolicyBody = `{"error":{"type":"invalid_request","code":"cyber_policy","message":"This content was flagged for possible cybersecurity risk.","param":null}}`
 
-	for _, status := range []int{http.StatusBadRequest, http.StatusBadGateway, http.StatusInternalServerError} {
-		t.Run(strconv.Itoa(status), func(t *testing.T) {
+	// An upgraded socket cannot carry an HTTP header, so the in-band error frame is the
+	// only place a client can learn the status, the structured code, and the retry
+	// deadline. A silent close would make the client reconnect straight back into the
+	// same cooldown, or mistake an upstream overload for a transport drop.
+	cases := []struct {
+		name           string
+		err            func(*testing.T) error
+		wantStatus     int
+		wantCode       string
+		wantRetryAfter bool
+	}{
+		{
+			name: "request fault 400",
+			err: func(*testing.T) error {
+				return websocketPinnedFailoverStatusError{status: http.StatusBadRequest, msg: cyberPolicyBody}
+			},
+			wantStatus: http.StatusBadRequest,
+			wantCode:   "cyber_policy",
+		},
+		{
+			name: "request fault 502",
+			err: func(*testing.T) error {
+				return websocketPinnedFailoverStatusError{status: http.StatusBadGateway, msg: cyberPolicyBody}
+			},
+			wantStatus: http.StatusBadGateway,
+			wantCode:   "cyber_policy",
+		},
+		{
+			name: "request fault 500",
+			err: func(*testing.T) error {
+				return websocketPinnedFailoverStatusError{status: http.StatusInternalServerError, msg: cyberPolicyBody}
+			},
+			wantStatus: http.StatusInternalServerError,
+			wantCode:   "cyber_policy",
+		},
+		{
+			name: "upstream overloaded 529 is preserved, never synthesized",
+			err: func(*testing.T) error {
+				return websocketPinnedFailoverStatusError{
+					status: statusUpstreamOverloaded,
+					msg:    `{"error":{"type":"overloaded_error","code":"overloaded","message":"Overloaded"}}`,
+				}
+			},
+			wantStatus: statusUpstreamOverloaded,
+			wantCode:   "overloaded",
+		},
+		{
+			name:           "local transient cooldown carries code and retry metadata",
+			err:            transientCooldownErrorForTest,
+			wantStatus:     http.StatusServiceUnavailable,
+			wantCode:       "transient_cooldown",
+			wantRetryAfter: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			triggerErr := tc.err(t)
 			executor := &websocketUpstreamDisconnectExecutor{provider: "codex", subscribed: make(chan string, 1)}
 			manager := coreauth.NewManager(nil, nil, nil)
 			manager.RegisterExecutor(executor)
@@ -3151,15 +3236,36 @@ func TestResponsesWebsocketExposesCyberPolicyRegardlessOfStatus(t *testing.T) {
 			case <-time.After(5 * time.Second):
 				t.Fatal("timed out waiting for upstream disconnect subscription")
 			}
-			executor.TriggerDisconnect(sessionID, websocketPinnedFailoverStatusError{status: status, msg: cyberPolicyBody})
+			executor.TriggerDisconnect(sessionID, triggerErr)
 
 			_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 			_, payload, errRead := conn.ReadMessage()
 			if errRead != nil {
-				t.Fatalf("cyber_policy rejection was hidden at status %d: %v", status, errRead)
+				t.Fatalf("terminal error was hidden from the client: %v", errRead)
 			}
-			if got := gjson.GetBytes(payload, "error.code").String(); got != "cyber_policy" {
-				t.Fatalf("error.code = %q, want cyber_policy: %s", got, payload)
+			if got := gjson.GetBytes(payload, "type").String(); got != wsEventTypeError {
+				t.Fatalf("frame type = %q, want %q: %s", got, wsEventTypeError, payload)
+			}
+			if got := int(gjson.GetBytes(payload, "status").Int()); got != tc.wantStatus {
+				t.Fatalf("frame status = %d, want %d: %s", got, tc.wantStatus, payload)
+			}
+			if got := gjson.GetBytes(payload, "error.code").String(); got != tc.wantCode {
+				t.Fatalf("error.code = %q, want %q: %s", got, tc.wantCode, payload)
+			}
+			if got := gjson.GetBytes(payload, "error.message").String(); got == "" {
+				t.Fatalf("error.message is empty: %s", payload)
+			}
+			// An upgraded socket has no HTTP headers, so retry metadata must ride in
+			// the frame's headers object.
+			retryAfter := gjson.GetBytes(payload, `headers.Retry-After`).String()
+			if (retryAfter != "") != tc.wantRetryAfter {
+				t.Fatalf("headers.Retry-After = %q, want present %v: %s", retryAfter, tc.wantRetryAfter, payload)
+			}
+			// No credential identity may appear anywhere in the client-visible frame.
+			for _, secret := range []string{"ws-transient-cooldown-auth", "auth_id", "api_key", "access_token"} {
+				if strings.Contains(string(payload), secret) {
+					t.Fatalf("frame leaks %q: %s", secret, payload)
+				}
 			}
 		})
 	}

@@ -342,8 +342,7 @@ func (m *Manager) availableAuthsForRouteModelWithQuotaModel(auths []*Auth, provi
 	}
 
 	availableByPriority := make(map[int][]*Auth)
-	cooldownCount := 0
-	var earliest time.Time
+	var summary cooldownSummary
 	for _, candidate := range auths {
 		checkModel := m.selectionModelForAuth(candidate, routeModel)
 		blocked, reason, next := isAuthBlockedForModel(candidate, checkModel, now)
@@ -352,25 +351,12 @@ func (m *Manager) availableAuthsForRouteModelWithQuotaModel(auths []*Auth, provi
 			availableByPriority[priority] = append(availableByPriority[priority], candidate)
 			continue
 		}
-		if reason == blockReasonCooldown {
-			cooldownCount++
-			if !next.IsZero() && (earliest.IsZero() || next.Before(earliest)) {
-				earliest = next
-			}
-		}
+		summary.observe(reason, next)
 	}
 
 	if len(availableByPriority) == 0 {
-		if cooldownCount == len(auths) && !earliest.IsZero() {
-			providerForError := provider
-			if providerForError == "mixed" {
-				providerForError = ""
-			}
-			resetIn := earliest.Sub(now)
-			if resetIn < 0 {
-				resetIn = 0
-			}
-			return nil, newModelCooldownError(routeModel, providerForError, resetIn)
+		if errCooldown := summary.cooldownError(routeModel, provider, len(auths), now); errCooldown != nil {
+			return nil, errCooldown
 		}
 		return nil, &Error{Code: "auth_unavailable", Message: "no auth available"}
 	}
@@ -435,7 +421,7 @@ func restoreModelCooldownErrorModel(err error, requestedModel string) error {
 	if !errors.As(err, &cooldownErr) || cooldownErr == nil || cooldownErr.model != "" {
 		return err
 	}
-	return newModelCooldownError(requestedModel, cooldownErr.provider, cooldownErr.resetIn)
+	return newCooldownError(requestedModel, cooldownErr.provider, cooldownErr.resetIn, cooldownErr.transient)
 }
 
 func schedulerAttributeSensitive(key string) bool {

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
@@ -233,9 +234,37 @@ func TestHomeUnauthorizedRefreshIsAttemptedAtMostOnce(t *testing.T) {
 
 func TestHomeNoCandidateAfterRefreshFailurePreservesRefreshError(t *testing.T) {
 	refreshErr := &Error{Code: "refresh_temporarily_unavailable", HTTPStatus: http.StatusServiceUnavailable, Message: "refresh unavailable"}
-	noCandidate := &Error{Code: "auth_not_found", HTTPStatus: http.StatusServiceUnavailable, Message: "no auth available"}
-	if !shouldReturnLastErrorOnPickFailure(true, refreshErr, noCandidate) {
-		t.Fatal("Home no-candidate error would overwrite the original refresh error")
+
+	// Every selection failure that just means "no credential is currently usable" must
+	// leave the initiating request's own error in place. A quota cooldown is a real
+	// client-facing rate limit and deliberately still wins.
+	cases := []struct {
+		name    string
+		errPick error
+		want    bool
+	}{
+		{
+			name:    "no candidate",
+			errPick: &Error{Code: "auth_not_found", HTTPStatus: http.StatusServiceUnavailable, Message: "no auth available"},
+			want:    true,
+		},
+		{
+			name:    "transient cooldown",
+			errPick: newCooldownError("model-a", "codex", time.Minute, true),
+			want:    true,
+		},
+		{
+			name:    "quota cooldown",
+			errPick: newCooldownError("model-a", "codex", time.Minute, false),
+			want:    false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shouldReturnLastErrorOnPickFailure(true, refreshErr, tc.errPick); got != tc.want {
+				t.Fatalf("shouldReturnLastErrorOnPickFailure() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 

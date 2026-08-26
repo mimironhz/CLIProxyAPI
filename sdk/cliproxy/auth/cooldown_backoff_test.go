@@ -257,8 +257,20 @@ func TestSchedulerPromotesUnknownFailureAfterRetryDeadline(t *testing.T) {
 	if entry == nil {
 		t.Fatalf("scheduler auth %q is missing", authID)
 	}
-	if entry.state != scheduledStateBlocked || entry.nextRetryAt.IsZero() {
-		t.Fatalf("scheduler entry state = %v, retry = %v; want finite blocked state", entry.state, entry.nextRetryAt)
+	if entry.state != scheduledStateTransient || entry.nextRetryAt.IsZero() {
+		t.Fatalf("scheduler entry state = %v, retry = %v; want finite transient cooldown state", entry.state, entry.nextRetryAt)
+	}
+
+	// The fast path must answer the transient cooldown contract, not a bare auth_unavailable.
+	errUnavailable := shard.unavailableErrorLocked(provider, model, nil)
+	if statusCodeFromError(errUnavailable) != http.StatusServiceUnavailable {
+		t.Fatalf("unavailableErrorLocked() status = %d, want %d", statusCodeFromError(errUnavailable), http.StatusServiceUnavailable)
+	}
+	if !IsTransientCooldownError(errUnavailable) {
+		t.Fatalf("unavailableErrorLocked() = %T %v, want transient cooldown", errUnavailable, errUnavailable)
+	}
+	if got := SafeResponseHeaders(errUnavailable).Get("Retry-After"); got == "" {
+		t.Fatal("transient cooldown carries no trusted Retry-After header")
 	}
 
 	shard.promoteExpiredLocked(entry.nextRetryAt.Add(time.Nanosecond))

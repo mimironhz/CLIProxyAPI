@@ -621,24 +621,76 @@ func TestExecuteStreamWithAuthManager_CancelDuringSynchronousBootstrap(t *testin
 }
 
 func TestExecuteStreamWithAuthManager_EmptyClosedStream(t *testing.T) {
-	executor := &bootstrapStreamExecutor{stream: func(_ context.Context, _ int) (*coreexecutor.StreamResult, error) {
-		chunks := make(chan coreexecutor.StreamChunk)
-		close(chunks)
-		return &coreexecutor.StreamResult{Chunks: chunks}, nil
-	}}
-	handler, _ := registerBootstrapExecutor(t, executor)
-	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai", "bootstrap-model", []byte(`{"model":"bootstrap-model"}`), "")
-	if _, ok := <-dataChan; ok {
-		t.Fatal("empty stream produced data")
+	// Every failure class that opens a transient cooldown must keep its concrete status
+	// on the request that provoked it, and must hand the next request the 503 contract.
+	cases := []struct {
+		name           string
+		chunkErr       error
+		wantInitiating int
+	}{
+		{name: "empty closed stream", wantInitiating: http.StatusInternalServerError},
+		{
+			name:           "upstream request timeout",
+			chunkErr:       &coreauth.Error{Code: "timeout", Message: "upstream timed out", HTTPStatus: http.StatusRequestTimeout},
+			wantInitiating: http.StatusRequestTimeout,
+		},
 	}
-	var streamErr *interfaces.ErrorMessage
-	for msg := range errChan {
-		if msg != nil {
-			streamErr = msg
-		}
-	}
-	if streamErr == nil || streamErr.StatusCode != http.StatusInternalServerError {
-		t.Fatalf("empty stream error = %+v, want terminal internal-server error", streamErr)
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			executor := &bootstrapStreamExecutor{stream: func(_ context.Context, _ int) (*coreexecutor.StreamResult, error) {
+				chunks := make(chan coreexecutor.StreamChunk, 1)
+				if tc.chunkErr != nil {
+					chunks <- coreexecutor.StreamChunk{Err: tc.chunkErr}
+				}
+				close(chunks)
+				return &coreexecutor.StreamResult{Chunks: chunks}, nil
+			}}
+			handler, _ := registerBootstrapExecutor(t, executor)
+			streamOnce := func() *interfaces.ErrorMessage {
+				t.Helper()
+				dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai", "bootstrap-model", []byte(`{"model":"bootstrap-model"}`), "")
+				if dataChan != nil {
+					if _, ok := <-dataChan; ok {
+						t.Fatal("failed stream produced data")
+					}
+				}
+				var streamErr *interfaces.ErrorMessage
+				for msg := range errChan {
+					if msg != nil {
+						streamErr = msg
+					}
+				}
+				return streamErr
+			}
+
+			// The request that actually made the upstream attempt keeps its concrete
+			// failure, even though the bootstrap retry finds every credential cooling.
+			initiating := streamOnce()
+			if initiating == nil || initiating.StatusCode != tc.wantInitiating {
+				t.Fatalf("initiating error = %+v, want status %d", initiating, tc.wantInitiating)
+			}
+			if coreauth.IsTransientCooldownError(initiating.Error) {
+				t.Fatalf("initiating request degraded to the derived cooldown: %+v", initiating)
+			}
+
+			// A separate request that begins while every credential is under the
+			// resulting proven transient cooldown gets the local 503 contract, not
+			// a generic auth_unavailable.
+			fresh := streamOnce()
+			if fresh == nil || fresh.StatusCode != http.StatusServiceUnavailable {
+				t.Fatalf("fresh request error = %+v, want %d", fresh, http.StatusServiceUnavailable)
+			}
+			if !coreauth.IsTransientCooldownError(fresh.Error) {
+				t.Fatalf("fresh request error = %v, want transient cooldown", fresh.Error)
+			}
+			if !strings.Contains(fresh.Error.Error(), `"code":"transient_cooldown"`) {
+				t.Fatalf("fresh request body = %q, want transient_cooldown code", fresh.Error.Error())
+			}
+			if got := coreauth.SafeResponseHeaders(fresh.Error).Get("Retry-After"); got == "" {
+				t.Fatal("fresh request carries no trusted Retry-After header")
+			}
+		})
 	}
 }
 
