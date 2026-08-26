@@ -125,6 +125,7 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 	// inside tool_search_output history items, so they must be merged into tools
 	// before tool_choice pruning or a choice naming one would be dropped.
 	body = applyXAIToolSearchRequest(body)
+	body, _ = rewriteXAIToolChoiceFunctionName(body, xaiToolSearchToolName, xaiToolSearchShimName)
 	// Drop choices that point at tools removed by normalizeXAITools before any
 	// configured x_search injection, so no surviving choice references a deleted tool.
 	body = normalizeXAINamespaceToolChoiceWithFold(body, shouldFold)

@@ -13,6 +13,7 @@ const (
 	xaiToolSearchCallItemType   = "tool_search_call"
 	xaiToolSearchOutputItemType = "tool_search_output"
 	xaiToolSearchToolName       = "tool_search"
+	xaiToolSearchShimName       = "codex_tool_search"
 )
 
 // xaiToolSearchFunctionJSON is the Grok-callable stand-in for Codex's hosted
@@ -22,7 +23,7 @@ const (
 // Codex Desktop's own client-side loader resolves it and injects the deferred
 // tools. Without this shim every skill that depends on a deferred tool (for
 // example chrome:control-chrome needing mcp__node_repl__js) is unusable on Grok.
-const xaiToolSearchFunctionJSON = `{"type":"function","name":"tool_search","description":"Search for and load tools that are not currently in your tool list. Provide a natural-language 'query' describing the tool or capability you need (for example a tool name a skill tells you to use, such as node_repl or mcp__node_repl__js). Matching tools are loaded and become callable on your next step. Call this whenever a skill or instruction references a tool you do not currently have.","parameters":{"type":"object","properties":{"query":{"type":"string","description":"Natural-language description of the tool or capability to find."},"limit":{"type":"integer","description":"Maximum number of tools to load (optional)."}},"required":["query"],"additionalProperties":false}}`
+const xaiToolSearchFunctionJSON = `{"type":"function","name":"codex_tool_search","description":"Search for and load tools that are not currently in your tool list. Provide a natural-language 'query' describing the tool or capability you need (for example a tool name a skill tells you to use, such as node_repl or mcp__node_repl__js). Matching tools are loaded and become callable on your next step. Call this whenever a skill or instruction references a tool you do not currently have.","parameters":{"type":"object","properties":{"query":{"type":"string","description":"Natural-language description of the tool or capability to find."},"limit":{"type":"integer","description":"Maximum number of tools to load (optional)."}},"required":["query"],"additionalProperties":false}}`
 
 // stripXAIDeferLoading removes defer_loading from a tool declaration. Grok has
 // no deferred-loading mechanism, so a forwarded tool that keeps the flag stays
@@ -145,7 +146,22 @@ func mergeXAIHarvestedTools(body []byte, harvested [][]byte) []byte {
 // see helps.RewriteToolSearchInputItems. The websocket path passes through to
 // xAI untouched, so this only affects the HTTP path.
 func dropXAIToolSearchInputItems(body []byte) []byte {
-	return helps.RewriteToolSearchInputItems(body)
+	body = helps.RewriteToolSearchInputItems(body)
+	input := gjson.GetBytes(body, "input")
+	if !input.IsArray() {
+		return body
+	}
+	for index, item := range input.Array() {
+		if item.Get("type").String() != "function_call" || strings.TrimSpace(item.Get("name").String()) != xaiToolSearchToolName {
+			continue
+		}
+		updated, errSet := sjson.SetBytes(body, fmt.Sprintf("input.%d.name", index), xaiToolSearchShimName)
+		if errSet != nil {
+			return body
+		}
+		body = updated
+	}
+	return body
 }
 
 // dedupeXAIToolSearchTools collapses the tool_search shim to a single entry.
@@ -163,7 +179,7 @@ func dedupeXAIToolSearchTools(body []byte) []byte {
 	dropped := false
 	for _, tool := range items {
 		isToolSearch := tool.Get("type").String() == xaiFunctionToolType &&
-			strings.TrimSpace(tool.Get("name").String()) == xaiToolSearchToolName
+			strings.TrimSpace(tool.Get("name").String()) == xaiToolSearchShimName
 		if isToolSearch {
 			if seen {
 				dropped = true
@@ -233,7 +249,8 @@ func rewriteXAIToolCallItemAtPath(data []byte, path string, final bool) []byte {
 	if !item.IsObject() || item.Get("type").String() != "function_call" {
 		return data
 	}
-	if strings.TrimSpace(item.Get("name").String()) == xaiToolSearchToolName {
+	name := strings.TrimSpace(item.Get("name").String())
+	if name == xaiToolSearchShimName || name == xaiToolSearchToolName {
 		converted, ok := xaiToToolSearchCall(item, final)
 		if !ok {
 			return data

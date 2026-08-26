@@ -18,8 +18,8 @@ func TestXAIToolSearchToolBecomesFunction(t *testing.T) {
 	if got := tool.Get("type").String(); got != "function" {
 		t.Fatalf("type = %q, want function", got)
 	}
-	if got := tool.Get("name").String(); got != "tool_search" {
-		t.Fatalf("name = %q, want tool_search", got)
+	if got := tool.Get("name").String(); got != xaiToolSearchShimName {
+		t.Fatalf("name = %q, want %s", got, xaiToolSearchShimName)
 	}
 	if !tool.Get("parameters.properties.query").Exists() {
 		t.Fatalf("shim is missing the query parameter; tool=%s", tool.Raw)
@@ -52,8 +52,8 @@ func TestXAIHarvestsLoadedToolFromHistory(t *testing.T) {
 		"tools":[{"type":"function","name":"shell","parameters":{"type":"object","properties":{}}}],
 		"input":[
 			{"type":"message","role":"user","content":"run some js"},
-			{"type":"tool_search_call","id":"ts_1","status":"completed"},
-			{"type":"tool_search_output","tools":[
+			{"type":"tool_search_call","id":"ts_1","call_id":"call_1","status":"completed","arguments":{"query":"node repl"}},
+			{"type":"tool_search_output","call_id":"call_1","tools":[
 				{"type":"namespace","name":"mcp__node_repl","tools":[
 					{"type":"function","name":"js","parameters":{"type":"object","properties":{}},"defer_loading":true},
 					{"type":"function","name":"js_reset","parameters":{"type":"object","properties":{}},"defer_loading":true}
@@ -86,8 +86,11 @@ func TestXAIHarvestsLoadedToolFromHistory(t *testing.T) {
 			t.Fatalf("tool_search round-trip item survived; body=%s", string(got))
 		}
 	}
-	if got := gjson.GetBytes(got, "input.#").Int(); got != 1 {
-		t.Fatalf("input length = %d, want 1", got)
+	if got := gjson.GetBytes(got, "input.1.name").String(); got != xaiToolSearchShimName {
+		t.Fatalf("tool_search history name = %q, want %s; body=%s", got, xaiToolSearchShimName, string(got))
+	}
+	if got := gjson.GetBytes(got, "input.#").Int(); got != 3 {
+		t.Fatalf("input length = %d, want 3", got)
 	}
 }
 

@@ -191,7 +191,7 @@ func TestXAIExecutorExecuteShapesResponsesRequest(t *testing.T) {
 
 	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
 		Model:   "grok-4.3",
-		Payload: []byte(`{"model":"grok-4.3","input":[{"type":"reasoning","summary":[{"type":"summary_text","text":"test"}],"content":null,"encrypted_content":null},{"type":"reasoning","summary":[{"type":"summary_text","text":"second"}]},{"role":"user","content":"hello"}],"include":["reasoning.encrypted_content"],"reasoning":{"effort":"high"},"tools":[{"type":"tool_search"},{"type":"image_generation"},{"type":"custom","name":"apply_patch"},{"type":"custom","name":"custom_lookup"},{"type":"function","name":"lookup"},{"type":"web_search","external_web_access":true,"search_content_types":["text","image"]},{"type":"namespace","name":"codex_app","description":"Tools in the codex_app namespace.","tools":[{"type":"function","name":"automation_update"},{"type":"custom","name":"namespace_custom"},{"type":"tool_search"}]}],"tool_choice":{"type":"allowed_tools","tools":[{"type":"function","name":"automation_update","namespace":"codex_app"},{"type":"function","name":"lookup"},{"type":"web_search"}]}}`),
+		Payload: []byte(`{"model":"grok-4.3","input":[{"type":"reasoning","summary":[{"type":"summary_text","text":"test"}],"content":null,"encrypted_content":null},{"type":"reasoning","summary":[{"type":"summary_text","text":"second"}]},{"role":"user","content":"hello"}],"include":["reasoning.encrypted_content"],"reasoning":{"effort":"high"},"tools":[{"type":"tool_search"},{"type":"image_generation"},{"type":"custom","name":"apply_patch"},{"type":"custom","name":"custom_lookup"},{"type":"function","name":"lookup"},{"type":"web_search","external_web_access":true,"search_content_types":["text","image"]},{"type":"namespace","name":"codex_app","description":"Tools in the codex_app namespace.","tools":[{"type":"function","name":"automation_update"},{"type":"custom","name":"namespace_custom"},{"type":"tool_search"}]}],"tool_choice":{"type":"allowed_tools","tools":[{"type":"function","name":"automation_update","namespace":"codex_app"},{"type":"function","name":"lookup"},{"type":"web_search"},{"type":"function","name":"tool_search"}]}}`),
 	}, cliproxyexecutor.Options{
 		SourceFormat: sdktranslator.FormatOpenAIResponse,
 		Stream:       false,
@@ -261,7 +261,7 @@ func TestXAIExecutorExecuteShapesResponsesRequest(t *testing.T) {
 		if toolType == "tool_search" {
 			t.Fatalf("tools.%d.type = tool_search, want rewritten to a function; body=%s", i, string(gotBody))
 		}
-		if toolType == "function" && tool.Get("name").String() == "tool_search" {
+		if toolType == "function" && tool.Get("name").String() == xaiToolSearchShimName {
 			toolSearchCount++
 		}
 		if toolType != "function" && toolType != "web_search" && toolType != "x_search" {
@@ -317,8 +317,11 @@ func TestXAIExecutorExecuteShapesResponsesRequest(t *testing.T) {
 	if got := gjson.GetBytes(gotBody, "tool_choice.tools.2.type").String(); got != "web_search" {
 		t.Fatalf("tool_choice.tools.2.type = %q, want web_search; body=%s", got, string(gotBody))
 	}
-	if got := gjson.GetBytes(gotBody, "tool_choice.tools.3.type").String(); got != "x_search" {
-		t.Fatalf("tool_choice.tools.3.type = %q, want x_search; body=%s", got, string(gotBody))
+	if got := gjson.GetBytes(gotBody, "tool_choice.tools.3.name").String(); got != xaiToolSearchShimName {
+		t.Fatalf("tool_choice.tools.3.name = %q, want %s; body=%s", got, xaiToolSearchShimName, string(gotBody))
+	}
+	if got := gjson.GetBytes(gotBody, "tool_choice.tools.4.type").String(); got != "x_search" {
+		t.Fatalf("tool_choice.tools.4.type = %q, want x_search; body=%s", got, string(gotBody))
 	}
 	xSearchAllowedCount := 0
 	for _, tool := range gjson.GetBytes(gotBody, "tool_choice.tools").Array() {
@@ -3061,7 +3064,7 @@ func TestXAIExecutorExecuteStreamRewritesToolSearchTool(t *testing.T) {
 	// the same function shim and must collapse to a single entry.
 	toolSearchCount := 0
 	for _, tool := range tools {
-		if tool.Get("type").String() == "function" && tool.Get("name").String() == "tool_search" {
+		if tool.Get("type").String() == "function" && tool.Get("name").String() == xaiToolSearchShimName {
 			toolSearchCount++
 		}
 	}
