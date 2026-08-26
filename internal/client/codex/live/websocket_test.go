@@ -1,6 +1,7 @@
 package live
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -241,48 +242,119 @@ func TestHandleDirectWebsocketRelaysStandardRealtimeFrames(t *testing.T) {
 	}
 }
 
+// TestHandleDirectWebsocketQuotaAdmissionBlocksUpstreamDial pins every proxy-local
+// admission denial on the realtime path. Selection runs before the upgrade, so the
+// client still gets a real HTTP status plus Retry-After, and the structured local code
+// must survive instead of being flattened into a generic realtime message.
 func TestHandleDirectWebsocketQuotaAdmissionBlocksUpstreamDial(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	upstreamHit := make(chan struct{}, 1)
-	upstreamServer := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-		upstreamHit <- struct{}{}
-	}))
-	defer upstreamServer.Close()
 
-	manager := auth.NewManager(nil, nil, nil)
-	manager.RegisterExecutor(&captureExecutor{})
-	manager.SetQuotaWindowGate(&denyDirectAdmissionGate{})
-	registerCredential(t, manager, &auth.Auth{
-		ID:       "codex-oauth-quota",
-		Provider: "codex",
-		Status:   auth.StatusActive,
-		Metadata: map[string]any{"access_token": "oauth-token"},
-	})
-	handler := NewHandler(manager, nil)
-	handler.sidebandAPIBaseURL = "ws" + strings.TrimPrefix(upstreamServer.URL, "http") + "/v1"
-	router := gin.New()
-	router.GET("/v1/realtime", handler.HandleRealtimeWebsocket)
-	downstreamServer := httptest.NewServer(router)
-	defer downstreamServer.Close()
+	cases := []struct {
+		name       string
+		setup      func(t *testing.T, manager *auth.Manager)
+		wantStatus int
+		wantCode   string
+		wantType   string
+	}{
+		{
+			name: "quota window exhausted",
+			setup: func(t *testing.T, manager *auth.Manager) {
+				manager.SetQuotaWindowGate(&denyDirectAdmissionGate{})
+				registerCredential(t, manager, &auth.Auth{
+					ID:       "codex-oauth-quota",
+					Provider: "codex",
+					Status:   auth.StatusActive,
+					Metadata: map[string]any{"access_token": "oauth-token"},
+				})
+			},
+			wantStatus: http.StatusTooManyRequests,
+			wantCode:   "quota_window_exhausted",
+			wantType:   "rate_limit_error",
+		},
+		{
+			// Realtime selects without a route model, so the aggregate record decides.
+			// Its class comes from the per-model provenance recorded by ordinary
+			// traffic on the same credential, never from the cross-model LastError.
+			name: "transient cooldown",
+			setup: func(t *testing.T, manager *auth.Manager) {
+				credential := &auth.Auth{
+					ID:       "codex-oauth-transient",
+					Provider: "codex",
+					Status:   auth.StatusActive,
+					Metadata: map[string]any{"access_token": "oauth-token"},
+				}
+				registerCredential(t, manager, credential)
+				manager.MarkResult(context.Background(), auth.Result{
+					AuthID:   credential.ID,
+					Provider: "codex",
+					Model:    "gpt-5-codex",
+					Success:  false,
+					Error:    &auth.Error{Message: "upstream unavailable", HTTPStatus: http.StatusBadGateway},
+				})
+			},
+			wantStatus: http.StatusServiceUnavailable,
+			wantCode:   "transient_cooldown",
+			wantType:   "api_error",
+		},
+	}
 
-	wsURL := "ws" + strings.TrimPrefix(downstreamServer.URL, "http") + "/v1/realtime?model=gpt-realtime"
-	connection, response, errDial := websocket.DefaultDialer.Dial(wsURL, nil)
-	if connection != nil {
-		_ = connection.Close()
-	}
-	if errDial == nil || response == nil || response.StatusCode != http.StatusTooManyRequests {
-		t.Fatalf("dial error = %v, response = %#v; want 429", errDial, response)
-	}
-	if got := response.Header.Get("Retry-After"); got == "" {
-		t.Fatal("Retry-After is empty")
-	}
-	if response.Body != nil {
-		_ = response.Body.Close()
-	}
-	select {
-	case <-upstreamHit:
-		t.Fatal("quota-exhausted direct websocket reached upstream")
-	case <-time.After(50 * time.Millisecond):
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			upstreamHit := make(chan struct{}, 1)
+			upstreamServer := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+				upstreamHit <- struct{}{}
+			}))
+			defer upstreamServer.Close()
+
+			manager := auth.NewManager(nil, nil, nil)
+			manager.RegisterExecutor(&captureExecutor{})
+			tc.setup(t, manager)
+			handler := NewHandler(manager, nil)
+			handler.sidebandAPIBaseURL = "ws" + strings.TrimPrefix(upstreamServer.URL, "http") + "/v1"
+			router := gin.New()
+			router.GET("/v1/realtime", handler.HandleRealtimeWebsocket)
+			downstreamServer := httptest.NewServer(router)
+			defer downstreamServer.Close()
+
+			wsURL := "ws" + strings.TrimPrefix(downstreamServer.URL, "http") + "/v1/realtime?model=gpt-realtime"
+			connection, response, errDial := websocket.DefaultDialer.Dial(wsURL, nil)
+			if connection != nil {
+				_ = connection.Close()
+			}
+			if errDial == nil || response == nil || response.StatusCode != tc.wantStatus {
+				t.Fatalf("dial error = %v, response = %#v; want %d", errDial, response, tc.wantStatus)
+			}
+			if got := response.Header.Get("Retry-After"); got == "" {
+				t.Fatal("Retry-After is empty")
+			}
+			body, errRead := io.ReadAll(response.Body)
+			if errRead != nil {
+				t.Fatalf("ReadAll() error = %v", errRead)
+			}
+			_ = response.Body.Close()
+			var payload map[string]any
+			if errJSON := json.Unmarshal(body, &payload); errJSON != nil {
+				t.Fatalf("response JSON = %v; body=%s", errJSON, body)
+			}
+			errorBody, _ := payload["error"].(map[string]any)
+			param, hasParam := errorBody["param"]
+			if errorBody["code"] != tc.wantCode || errorBody["type"] != tc.wantType || !hasParam || param != nil {
+				t.Fatalf("error body = %#v", errorBody)
+			}
+			if message, _ := errorBody["message"].(string); message == "" {
+				t.Fatalf("error body has no message: %#v", errorBody)
+			}
+			for _, secret := range []string{"codex-oauth-quota", "codex-oauth-transient", "oauth-token", "access_token"} {
+				if strings.Contains(string(body), secret) {
+					t.Fatalf("realtime error leaks %q: %s", secret, body)
+				}
+			}
+			select {
+			case <-upstreamHit:
+				t.Fatal("locally denied direct websocket reached upstream")
+			case <-time.After(50 * time.Millisecond):
+			}
+		})
 	}
 }
 

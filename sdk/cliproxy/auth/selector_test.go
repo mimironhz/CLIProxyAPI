@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -493,6 +494,248 @@ func TestSelectorPick_AllCooldownReturnsModelCooldownError(t *testing.T) {
 		}
 		if got, _ := rawErr["provider"].(string); got != "gemini" {
 			t.Fatalf("Error().error.provider = %q, want %q", got, "gemini")
+		}
+	})
+
+	// A window opened by a transient upstream/transport failure is a local service
+	// condition: 503 with a trusted Retry-After and a distinct error code, never 529.
+	t.Run("transient failures answer 503 transient_cooldown", func(t *testing.T) {
+		t.Parallel()
+
+		transientAuths := []*Auth{
+			{
+				ID: "a",
+				ModelStates: map[string]*ModelState{
+					model: {
+						Status:         StatusError,
+						Unavailable:    true,
+						NextRetryAfter: next,
+						LastError:      &Error{Message: "bad gateway", HTTPStatus: http.StatusBadGateway},
+					},
+				},
+			},
+			{
+				ID: "b",
+				ModelStates: map[string]*ModelState{
+					model: {
+						Status:         StatusError,
+						Unavailable:    true,
+						NextRetryAfter: next,
+						LastError:      &Error{Message: "connection reset"},
+					},
+				},
+			},
+			{
+				// Quota bookkeeping is only cleared on success, so a credential that
+				// recovered from a rate limit and then failed transiently still carries
+				// a lapsed quota window. The live block is the transient one.
+				ID: "c",
+				ModelStates: map[string]*ModelState{
+					model: {
+						Status:         StatusError,
+						Unavailable:    true,
+						NextRetryAfter: next,
+						Quota:          QuotaState{Exceeded: true, NextRecoverAt: now.Add(-time.Minute), BackoffLevel: 2},
+						LastError:      &Error{Message: "gateway timeout", HTTPStatus: http.StatusGatewayTimeout},
+					},
+				},
+			},
+		}
+
+		selector := &FillFirstSelector{}
+		_, err := selector.Pick(context.Background(), "gemini", model, cliproxyexecutor.Options{}, transientAuths)
+		if err == nil {
+			t.Fatalf("Pick() error = nil")
+		}
+		if !IsTransientCooldownError(err) {
+			t.Fatalf("Pick() error = %T %v, want transient cooldown", err, err)
+		}
+
+		var mce *modelCooldownError
+		if !errors.As(err, &mce) {
+			t.Fatalf("Pick() error = %T, want *modelCooldownError", err)
+		}
+		if mce.StatusCode() != http.StatusServiceUnavailable {
+			t.Fatalf("StatusCode() = %d, want %d", mce.StatusCode(), http.StatusServiceUnavailable)
+		}
+		if got := SafeResponseHeaders(err).Get("Retry-After"); got == "" {
+			t.Fatalf("SafeResponseHeaders().Get(Retry-After) = empty")
+		}
+
+		var payload map[string]any
+		if errJSON := json.Unmarshal([]byte(mce.Error()), &payload); errJSON != nil {
+			t.Fatalf("json.Unmarshal(Error()) error = %v", errJSON)
+		}
+		rawErr, ok := payload["error"].(map[string]any)
+		if !ok {
+			t.Fatalf("Error() payload missing error object: %v", payload)
+		}
+		if got, _ := rawErr["code"].(string); got != "transient_cooldown" {
+			t.Fatalf("Error().error.code = %q, want %q", got, "transient_cooldown")
+		}
+		// The body identifies only the route, never the credential behind it.
+		for _, secret := range []string{"a", "b", "bad gateway", "connection reset"} {
+			if _, exposed := rawErr[secret]; exposed {
+				t.Fatalf("Error() payload exposes %q: %v", secret, rawErr)
+			}
+		}
+		for field := range rawErr {
+			switch field {
+			case "code", "message", "model", "provider", "reset_time", "reset_seconds":
+			default:
+				t.Fatalf("Error() payload has unexpected field %q: %v", field, rawErr)
+			}
+		}
+		if body := mce.Error(); strings.Contains(body, "connection reset") || strings.Contains(body, "bad gateway") {
+			t.Fatalf("Error() leaks upstream failure detail: %q", body)
+		}
+	})
+
+	// In a mixed pool the credential that recovers first is the one the client is
+	// actually waiting on, so it owns both the advertised deadline and the reported
+	// class. Equal deadlines resolve to quota deterministically.
+	t.Run("mixed pool follows the earliest actionable recovery", func(t *testing.T) {
+		t.Parallel()
+
+		early := now.Add(30 * time.Second)
+		late := now.Add(time.Hour)
+		mixed := []struct {
+			name         string
+			quotaAt      time.Time
+			transientAt  time.Time
+			wantStatus   int
+			wantTransien bool
+		}{
+			{name: "transient recovers first", quotaAt: late, transientAt: early, wantStatus: http.StatusServiceUnavailable, wantTransien: true},
+			{name: "quota recovers first", quotaAt: early, transientAt: late, wantStatus: http.StatusTooManyRequests},
+			{name: "equal deadlines prefer quota", quotaAt: early, transientAt: early, wantStatus: http.StatusTooManyRequests},
+		}
+		for _, tc := range mixed {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+
+				mixedAuths := []*Auth{
+					{
+						ID: "quota",
+						ModelStates: map[string]*ModelState{
+							model: {
+								Status:         StatusError,
+								Unavailable:    true,
+								NextRetryAfter: tc.quotaAt,
+								Quota:          QuotaState{Exceeded: true, NextRecoverAt: tc.quotaAt},
+							},
+						},
+					},
+					{
+						ID: "transient",
+						ModelStates: map[string]*ModelState{
+							model: {
+								Status:         StatusError,
+								Unavailable:    true,
+								NextRetryAfter: tc.transientAt,
+								LastError:      &Error{Message: "bad gateway", HTTPStatus: http.StatusBadGateway},
+							},
+						},
+					},
+				}
+
+				selector := &FillFirstSelector{}
+				_, err := selector.Pick(context.Background(), "gemini", model, cliproxyexecutor.Options{}, mixedAuths)
+				if err == nil {
+					t.Fatalf("Pick() error = nil")
+				}
+				var mce *modelCooldownError
+				if !errors.As(err, &mce) || mce.StatusCode() != tc.wantStatus {
+					t.Fatalf("Pick() error = %T %v, want status %d", err, err, tc.wantStatus)
+				}
+				if IsTransientCooldownError(err) != tc.wantTransien {
+					t.Fatalf("Pick() transient = %v, want %v (err %v)", IsTransientCooldownError(err), tc.wantTransien, err)
+				}
+				// The advertised wait is always the earliest recovery, never the later one.
+				retryAfter, errParse := strconv.Atoi(SafeResponseHeaders(err).Get("Retry-After"))
+				if errParse != nil {
+					t.Fatalf("Retry-After = %q, want seconds", SafeResponseHeaders(err).Get("Retry-After"))
+				}
+				if retryAfter > 31 {
+					t.Fatalf("Retry-After = %d, want the earliest recovery (~30s)", retryAfter)
+				}
+			})
+		}
+	})
+
+	// Credential faults keep their existing non-transient unavailability behavior.
+	t.Run("non-transient credential faults stay auth_unavailable", func(t *testing.T) {
+		t.Parallel()
+
+		controls := []struct {
+			name      string
+			lastError *Error
+			// authLevel exercises the aggregate record, whose LastError is
+			// last-write-wins across models and is therefore never trusted as
+			// provenance even when it looks transient.
+			authLevel bool
+			// disagreeingStates plants per-model provenance that does not agree on the
+			// transient class, so the aggregate must stay generic.
+			disagreeingStates bool
+		}{
+			{name: "unauthorized", lastError: &Error{Code: "unauthorized", Message: "unauthorized", HTTPStatus: http.StatusUnauthorized}},
+			{name: "payment required", lastError: &Error{Message: "payment required", HTTPStatus: http.StatusPaymentRequired}},
+			{name: "forbidden", lastError: &Error{Message: "forbidden", HTTPStatus: http.StatusForbidden}},
+			{name: "not found", lastError: &Error{Message: "not found", HTTPStatus: http.StatusNotFound}},
+			{name: "invalid grant", lastError: &Error{Message: "invalid_grant", HTTPStatus: http.StatusBadRequest}},
+			{name: "model not supported", lastError: &Error{Message: "model not supported", HTTPStatus: http.StatusBadRequest}},
+			{name: "unclassified window", lastError: nil},
+			{name: "auth level aggregate", lastError: &Error{Message: "bad gateway", HTTPStatus: http.StatusBadGateway}, authLevel: true},
+			{name: "aggregate with disagreeing models", lastError: &Error{Message: "bad gateway", HTTPStatus: http.StatusBadGateway}, authLevel: true, disagreeingStates: true},
+		}
+		for _, control := range controls {
+			t.Run(control.name, func(t *testing.T) {
+				t.Parallel()
+
+				blockedAuth := &Auth{ID: "a"}
+				selectionModel := model
+				if control.authLevel {
+					blockedAuth.Unavailable = true
+					blockedAuth.Status = StatusError
+					blockedAuth.NextRetryAfter = next
+					blockedAuth.LastError = control.lastError
+					if control.disagreeingStates {
+						// One model cools transiently, another is unauthorized. The
+						// aggregate deadline has no single cause, so it stays generic.
+						selectionModel = ""
+						blockedAuth.ModelStates = map[string]*ModelState{
+							"model-transient": {
+								Status: StatusError, Unavailable: true, NextRetryAfter: next,
+								LastError: &Error{Message: "bad gateway", HTTPStatus: http.StatusBadGateway},
+							},
+							"model-unauthorized": {
+								Status: StatusError, Unavailable: true, NextRetryAfter: next,
+								LastError: &Error{Code: "unauthorized", Message: "unauthorized", HTTPStatus: http.StatusUnauthorized},
+							},
+						}
+					}
+				} else {
+					blockedAuth.ModelStates = map[string]*ModelState{
+						model: {
+							Status:         StatusError,
+							Unavailable:    true,
+							NextRetryAfter: next,
+							LastError:      control.lastError,
+						},
+					}
+				}
+				blocked, reason, gotNext := isAuthBlockedForModel(blockedAuth, selectionModel, now)
+				if !blocked || reason != blockReasonOther || !gotNext.Equal(next) {
+					t.Fatalf("isAuthBlockedForModel() = %v, %v, %v; want true, other, %v", blocked, reason, gotNext, next)
+				}
+
+				selector := &FillFirstSelector{}
+				_, err := selector.Pick(context.Background(), "gemini", selectionModel, cliproxyexecutor.Options{}, []*Auth{blockedAuth})
+				var authErr *Error
+				if !errors.As(err, &authErr) || authErr == nil || authErr.Code != "auth_unavailable" {
+					t.Fatalf("Pick() error = %T %v, want auth_unavailable", err, err)
+				}
+			})
 		}
 	})
 }

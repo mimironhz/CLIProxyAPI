@@ -19,6 +19,11 @@ func statusFromError(err error) int {
 }
 
 func isAuthSelectionUnavailable(err error) bool {
+	// A transient cooldown means every credential is cooling because of the very
+	// failure being retried, so the caller may still prefer that concrete error.
+	if coreauth.IsTransientCooldownError(err) {
+		return true
+	}
 	var authErr *coreauth.Error
 	if !errors.As(err, &authErr) || authErr == nil {
 		return false

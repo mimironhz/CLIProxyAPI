@@ -15,10 +15,15 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
+
+// statusUpstreamOverloaded is the non-standard overloaded status some upstreams return.
+// It is only ever passed through, never synthesized locally.
+const statusUpstreamOverloaded = 529
 
 type responsesWebsocketForwardOptions struct {
 	toolCacheTurn *responsesWebsocketToolCacheTurn
@@ -197,16 +202,28 @@ func responsesWebsocketErrorStatus(errMsg *interfaces.ErrorMessage) int {
 // shouldExposeResponsesUpstreamError reports whether a terminal upstream error
 // must reach the downstream client.
 //
-// Only request-shape failures are exposed: the client can act on them and no
-// credential rotation or retry can make the request succeed. Credential, quota
-// and transport failures stay silent so the client simply reconnects and retries;
-// a fresh connection carries no server-side transcript, so reconnecting already
-// implies a full context resend.
+// Request-shape failures are exposed: the client can act on them and no credential
+// rotation or retry can make the request succeed. Credential and transport failures
+// stay silent so the client simply reconnects and retries; a fresh connection carries
+// no server-side transcript, so reconnecting already implies a full context resend.
+//
+// Two further classes must be exposed because a silent close actively misleads the
+// client into reconnecting immediately. A proxy-local admission denial carries a
+// trusted Retry-After that an immediate reconnect would discard and then re-trigger,
+// and an upstream overload is a concrete status the client must not mistake for a
+// transport drop.
 func shouldExposeResponsesUpstreamError(errMsg *interfaces.ErrorMessage) bool {
 	if errMsg == nil {
 		return false
 	}
-	return clienterror.IsRequestFault(responsesWebsocketErrorStatus(errMsg), errMsg.Error)
+	status := responsesWebsocketErrorStatus(errMsg)
+	if status == statusUpstreamOverloaded {
+		return true
+	}
+	if coreauth.SafeResponseHeaders(errMsg.Error).Get("Retry-After") != "" {
+		return true
+	}
+	return clienterror.IsRequestFault(status, errMsg.Error)
 }
 
 func writeResponsesWebsocketTerminalError(

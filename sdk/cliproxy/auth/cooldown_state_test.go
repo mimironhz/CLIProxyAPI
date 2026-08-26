@@ -3,14 +3,18 @@ package auth
 import (
 	"context"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
 type recordingCooldownStateStore struct {
@@ -447,51 +451,114 @@ func TestManagerSwapCooldownStateStoreKeepsOldStoreWhenCanceled(t *testing.T) {
 
 func TestManager_RestoreCooldownStates(t *testing.T) {
 	nextRetry := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
-	store := &recordingCooldownStateStore{
-		load: []CooldownStateRecord{
-			{
-				Provider:       "xai",
-				AuthID:         "auth-1",
-				Model:          "grok-4",
-				Status:         "cooling",
-				NextRetryAfter: nextRetry,
-				Reason:         "quota",
-				Quota: QuotaState{
-					Exceeded:      true,
-					Reason:        "quota",
-					NextRecoverAt: nextRetry,
-				},
-				LastError: &Error{Message: "rate limited", HTTPStatus: 429},
-				UpdatedAt: nextRetry.Add(-time.Minute),
+
+	// The persisted schema already carries last_error, so restored windows keep the
+	// provenance that classifies them. Provenance is never inferred from
+	// NextRetryAfter alone: a legacy record without it stays generically unavailable.
+	cases := []struct {
+		name           string
+		record         CooldownStateRecord
+		wantReason     blockReason
+		wantStatus     int
+		wantCode       string
+		wantRetryAfter bool
+		// Only a real quota window may be reported as quota cooling to management.
+		wantQuotaCooling bool
+	}{
+		{
+			name: "quota provenance stays 429",
+			record: CooldownStateRecord{
+				Reason: "quota",
+				Quota:  QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: nextRetry},
+				// Restored quota window keeps the rate-limit contract.
+				LastError: &Error{Message: "rate limited", HTTPStatus: http.StatusTooManyRequests},
 			},
+			wantReason:       blockReasonCooldown,
+			wantStatus:       http.StatusTooManyRequests,
+			wantCode:         "model_cooldown",
+			wantRetryAfter:   true,
+			wantQuotaCooling: true,
+		},
+		{
+			name: "transient provenance matches live state",
+			record: CooldownStateRecord{
+				Reason:    "transient upstream error",
+				LastError: &Error{Message: "bad gateway", HTTPStatus: http.StatusBadGateway},
+			},
+			wantReason:     blockReasonTransient,
+			wantStatus:     http.StatusServiceUnavailable,
+			wantCode:       "transient_cooldown",
+			wantRetryAfter: true,
+		},
+		{
+			name:       "legacy record without provenance stays generic",
+			record:     CooldownStateRecord{Reason: "request failed"},
+			wantReason: blockReasonOther,
+			// No trusted deadline: the API layer defaults an unclassified block to 503.
+			wantStatus: http.StatusServiceUnavailable,
+			wantCode:   "auth_unavailable",
 		},
 	}
-	manager := NewManager(nil, nil, nil)
-	manager.SetCooldownStateStore(store)
-	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), &Auth{ID: "auth-1", Provider: "xai"}); errRegister != nil {
-		t.Fatalf("Register() returned error: %v", errRegister)
-	}
 
-	if errRestore := manager.RestoreCooldownStates(context.Background()); errRestore != nil {
-		t.Fatalf("RestoreCooldownStates() returned error: %v", errRestore)
-	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			record := tc.record
+			record.Provider = "xai"
+			record.AuthID = "auth-1"
+			record.Model = "grok-4"
+			record.Status = "cooling"
+			record.NextRetryAfter = nextRetry
+			record.UpdatedAt = nextRetry.Add(-time.Minute)
 
-	auth, ok := manager.GetByID("auth-1")
-	if !ok {
-		t.Fatal("restored auth was not found")
-	}
-	state := auth.ModelStates["grok-4"]
-	if state == nil {
-		t.Fatal("model state was not restored")
-	}
-	if !state.Unavailable || state.Status != StatusError || !state.NextRetryAfter.Equal(nextRetry) {
-		t.Fatalf("restored state = %+v, want unavailable status error until %v", state, nextRetry)
-	}
-	if state.LastError == nil || state.LastError.HTTPStatus != 429 {
-		t.Fatalf("restored last error = %+v, want HTTP 429", state.LastError)
-	}
-	if got := store.saveCount.Load(); got != 1 {
-		t.Fatalf("restore cleanup saved cooldown state %d times, want 1", got)
+			store := &recordingCooldownStateStore{load: []CooldownStateRecord{record}}
+			manager := NewManager(nil, nil, nil)
+			manager.SetCooldownStateStore(store)
+			if _, errRegister := manager.Register(WithSkipPersist(context.Background()), &Auth{ID: "auth-1", Provider: "xai"}); errRegister != nil {
+				t.Fatalf("Register() returned error: %v", errRegister)
+			}
+
+			if errRestore := manager.RestoreCooldownStates(context.Background()); errRestore != nil {
+				t.Fatalf("RestoreCooldownStates() returned error: %v", errRestore)
+			}
+
+			auth, ok := manager.GetByID("auth-1")
+			if !ok {
+				t.Fatal("restored auth was not found")
+			}
+			state := auth.ModelStates["grok-4"]
+			if state == nil {
+				t.Fatal("model state was not restored")
+			}
+			if !state.Unavailable || state.Status != StatusError || !state.NextRetryAfter.Equal(nextRetry) {
+				t.Fatalf("restored state = %+v, want unavailable status error until %v", state, nextRetry)
+			}
+			if (state.LastError == nil) != (record.LastError == nil) {
+				t.Fatalf("restored last error = %+v, want presence %v", state.LastError, record.LastError != nil)
+			}
+			if got := store.saveCount.Load(); got != 1 {
+				t.Fatalf("restore cleanup saved cooldown state %d times, want 1", got)
+			}
+
+			now := time.Now()
+			blocked, reason, next := isAuthBlockedForModel(auth, "grok-4", now)
+			if !blocked || reason != tc.wantReason || !next.Equal(nextRetry) {
+				t.Fatalf("isAuthBlockedForModel() = %v, %v, %v; want true, %v, %v", blocked, reason, next, tc.wantReason, nextRetry)
+			}
+
+			_, errPick := (&FillFirstSelector{}).Pick(context.Background(), "xai", "grok-4", cliproxyexecutor.Options{}, []*Auth{auth})
+			if got := clienterror.HTTPStatusFromErrorOr(errPick, http.StatusServiceUnavailable); got != tc.wantStatus {
+				t.Fatalf("Pick() status = %d, want %d (err %v)", got, tc.wantStatus, errPick)
+			}
+			if !strings.Contains(errPick.Error(), tc.wantCode) {
+				t.Fatalf("Pick() error = %q, want code %q", errPick.Error(), tc.wantCode)
+			}
+			if got := SafeResponseHeaders(errPick).Get("Retry-After"); (got != "") != tc.wantRetryAfter {
+				t.Fatalf("Pick() Retry-After = %q, want present %v", got, tc.wantRetryAfter)
+			}
+			if _, cooling := manager.QuotaWindowCooldown([]*Auth{auth}, "grok-4", now); cooling != tc.wantQuotaCooling {
+				t.Fatalf("QuotaWindowCooldown() cooling = %v, want %v", cooling, tc.wantQuotaCooling)
+			}
+		})
 	}
 }
 

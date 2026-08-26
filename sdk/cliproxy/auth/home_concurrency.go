@@ -273,6 +273,12 @@ func SafeResponseHeaders(err error) http.Header {
 	if errors.As(err, &quotaWindow) && quotaWindow != nil {
 		return quotaWindow.Headers()
 	}
+	// Proxy-local cooldown windows (429 quota and 503 transient alike) carry a
+	// locally computed Retry-After, so it is trusted regardless of passthrough.
+	var cooldown *modelCooldownError
+	if errors.As(err, &cooldown) && cooldown != nil {
+		return cooldown.Headers()
+	}
 	return nil
 }
 

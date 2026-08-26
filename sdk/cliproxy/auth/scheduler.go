@@ -28,6 +28,10 @@ type scheduledState int
 const (
 	scheduledStateReady scheduledState = iota
 	scheduledStateCooldown
+	// scheduledStateTransient is a finite cooldown opened by a transient upstream or
+	// transport failure. It is tracked apart from scheduledStateCooldown (quota) so the
+	// fast path can answer 503 + Retry-After instead of a bare auth_unavailable.
+	scheduledStateTransient
 	scheduledStateBlocked
 	scheduledStateDisabled
 )
@@ -457,8 +461,7 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model string, predicate func(*scheduledAuth) bool) error {
 	now := time.Now()
 	total := 0
-	cooldownCount := 0
-	earliest := time.Time{}
+	var summary cooldownSummary
 	for _, providerKey := range providers {
 		providerState := s.providers[providerKey]
 		if providerState == nil {
@@ -468,22 +471,13 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 		if shard == nil {
 			continue
 		}
-		localTotal, localCooldownCount, localEarliest := shard.availabilitySummaryLocked(predicate)
-		total += localTotal
-		cooldownCount += localCooldownCount
-		if !localEarliest.IsZero() && (earliest.IsZero() || localEarliest.Before(earliest)) {
-			earliest = localEarliest
-		}
+		total += shard.availabilitySummaryLocked(predicate, &summary)
 	}
 	if total == 0 {
 		return &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	if cooldownCount == total && !earliest.IsZero() {
-		resetIn := earliest.Sub(now)
-		if resetIn < 0 {
-			resetIn = 0
-		}
-		return newModelCooldownError(model, "", resetIn)
+	if errCooldown := summary.cooldownError(model, "", total, now); errCooldown != nil {
+		return errCooldown
 	}
 	return &Error{Code: "auth_unavailable", Message: "no auth available"}
 }
@@ -723,6 +717,9 @@ func (m *modelScheduler) upsertEntryLocked(meta *scheduledAuthMeta, now time.Tim
 	case reason == blockReasonCooldown:
 		entry.state = scheduledStateCooldown
 		entry.nextRetryAt = next
+	case reason == blockReasonTransient:
+		entry.state = scheduledStateTransient
+		entry.nextRetryAt = next
 	case reason == blockReasonDisabled:
 		entry.state = scheduledStateDisabled
 	default:
@@ -768,6 +765,9 @@ func (m *modelScheduler) promoteExpiredLocked(now time.Time) {
 			entry.nextRetryAt = time.Time{}
 		case reason == blockReasonCooldown:
 			entry.state = scheduledStateCooldown
+			entry.nextRetryAt = next
+		case reason == blockReasonTransient:
+			entry.state = scheduledStateTransient
 			entry.nextRetryAt = next
 		case reason == blockReasonDisabled:
 			entry.state = scheduledStateDisabled
@@ -880,32 +880,24 @@ func (m *modelScheduler) readyCountAtPriorityLocked(preferWebsocket bool, priori
 // unavailableErrorLocked returns the correct unavailable or cooldown error for the shard.
 func (m *modelScheduler) unavailableErrorLocked(provider, model string, predicate func(*scheduledAuth) bool) error {
 	now := time.Now()
-	total, cooldownCount, earliest := m.availabilitySummaryLocked(predicate)
+	var summary cooldownSummary
+	total := m.availabilitySummaryLocked(predicate, &summary)
 	if total == 0 {
 		return &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	if cooldownCount == total && !earliest.IsZero() {
-		providerForError := provider
-		if providerForError == "mixed" {
-			providerForError = ""
-		}
-		resetIn := earliest.Sub(now)
-		if resetIn < 0 {
-			resetIn = 0
-		}
-		return newModelCooldownError(model, providerForError, resetIn)
+	if errCooldown := summary.cooldownError(model, provider, total, now); errCooldown != nil {
+		return errCooldown
 	}
 	return &Error{Code: "auth_unavailable", Message: "no auth available"}
 }
 
-// availabilitySummaryLocked summarizes total candidates, cooldown count, and earliest retry time.
-func (m *modelScheduler) availabilitySummaryLocked(predicate func(*scheduledAuth) bool) (int, int, time.Time) {
+// availabilitySummaryLocked returns the candidate count and folds this shard's cooling
+// entries into summary, so a mixed-provider caller can accumulate across shards.
+func (m *modelScheduler) availabilitySummaryLocked(predicate func(*scheduledAuth) bool, summary *cooldownSummary) int {
 	if m == nil {
-		return 0, 0, time.Time{}
+		return 0
 	}
 	total := 0
-	cooldownCount := 0
-	earliest := time.Time{}
 	for _, entry := range m.entries {
 		if predicate != nil && !predicate(entry) {
 			continue
@@ -914,15 +906,14 @@ func (m *modelScheduler) availabilitySummaryLocked(predicate func(*scheduledAuth
 		if entry == nil || entry.auth == nil {
 			continue
 		}
-		if entry.state != scheduledStateCooldown {
-			continue
-		}
-		cooldownCount++
-		if !entry.nextRetryAt.IsZero() && (earliest.IsZero() || entry.nextRetryAt.Before(earliest)) {
-			earliest = entry.nextRetryAt
+		switch entry.state {
+		case scheduledStateCooldown:
+			summary.observe(blockReasonCooldown, entry.nextRetryAt)
+		case scheduledStateTransient:
+			summary.observe(blockReasonTransient, entry.nextRetryAt)
 		}
 	}
-	return total, cooldownCount, earliest
+	return total
 }
 
 // rebuildIndexesLocked reconstructs ready and blocked views from the current entry map.
@@ -950,7 +941,7 @@ func (m *modelScheduler) rebuildIndexesLocked() {
 		case scheduledStateReady:
 			priority := entry.meta.priority
 			priorityBuckets[priority] = append(priorityBuckets[priority], entry)
-		case scheduledStateCooldown, scheduledStateBlocked:
+		case scheduledStateCooldown, scheduledStateTransient, scheduledStateBlocked:
 			m.blocked = append(m.blocked, entry)
 		}
 	}

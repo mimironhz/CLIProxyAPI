@@ -524,7 +524,12 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		retryResult, retryErr := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
 		if retryErr != nil {
 			originalBootstrapErr := executionErrorMessage(bootstrapStreamErr)
-			if isAuthSelectionUnavailable(retryErr) && originalBootstrapErr.StatusCode >= http.StatusInternalServerError {
+			// 408 and 5xx are the failures that open a transient cooldown, so when the
+			// retry finds every credential cooling the concrete upstream status this
+			// request already provoked outranks the cooldown derived from it.
+			initiatingFailure := originalBootstrapErr.StatusCode == http.StatusRequestTimeout ||
+				originalBootstrapErr.StatusCode >= http.StatusInternalServerError
+			if isAuthSelectionUnavailable(retryErr) && initiatingFailure {
 				bootstrapErr = originalBootstrapErr
 			} else {
 				bootstrapErr = executionErrorMessage(enrichAuthSelectionError(retryErr, providers, normalizedModel))

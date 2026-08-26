@@ -150,6 +150,16 @@ func shouldReturnLastErrorOnPickFailure(homeMode bool, lastErr error, errPick er
 	if isHomeRequestRetryExceededError(errPick) {
 		return true
 	}
+	// Home selection never synthesizes a modelCooldownError; it can only return a
+	// quotaWindowError, already handled above. homeMode is captured once per
+	// mixed-execution pass while pickNextMixed re-checks HomeEnabled on every pick, so a
+	// config reload that disables Home mid-pass is the one way a local transient cooldown
+	// reaches this branch. Treat it like the auth_unavailable it replaced: the concrete
+	// error this pass already took stays the answer. A quota cooldown is a real rate limit
+	// and deliberately still wins.
+	if IsTransientCooldownError(errPick) {
+		return true
+	}
 	var authErr *Error
 	if !errors.As(errPick, &authErr) || authErr == nil {
 		return false
