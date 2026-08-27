@@ -113,6 +113,7 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 				for i, eventData := range eventDataList {
 					eventData = restoreXAIViewImageToolAlias(eventData, prepared.viewImageToolAlias)
 					eventData = namespaceRestorer.restore(eventData)
+					eventData = normalizeCodexWebsocketCompletion(eventData)
 					eventData = restoreXAIToolSearchCalls(eventData)
 					eventData = responseFilter.apply(eventData)
 					if len(eventData) == 0 {

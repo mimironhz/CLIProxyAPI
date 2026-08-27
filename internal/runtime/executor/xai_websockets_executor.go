@@ -779,6 +779,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 			for _, payload := range xaiNormalizeReasoningSummaryDataEvents(payload) {
 				payload = restoreXAIViewImageToolAlias(payload, prepared.viewImageToolAlias)
 				payload = namespaceRestorer.restore(payload)
+				payload = normalizeCodexWebsocketCompletion(payload)
 				payload = restoreXAIToolSearchCalls(payload)
 				payload = responseFilter.apply(payload)
 				if len(payload) == 0 {

@@ -300,6 +300,7 @@ func (e *XAIExecutor) executeXAICompactionSummary(ctx context.Context, auth *cli
 			continue
 		}
 		eventData := xaiNormalizeReasoningSummaryData(bytes.TrimSpace(line[len(xaiDataTag):]))
+		eventData = normalizeCodexWebsocketCompletion(eventData)
 		eventName := pendingEventName
 		pendingEventName = ""
 		if streamErr, ok := openAICompatStreamDataError(eventData, eventName); ok {
