@@ -826,6 +826,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 					logXAIWebsocketTerminalResponse(executionSessionID, authID, wsURL, eventType, payload)
 					payload = xaiPatchCompletedOutput(payload, outputItemsByIndex, outputItemsFallback)
 					payload = xaiNormalizeReasoningSummaryData(payload)
+					payload = normalizeCodexWebsocketCompletion(payload)
 					if completionErr, reasoningOnly := xaiReasoningOnlyCompletionError(payload); reasoningOnly {
 						terminateReason = "reasoning_only_completion"
 						terminateErr = completionErr
@@ -840,6 +841,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 					if detail, ok := helps.ParseCodexUsage(payload); ok {
 						reporter.Publish(usageCtx, detail)
 					}
+					cacheXAIReasoningReplayFromCompleted(ctx, prepared.replayScope, payload)
 					if !warmupRequest && idMapper != nil && idMapper.state != nil && !recordedTranscript {
 						idMapper.state.recordTranscriptTurn(transcriptRequestBody, payload, transcriptReset)
 						recordedTranscript = true
