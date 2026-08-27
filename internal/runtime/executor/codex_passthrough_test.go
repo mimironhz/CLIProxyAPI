@@ -107,6 +107,17 @@ func TestApplyCodexHeadersUsesPassthroughBearer(t *testing.T) {
 	if got := req.Header.Get("Originator"); got != codexOriginator {
 		t.Fatalf("Originator = %q, want %q", got, codexOriginator)
 	}
+
+	websocketHeaders := applyCodexWebsocketHeaders(context.Background(), http.Header{}, auth, "stored-token", cfg, ginHeaders)
+	if got := websocketHeaders.Get("Authorization"); got != "Bearer "+clientToken {
+		t.Fatalf("websocket Authorization = %q, want the client bearer", got)
+	}
+	if got := headerValueCaseInsensitive(websocketHeaders, "Chatgpt-Account-Id"); got != "acct-from-client" {
+		t.Fatalf("websocket Chatgpt-Account-Id = %q, want acct-from-client", got)
+	}
+	if got := websocketHeaders.Get("Originator"); got != codexOriginator {
+		t.Fatalf("websocket Originator = %q, want %q", got, codexOriginator)
+	}
 }
 
 func TestApplyCodexHeadersKeepsStoredTokenWhenPassthroughDisabled(t *testing.T) {

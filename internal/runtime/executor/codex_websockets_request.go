@@ -81,7 +81,8 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 		ginHeaders = ginCtx.Request.Header.Clone()
 	}
 
-	if passthrough := codexPassthroughToken(cfg, ginHeaders); passthrough != "" {
+	passthrough := codexPassthroughToken(cfg, ginHeaders)
+	if passthrough != "" {
 		token = passthrough
 	}
 	if strings.TrimSpace(token) != "" {
@@ -89,6 +90,11 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 	}
 
 	isAPIKey := codexAuthUsesAPIKey(auth)
+	// A passthrough bearer is a ChatGPT OAuth token regardless of how the
+	// selected credential is configured.
+	if passthrough != "" {
+		isAPIKey = false
+	}
 	cfgUserAgent, cfgBetaFeatures := codexHeaderDefaults(cfg, auth)
 	ensureHeaderWithPriority(headers, ginHeaders, "x-codex-beta-features", cfgBetaFeatures, "")
 	misc.EnsureHeader(headers, ginHeaders, "x-codex-turn-state", "")
@@ -121,12 +127,19 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 		headers.Set("Originator", codexOriginator)
 	}
 	if !isAPIKey {
+		accountID := ""
 		if auth != nil && auth.Metadata != nil {
-			if accountID, ok := auth.Metadata["account_id"].(string); ok {
-				if trimmed := strings.TrimSpace(accountID); trimmed != "" {
-					setHeaderCasePreserved(headers, "ChatGPT-Account-ID", trimmed)
-				}
+			if value, ok := auth.Metadata["account_id"].(string); ok {
+				accountID = strings.TrimSpace(value)
 			}
+		}
+		if passthrough != "" {
+			if value := strings.TrimSpace(ginHeaders.Get("Chatgpt-Account-Id")); value != "" {
+				accountID = value
+			}
+		}
+		if accountID != "" {
+			setHeaderCasePreserved(headers, "ChatGPT-Account-ID", accountID)
 		}
 	}
 

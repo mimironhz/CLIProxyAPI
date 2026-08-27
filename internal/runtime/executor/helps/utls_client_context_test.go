@@ -100,9 +100,23 @@ func TestUtlsConnectionAcquisitionHonorsHandshakeCancellation(t *testing.T) {
 		result <- errConnection
 	}()
 	waitForUtlsTestSignal(t, dialer.started)
+	if errDeadline := serverConnection.SetReadDeadline(time.Now().Add(2 * time.Second)); errDeadline != nil {
+		t.Fatalf("set peer read deadline: %v", errDeadline)
+	}
 	cancel()
 	if errConnection := waitForUtlsTestResult(t, result); !errors.Is(errConnection, context.Canceled) {
 		t.Fatalf("handshake error = %v, want context canceled", errConnection)
+	}
+	buffer := make([]byte, 4096)
+	for {
+		_, errRead := serverConnection.Read(buffer)
+		if errRead == nil {
+			continue
+		}
+		if netError, ok := errRead.(net.Error); ok && netError.Timeout() {
+			t.Fatalf("canceled handshake connection was not closed: %v", errRead)
+		}
+		break
 	}
 }
 

@@ -36,6 +36,24 @@ type closeConnectionBody struct {
 	err             error
 }
 
+type closeOnceConn struct {
+	net.Conn
+	once sync.Once
+	err  error
+}
+
+func (c *closeOnceConn) Close() error {
+	if c == nil {
+		return nil
+	}
+	c.once.Do(func() {
+		if c.Conn != nil {
+			c.err = c.Conn.Close()
+		}
+	})
+	return c.err
+}
+
 func (b *closeConnectionBody) Close() error {
 	if b == nil {
 		return nil
@@ -73,14 +91,19 @@ func (t *utlsRoundTripper) createConnection(ctx context.Context, host, addr stri
 		return nil, fmt.Errorf("utls: dial upstream: %w", errDial)
 	}
 
+	managedConn := &closeOnceConn{Conn: conn}
 	tlsConfig := &tls.Config{ServerName: host}
-	tlsConn := tls.UClient(conn, tlsConfig, tls.HelloChrome_Auto)
+	tlsConn := tls.UClient(managedConn, tlsConfig, tls.HelloChrome_Auto)
 
 	if errHandshake := tlsConn.HandshakeContext(ctx); errHandshake != nil {
+		errClose := managedConn.Close()
 		if errors.Is(errHandshake, context.Canceled) || errors.Is(errHandshake, context.DeadlineExceeded) {
+			if errClose != nil {
+				return nil, fmt.Errorf("utls: TLS handshake: %w; close connection: %v", errHandshake, errClose)
+			}
 			return nil, fmt.Errorf("utls: TLS handshake: %w", errHandshake)
 		}
-		if errClose := conn.Close(); errClose != nil {
+		if errClose != nil {
 			return nil, fmt.Errorf("utls: TLS handshake: %w; close connection: %v", errHandshake, errClose)
 		}
 		return nil, fmt.Errorf("utls: TLS handshake: %w", errHandshake)
