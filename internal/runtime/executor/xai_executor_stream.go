@@ -125,10 +125,10 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 					switch normalizedEventName {
 					case "response.output_item.done":
 						xaiCollectOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
-					case "response.completed", "response.incomplete":
+					case "response.completed", "response.incomplete", "response.done":
 						eventData = xaiPatchCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
 						eventData = xaiNormalizeReasoningSummaryData(eventData)
-						if normalizedEventName == "response.completed" {
+						if normalizedEventName == "response.completed" || normalizedEventName == "response.done" {
 							if completionErr, reasoningOnly := xaiReasoningOnlyCompletionError(eventData); reasoningOnly {
 								helps.RecordAPIResponseError(ctx, e.cfg, completionErr)
 								reporter.PublishFailure(ctx, completionErr)
@@ -138,6 +138,8 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 								}
 								return
 							}
+						}
+						if normalizedEventName == "response.completed" {
 							// A truncated turn carries no replayable terminal state, so only a
 							// completed response may refresh the reasoning replay cache.
 							cacheXAIReasoningReplayFromCompleted(ctx, prepared.replayScope, eventData)

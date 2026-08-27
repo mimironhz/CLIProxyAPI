@@ -102,14 +102,16 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 		switch eventType {
 		case "response.output_item.done":
 			xaiCollectOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
-		case "response.completed", "response.incomplete":
+		case "response.completed", "response.incomplete", "response.done":
 			completedData := xaiPatchCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
 			completedData = xaiNormalizeReasoningSummaryData(completedData)
-			if eventType == "response.completed" {
+			if eventType == "response.completed" || eventType == "response.done" {
 				if completionErr, reasoningOnly := xaiReasoningOnlyCompletionError(completedData); reasoningOnly {
 					helps.RecordAPIResponseError(ctx, e.cfg, completionErr)
 					return resp, completionErr
 				}
+			}
+			if eventType == "response.completed" {
 				// A truncated turn carries no replayable terminal state, so only a
 				// completed response may refresh the reasoning replay cache.
 				cacheXAIReasoningReplayFromCompleted(ctx, prepared.replayScope, completedData)
@@ -126,7 +128,7 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 		}
 	}
 
-	return resp, statusErr{code: http.StatusRequestTimeout, msg: "xai stream error: stream disconnected before response.completed or response.incomplete"}
+	return resp, statusErr{code: http.StatusRequestTimeout, msg: "xai stream error: stream disconnected before a terminal response event"}
 }
 
 func (e *XAIExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
