@@ -721,6 +721,9 @@ type OpenAICompatibility struct {
 
 	// RequestScopedErrors configures custom classification rules for upstream errors.
 	RequestScopedErrors []RequestScopedErrorRule `yaml:"request-scoped-errors,omitempty" json:"request-scoped-errors,omitempty"`
+
+	// Quota optionally configures recurring spend-budget windows for this provider.
+	Quota *ProviderQuota `yaml:"quota,omitempty" json:"quota,omitempty"`
 }
 
 // OpenAICompatibilityAPIKey represents an API key configuration with optional proxy setting.

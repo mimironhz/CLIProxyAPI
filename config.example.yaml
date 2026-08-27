@@ -239,6 +239,13 @@ codex:
   identity-confuse: false
   # Disable forcing the official Codex User-Agent and Originator headers on HTTP/SSE and WebSocket requests.
   disable-codex-cloaking: false
+  # When true, forward the calling client's own ChatGPT OAuth bearer to the Codex
+  # upstream instead of the selected credential's token. Intended for Codex
+  # Desktop / codex-cli pointed here through openai_base_url, so ChatGPT usage
+  # stays on the account the client is already signed in as. Only JWT-shaped
+  # bearers are forwarded (so a configured api-keys value is never mistaken for a
+  # ChatGPT credential), and only on the Codex path — xAI keeps its own credential.
+  passthrough-client-token: false
   # Hold back the initial handshake events (response.created, response.in_progress and the
   # websocket metadata frames) until the upstream emits its first generated event.
   # Why: the upstream smuggles `server_is_overloaded` rejections *inside* an HTTP 200 stream,
@@ -432,7 +439,7 @@ nonstream-keepalive-interval: 0
 # xai-api-key:
 #   - api-key: "xai-..."
 #     weight: 5 # optional: weighted-round-robin share; omitted defaults to 1; maximum 1,000,000
-#     prefix: "xai" # optional: require calls like "xai/grok-4.5" to target this credential
+#     prefix: "xai" # optional: require calls like "xai/grok-4.6" to target this credential
 #     disable-cooling: false # optional override: true disables cooling, false enables it; omit to inherit global
 #     request-retry: 3 # optional per-auth override; 0 disables additional rounds; omit or set < 0 to inherit global
 #     request-scoped-errors: # optional: custom rules to classify upstream errors by status and body patterns
@@ -450,14 +457,14 @@ nonstream-keepalive-interval: 0
 #     proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
 #     # proxy-url: "direct" # optional: explicit direct connect for this credential
 #     models:
-#       - name: "grok-4.5"       # upstream model name
-#         alias: "grok-latest"   # client alias mapped to the upstream model
-#         display-name: "Grok Latest" # optional catalog display name
-#         max-context-length: 1048576 # optional: override Codex client context window metadata
+#       - name: "grok-4.6"       # upstream model name
+#         alias: "grok-4.6"      # client alias mapped to the upstream model
+#         display-name: "Grok 4.6" # optional catalog display name
+#         max-context-length: 500000 # optional: override Codex client context window metadata
 #         force-mapping: true     # optional: rewrite response model fields back to the alias
 #         is-compat: false        # optional: preserve thinking blocks with empty signatures for compatible upstreams
 #         thinking:               # optional: exact thinking capability for this configured model
-#           levels: ["xhigh", "high", "medium", "low"]
+#           levels: ["low", "medium", "high", "xhigh"]
 #     excluded-models:
 #       - "grok-4.1"             # exclude specific models (exact match)
 #       - "grok-3-*"             # wildcard matching prefix

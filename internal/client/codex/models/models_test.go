@@ -337,6 +337,7 @@ func TestApplyCodexClientModelMetadataPreservesMultiAgentVersionWhenDisabled(t *
 func TestCodexClientModelsResponseAppliesMaxContextLengthOverride(t *testing.T) {
 	const wantOverride = 1048576
 	const wantDefault = 272000
+	const wantDeepSeekContext = 1048576
 
 	resp := BuildResponse([]map[string]any{
 		{"id": "deepseek-v4-flash", "max_context_length": wantOverride},
@@ -358,7 +359,7 @@ func TestCodexClientModelsResponseAppliesMaxContextLengthOverride(t *testing.T) 
 		want int
 	}{
 		{slug: "deepseek-v4-flash", want: wantOverride},
-		{slug: "deepseek-v4-pro", want: wantDefault},
+		{slug: "deepseek-v4-pro", want: wantDeepSeekContext},
 		{slug: "gpt-5.5", want: wantOverride},
 	} {
 		entry := bySlug[testCase.slug]

@@ -113,6 +113,11 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")
 	body, _ = sjson.DeleteBytes(body, "stream_options")
 	body = helps.RewriteCodexMultiAgentV2Input(ctx, opts.Headers, body, e.cfg)
+	// agent_message is a Codex-only input item. Grok's Responses decoder rejects
+	// the whole request when it reaches xAI, regardless of optional multi-agent
+	// optimization settings.
+	body = helps.NormalizeCodexDelegationMessageSchema(body)
+	body = helps.NormalizeCodexAgentMessageInput(body)
 	willInjectXSearch := e.cfg != nil && e.cfg.XAI.InjectXSearch
 	shouldFold := xaiShouldFoldNamespaceTools(body, willInjectXSearch)
 	namespaceTools := collectXAINamespaceToolRefsWithFold(body, shouldFold)
@@ -958,6 +963,211 @@ func xaiToolChoiceMatchesAvailable(choice gjson.Result, available map[xaiToolCho
 	return ok
 }
 
+// applyXAIViewImageToolAlias exposes Codex Desktop's image viewer under
+// inspect_image, a name Grok selects reliably for visual inspection. The alias
+// is exact and collision-free so client-defined tools are never shadowed.
+func applyXAIViewImageToolAlias(body []byte) ([]byte, bool) {
+	if !gjson.ValidBytes(body) {
+		return body, false
+	}
+	tools := gjson.GetBytes(body, "tools")
+	if !tools.IsArray() || xaiInputHasUnnamespacedToolCall(body, xaiInspectImageToolName) {
+		return body, false
+	}
+
+	viewImageIndex := -1
+	viewImageCount := 0
+	for index, tool := range tools.Array() {
+		switch strings.TrimSpace(tool.Get("name").String()) {
+		case xaiInspectImageToolName:
+			return body, false
+		case xaiViewImageToolName:
+			viewImageCount++
+			if xaiIsExactCodexViewImageTool(tool) {
+				viewImageIndex = index
+			}
+		}
+	}
+	if viewImageCount != 1 || viewImageIndex < 0 {
+		return body, false
+	}
+
+	original := body
+	updated, errSet := sjson.SetBytes(body, fmt.Sprintf("tools.%d.name", viewImageIndex), xaiInspectImageToolName)
+	if errSet != nil {
+		return original, false
+	}
+	updated, ok := rewriteXAIToolChoiceFunctionName(updated, xaiViewImageToolName, xaiInspectImageToolName)
+	if !ok {
+		return original, false
+	}
+	return updated, true
+}
+
+func xaiInputHasUnnamespacedToolCall(body []byte, name string) bool {
+	for _, item := range gjson.GetBytes(body, "input").Array() {
+		itemType := item.Get("type").String()
+		if (itemType == "function_call" || itemType == "custom_tool_call") &&
+			strings.TrimSpace(item.Get("namespace").String()) == "" &&
+			item.Get("name").String() == name {
+			return true
+		}
+	}
+	return false
+}
+
+func xaiIsExactCodexViewImageTool(tool gjson.Result) bool {
+	if !xaiJSONObjectHasExactKeys(tool, "type", "name", "description", "strict", "parameters") ||
+		tool.Get("type").String() != xaiFunctionToolType ||
+		tool.Get("name").String() != xaiViewImageToolName ||
+		tool.Get("description").String() != xaiViewImageDescription ||
+		tool.Get("strict").Type != gjson.False {
+		return false
+	}
+
+	parameters := tool.Get("parameters")
+	properties := parameters.Get("properties")
+	path := properties.Get("path")
+	if !xaiJSONObjectHasExactKeys(parameters, "type", "properties", "required", "additionalProperties") ||
+		parameters.Get("type").String() != "object" ||
+		parameters.Get("additionalProperties").Type != gjson.False ||
+		!xaiJSONStringArrayEquals(parameters.Get("required"), "path") ||
+		!xaiJSONObjectHasExactKeys(path, "type", "description") ||
+		path.Get("type").String() != "string" ||
+		path.Get("description").String() != xaiViewImagePathDescription {
+		return false
+	}
+	if xaiJSONObjectHasExactKeys(properties, "path") {
+		return true
+	}
+	if !xaiJSONObjectHasExactKeys(properties, "path", "detail") {
+		return false
+	}
+	detail := properties.Get("detail")
+	return xaiJSONObjectHasExactKeys(detail, "type", "description", "enum") &&
+		detail.Get("type").String() == "string" &&
+		detail.Get("description").String() == xaiViewImageDetailDescription &&
+		xaiJSONStringArrayEquals(detail.Get("enum"), "high", "original")
+}
+
+func xaiJSONObjectHasExactKeys(object gjson.Result, expected ...string) bool {
+	if !object.IsObject() {
+		return false
+	}
+	expectedKeys := make(map[string]struct{}, len(expected))
+	for _, key := range expected {
+		expectedKeys[key] = struct{}{}
+	}
+	count := 0
+	valid := true
+	object.ForEach(func(key, _ gjson.Result) bool {
+		count++
+		if _, ok := expectedKeys[key.String()]; !ok {
+			valid = false
+		}
+		return true
+	})
+	return valid && count == len(expectedKeys)
+}
+
+func xaiJSONStringArrayEquals(result gjson.Result, expected ...string) bool {
+	if !result.IsArray() {
+		return false
+	}
+	actual := result.Array()
+	if len(actual) != len(expected) {
+		return false
+	}
+	actualStrings := make([]string, 0, len(actual))
+	for _, item := range actual {
+		if item.Type != gjson.String {
+			return false
+		}
+		actualStrings = append(actualStrings, item.String())
+	}
+	expectedStrings := append([]string(nil), expected...)
+	sort.Strings(actualStrings)
+	sort.Strings(expectedStrings)
+	return strings.Join(actualStrings, "\x00") == strings.Join(expectedStrings, "\x00")
+}
+
+func rewriteXAIToolChoiceFunctionName(body []byte, fromName, toName string) ([]byte, bool) {
+	return rewriteXAIToolChoiceFunctionNameAtPath(body, "tool_choice", fromName, toName)
+}
+
+func rewriteXAIToolChoiceFunctionNameAtPath(body []byte, path, fromName, toName string) ([]byte, bool) {
+	original := body
+	choice := gjson.GetBytes(body, path)
+	if !choice.IsObject() {
+		return body, true
+	}
+	if choice.Get("type").String() == xaiFunctionToolType &&
+		strings.TrimSpace(choice.Get("namespace").String()) == "" &&
+		choice.Get("name").String() == fromName {
+		updated, errSet := sjson.SetBytes(body, path+".name", toName)
+		if errSet != nil {
+			return original, false
+		}
+		body = updated
+	}
+	if choice.Get("type").String() != "allowed_tools" {
+		return body, true
+	}
+	toolsPath := path + ".tools"
+	for index, allowed := range gjson.GetBytes(body, toolsPath).Array() {
+		if allowed.Get("type").String() != xaiFunctionToolType ||
+			strings.TrimSpace(allowed.Get("namespace").String()) != "" ||
+			allowed.Get("name").String() != fromName {
+			continue
+		}
+		updated, errSet := sjson.SetBytes(body, fmt.Sprintf("%s.%d.name", toolsPath, index), toName)
+		if errSet != nil {
+			return original, false
+		}
+		body = updated
+	}
+	return body, true
+}
+
+func rewriteXAIViewImageInputCalls(body []byte) ([]byte, bool) {
+	return rewriteXAIInputFunctionCallName(body, xaiViewImageToolName, xaiInspectImageToolName)
+}
+
+func rewriteXAIInputFunctionCallName(body []byte, fromName, toName string) ([]byte, bool) {
+	if !gjson.ValidBytes(body) {
+		return body, false
+	}
+	input := gjson.GetBytes(body, "input")
+	if !input.IsArray() {
+		return body, true
+	}
+	original := body
+	for index, item := range input.Array() {
+		if item.Get("type").String() != "function_call" ||
+			strings.TrimSpace(item.Get("namespace").String()) != "" ||
+			item.Get("name").String() != fromName {
+			continue
+		}
+		updated, errSet := sjson.SetBytes(body, fmt.Sprintf("input.%d.name", index), toName)
+		if errSet != nil {
+			return original, false
+		}
+		body = updated
+	}
+	return body, true
+}
+
+func xaiViewImageClientTranscriptRequest(body []byte, enabled bool) []byte {
+	if !enabled {
+		return body
+	}
+	restored, ok := rewriteXAIInputFunctionCallName(body, xaiInspectImageToolName, xaiViewImageToolName)
+	if !ok {
+		return body
+	}
+	return restored
+}
+
 func xaiCountFlattenedTools(tools gjson.Result) int {
 	if !tools.Exists() || !tools.IsArray() {
 		return 0
@@ -1420,13 +1630,16 @@ func normalizeXAINamespaceToolChoiceWithFold(body []byte, shouldFold bool) []byt
 	return body
 }
 
-func normalizeXAITool(tool gjson.Result, namespaceName string, keepImageGeneration bool) ([]byte, bool, bool) {
+func normalizeXAITool(tool gjson.Result, namespaceName string, keepImageGeneration ...bool) ([]byte, bool, bool) {
+	keepNativeImageGeneration := len(keepImageGeneration) > 0 && keepImageGeneration[0]
 	toolType := tool.Get("type").String()
 	changed := false
 	if toolType == xaiToolSearchType {
-		return nil, true, true
+		// Forward the hosted tool_search tool under a non-reserved function name;
+		// dropping it makes every deferred-tool skill unusable.
+		return []byte(xaiToolSearchFunctionJSON), true, true
 	}
-	if toolType == xaiImageGenerationToolType && !keepImageGeneration {
+	if toolType == xaiImageGenerationToolType && !keepNativeImageGeneration {
 		return nil, true, true
 	}
 	if toolType == xaiCustomToolType && tool.Get("name").String() == "apply_patch" {
@@ -1498,7 +1711,7 @@ func normalizeXAITool(tool gjson.Result, namespaceName string, keepImageGenerati
 	// rejects because function parameters must resolve exclusively to objects.
 	if toolType == xaiFunctionToolType && xaiFunctionParametersNeedSimplification(schemaTool, namespaceName) {
 		safeParameters := xaiSafeFunctionParameters
-		if xaiIsCodexAppAutomationUpdate(schemaTool, namespaceName) {
+		if isXAICodexAppAutomationUpdate(schemaTool.Get("name").String(), namespaceName) {
 			// Keep mode/destination/targetThreadId guidance while dropping the hang-
 			// inducing oneOf+$ref tree. Empty additionalProperties alone is not enough.
 			safeParameters = xaiAutomationUpdateSafeParameters

@@ -34,6 +34,7 @@ type RoundRobinSelector struct {
 	mu         sync.Mutex
 	lastPicked map[string]string
 	maxKeys    int
+	quota      quotaGateBinding
 }
 
 // WeightedRoundRobinSelector provides smooth weighted round-robin selection.

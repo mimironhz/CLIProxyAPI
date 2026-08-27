@@ -321,6 +321,10 @@ func applyCodexDirectImageHeaders(r *http.Request, auth *cliproxyauth.Auth, toke
 
 func applyCodexHeadersFromSources(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, cfg *config.Config, ginHeaders http.Header) {
 	r.Header.Set("Content-Type", "application/json")
+	passthrough := codexPassthroughToken(cfg, ginHeaders)
+	if passthrough != "" {
+		token = passthrough
+	}
 	if strings.TrimSpace(token) != "" {
 		r.Header.Set("Authorization", "Bearer "+token)
 	} else {
@@ -349,6 +353,11 @@ func applyCodexHeadersFromSources(r *http.Request, auth *cliproxyauth.Auth, toke
 	r.Header.Set("Connection", "Keep-Alive")
 
 	isAPIKey := codexAuthUsesAPIKey(auth)
+	// A passthrough bearer is a ChatGPT OAuth token regardless of how the
+	// selected credential is configured.
+	if passthrough != "" {
+		isAPIKey = false
+	}
 	if originator := strings.TrimSpace(ginHeaders.Get("Originator")); originator != "" {
 		r.Header.Set("Originator", originator)
 	} else if !isAPIKey {

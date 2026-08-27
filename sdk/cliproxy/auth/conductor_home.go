@@ -931,6 +931,13 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 	if requestedModel == "" {
 		requestedModel = requestedModelFromMetadata(opts.Metadata, model)
 	}
+	quotaModel := quotaWindowBillingModel(opts, requestedModel)
+	if gate := m.quotaWindowGateSnapshot(); gate != nil {
+		now := time.Now()
+		if block, exhausted := gate.BlockedForModel(m.quotaWindowCandidates(quotaModel), quotaModel, now); exhausted {
+			return nil, newQuotaWindowError(quotaModel, block, now)
+		}
+	}
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	retryRound := homeRetryRoundFromMetadata(opts.Metadata)
 	excludedAuthIDList := homeExcludedAuthIDsFromMetadata(opts.Metadata)
@@ -1362,7 +1369,7 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 			resultModel := m.stateModelForExecution(c.auth, routeModel, upstreamModel, pooled)
 			execReq := req
 			execReq.Model = upstreamModel
-			resp, errExec := c.executor.Execute(creditsCtx, c.auth, execReq, creditsOpts)
+			resp, errExec := m.executeQuotaAttempt(creditsCtx, c.executor, c.auth, routeModel, execReq, creditsOpts)
 			result := Result{AuthID: c.auth.ID, Provider: c.provider, Model: resultModel, Success: errExec == nil, Options: creditsOpts}
 			if errExec != nil {
 				result.Error = resultErrorFromError(errExec)

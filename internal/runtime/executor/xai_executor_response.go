@@ -520,6 +520,65 @@ func unwrapXAIDispatcherArguments(rawArgs string, namespaceName string, refs map
 	return childName, childArgs, true
 }
 
+// restoreXAIViewImageToolAlias maps only calls associated with a request that
+// installed the collision-free alias. Arguments stay byte-for-byte unchanged,
+// so streamed path/detail fragments remain valid for the Codex view_image tool.
+func restoreXAIViewImageToolAlias(data []byte, enabled bool) []byte {
+	if !enabled || len(data) == 0 || !gjson.ValidBytes(data) {
+		return data
+	}
+	original := data
+	var ok bool
+	data, ok = rewriteXAIViewImageFunctionCallAtPath(data, "item")
+	if !ok {
+		return original
+	}
+	for _, arrayPath := range []string{"response.output", "output"} {
+		for index := range gjson.GetBytes(data, arrayPath).Array() {
+			data, ok = rewriteXAIViewImageFunctionCallAtPath(data, fmt.Sprintf("%s.%d", arrayPath, index))
+			if !ok {
+				return original
+			}
+		}
+	}
+	for _, arrayPath := range []string{"response.tools", "tools"} {
+		for index := range gjson.GetBytes(data, arrayPath).Array() {
+			path := fmt.Sprintf("%s.%d", arrayPath, index)
+			tool := gjson.GetBytes(data, path)
+			if tool.Get("type").String() != xaiFunctionToolType ||
+				tool.Get("name").String() != xaiInspectImageToolName {
+				continue
+			}
+			updated, errSet := sjson.SetBytes(data, path+".name", xaiViewImageToolName)
+			if errSet != nil {
+				return original
+			}
+			data = updated
+		}
+	}
+	for _, choicePath := range []string{"response.tool_choice", "tool_choice"} {
+		data, ok = rewriteXAIToolChoiceFunctionNameAtPath(data, choicePath, xaiInspectImageToolName, xaiViewImageToolName)
+		if !ok {
+			return original
+		}
+	}
+	return data
+}
+
+func rewriteXAIViewImageFunctionCallAtPath(data []byte, path string) ([]byte, bool) {
+	item := gjson.GetBytes(data, path)
+	if !item.Exists() || item.Get("type").String() != "function_call" ||
+		strings.TrimSpace(item.Get("namespace").String()) != "" ||
+		item.Get("name").String() != xaiInspectImageToolName {
+		return data, true
+	}
+	updated, errSet := sjson.SetBytes(data, path+".name", xaiViewImageToolName)
+	if errSet != nil {
+		return data, false
+	}
+	return updated, true
+}
+
 func restoreXAINamespaceToolCalls(data []byte, refs map[string]xaiNamespaceToolRef) []byte {
 	restorer := newXAINamespaceRestorer(refs)
 	return restorer.restore(data)
@@ -586,6 +645,13 @@ func isXAICodexAppAutomationUpdate(toolName, namespaceName string) bool {
 		return true
 	}
 	return false
+}
+
+func xaiIsCodexAppAutomationUpdate(tool gjson.Result, namespaceName string) bool {
+	if !strings.EqualFold(strings.TrimSpace(tool.Get("type").String()), xaiFunctionToolType) {
+		return false
+	}
+	return isXAICodexAppAutomationUpdate(tool.Get("name").String(), namespaceName)
 }
 
 // xaiFunctionParametersNeedSimplification reports whether a function tool, or

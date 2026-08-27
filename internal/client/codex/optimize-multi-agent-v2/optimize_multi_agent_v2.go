@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -164,7 +166,7 @@ func OptimizeCodexMultiAgentV2Request(ctx context.Context, headers http.Header, 
 	if !codexMultiAgentV2Enabled(ctx, headers, cfg) {
 		return payload, false
 	}
-	updated := rewriteCodexAgentMessageContent(payload)
+	updated := rewriteCodexAgentMessageContent(payload, false)
 	if codexMultiAgentV2ToolsPrepared(ctx) {
 		updated = removeCodexCollaborationMessageEncryption(updated, codexCollaborationMessageToolPaths(updated))
 	} else {
@@ -1065,6 +1067,74 @@ func collectCodexToolPathsByNames(tools gjson.Result, path string, paths *[]stri
 			collectCodexToolPathsByNames(tool.Get("tools"), toolPath+".tools", paths, names)
 		}
 	}
+}
+
+func codexDelegationMessageToolPaths(payload []byte) []string {
+	paths := make([]string, 0, 3)
+	collectCodexDelegationMessageToolPaths(gjson.GetBytes(payload, "tools"), "tools", false, &paths)
+
+	input := gjson.GetBytes(payload, "input")
+	if input.IsArray() {
+		for index, item := range input.Array() {
+			if strings.TrimSpace(item.Get("type").String()) != "additional_tools" {
+				continue
+			}
+			collectCodexDelegationMessageToolPaths(item.Get("tools"), fmt.Sprintf("input.%d.tools", index), false, &paths)
+		}
+	}
+	return paths
+}
+
+func codexReservedCollaborationDeliveryToolPaths(payload []byte) []string {
+	allPaths := codexDelegationMessageToolPaths(payload)
+	paths := make([]string, 0, len(allPaths))
+	for _, toolPath := range allPaths {
+		separatorIndex := strings.LastIndex(toolPath, ".tools.")
+		if separatorIndex < 0 {
+			continue
+		}
+		namespace := gjson.GetBytes(payload, toolPath[:separatorIndex])
+		if strings.TrimSpace(namespace.Get("type").String()) != "namespace" || strings.TrimSpace(namespace.Get("name").String()) != codexCollaborationNamespace {
+			continue
+		}
+		paths = append(paths, toolPath)
+	}
+	return paths
+}
+
+func collectCodexDelegationMessageToolPaths(tools gjson.Result, path string, inCollaboration bool, paths *[]string) {
+	if !tools.IsArray() {
+		return
+	}
+	for index, tool := range tools.Array() {
+		toolPath := fmt.Sprintf("%s.%d", path, index)
+		toolType := strings.TrimSpace(tool.Get("type").String())
+		toolName := strings.TrimSpace(tool.Get("name").String())
+		if toolType == "function" && codexDelegationMessageTool(toolName, tool.Get("namespace").String(), inCollaboration) {
+			*paths = append(*paths, toolPath)
+		}
+		if toolType == "namespace" {
+			nestedCollaboration := inCollaboration || toolName == codexCollaborationNamespace || toolName == codexOptimizedCollaborationNamespace
+			collectCodexDelegationMessageToolPaths(tool.Get("tools"), toolPath+".tools", nestedCollaboration, paths)
+		}
+	}
+}
+
+func codexDelegationMessageTool(name, namespace string, inCollaboration bool) bool {
+	if name == "spawn_agent" {
+		return true
+	}
+	namespace = strings.TrimSpace(namespace)
+	if namespace == codexCollaborationNamespace || namespace == codexOptimizedCollaborationNamespace || inCollaboration {
+		return name == "followup_task" || name == "send_message"
+	}
+	for _, prefix := range []string{codexCollaborationNamespace + "__", codexOptimizedCollaborationNamespace + "__"} {
+		if strings.HasPrefix(name, prefix) {
+			name = strings.TrimPrefix(name, prefix)
+			return name == "followup_task" || name == "send_message"
+		}
+	}
+	return false
 }
 
 // removeCodexCollaborationMessageEncryption deletes the

@@ -91,7 +91,9 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 			continue
 		}
 		eventData := xaiNormalizeReasoningSummaryData(bytes.TrimSpace(line[len(xaiDataTag):]))
+		eventData = restoreXAIViewImageToolAlias(eventData, prepared.viewImageToolAlias)
 		eventData = namespaceRestorer.restore(eventData)
+		eventData = restoreXAIToolSearchCalls(eventData)
 		eventData = responseFilter.apply(eventData)
 		if len(eventData) == 0 {
 			continue
@@ -235,7 +237,7 @@ func (e *XAIExecutor) executeNativeCompactAttempt(ctx context.Context, auth *cli
 	}
 	// Official API / custom compact endpoints use standard API headers, not CLI
 	// chat-proxy identity headers (which applyXAIChatHeaders may still attach for OAuth chat).
-	applyXAIHeaders(httpReq, auth, token, false, prepared.sessionID, opts.Headers)
+	applyXAIHeaders(httpReq, auth, token, false, sessionID)
 	e.recordXAIRequest(ctx, auth, requestURL, httpReq.Header.Clone(), prepared.body)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)

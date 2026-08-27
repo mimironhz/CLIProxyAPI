@@ -257,6 +257,7 @@ func (m *Manager) SetSelector(selector Selector) {
 	if selector == nil {
 		selector = &RoundRobinSelector{}
 	}
+	setSelectorQuotaWindowGate(selector, m.quotaWindowGateSnapshot())
 	m.selectorMu.Lock()
 	defer m.selectorMu.Unlock()
 
@@ -777,7 +778,7 @@ func retryRoundAvailabilityForAuth(auth *Auth, model string, now time.Time) (boo
 			if state.Status == StatusDisabled {
 				return false, time.Time{}
 			}
-			stateBlocked, _, stateNext := availabilityBlock(state.Unavailable, state.Quota.Exceeded, state.NextRetryAfter, state.Quota.NextRecoverAt, now)
+			stateBlocked, _, stateNext := availabilityBlock(state.Unavailable, state.Quota.Exceeded, state.NextRetryAfter, state.Quota.NextRecoverAt, now, state.LastError)
 			if !stateBlocked {
 				continue
 			}

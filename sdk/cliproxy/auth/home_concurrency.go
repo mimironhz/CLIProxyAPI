@@ -274,12 +274,21 @@ func verifyAccountedHomeConcurrencyIdentity(tuple homeConcurrencyTuple, auth *Au
 	return nil
 }
 
-// SafeResponseHeaders returns trusted response headers only for concrete
-// Home-generated retry errors.
+// SafeResponseHeaders returns trusted response headers only for concrete local errors.
 func SafeResponseHeaders(err error) http.Header {
 	var busy *HomeConcurrencyBusyError
 	if errors.As(err, &busy) && busy != nil {
 		return busy.SafeResponseHeaders()
+	}
+	var quotaWindow *quotaWindowError
+	if errors.As(err, &quotaWindow) && quotaWindow != nil {
+		return quotaWindow.Headers()
+	}
+	// Proxy-local cooldown windows (429 quota and 503 transient alike) carry a
+	// locally computed Retry-After, so it is trusted regardless of passthrough.
+	var modelCooldown *modelCooldownError
+	if errors.As(err, &modelCooldown) && modelCooldown != nil {
+		return modelCooldown.Headers()
 	}
 	var exhausted *homeRetryRoundExhaustedError
 	if errors.As(err, &exhausted) && exhausted != nil {

@@ -132,13 +132,16 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 	// function_call / function_call_output pairings.
 	// See: https://github.com/router-for-me/CLIProxyAPI/issues/2207
 	var mergedInput []byte
-	if allowCompactionReplayBypass && inputContainsFullTranscript(nextInput) {
+	compactReplay := inputContainsFullTranscript(nextInput)
+	if allowCompactionReplayBypass && compactReplay {
 		log.Infof("responses websocket: full transcript detected, skipping stale merge (input items=%d)", len(nextInput.Array()))
 		mergedInput = []byte(nextInput.Raw)
 	} else {
 		appendInputRaw := nextInput.Raw
 		if compactReplay {
 			appendInputRaw = inputWithoutCompactionItems(nextInput)
+			lastRequest, _ = sjson.SetRawBytes(lastRequest, "input", []byte(inputWithoutCompactionItems(gjson.GetBytes(lastRequest, "input"))))
+			lastResponseOutput = []byte(inputWithoutCompactionItems(gjson.Parse(normalizeJSONArrayRaw(lastResponseOutput))))
 		}
 
 		var errMerge error

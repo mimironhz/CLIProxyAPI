@@ -396,8 +396,15 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				execReq = attachResolvedAPIKeyModelInfo(routing, execReq, auth, routeModel, upstreamModel)
 			}
 			startExec := time.Now()
-			resp, errExec := executor.Execute(execCtx, auth, execReq, execOpts)
+			resp, errExec := m.executeQuotaAttempt(execCtx, executor, auth, quotaModel, execReq, execOpts)
 			durationExec := time.Since(startExec)
+			if errors.Is(errExec, errQuotaWindowCredentialExhausted) {
+				authErr = errExec
+				break
+			}
+			if isQuotaWindowError(errExec) {
+				return cliproxyexecutor.Response{}, errExec
+			}
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
 					return cliproxyexecutor.Response{}, errCtx
@@ -408,8 +415,15 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					didRefreshOnUnauthorized = true
 					execCtx = newUpstreamAttemptContext(execCtx)
 					startRetry := time.Now()
-					resp, errExec = executor.Execute(execCtx, auth, execReq, execOpts)
+					resp, errExec = m.executeQuotaAttempt(execCtx, executor, auth, quotaModel, execReq, execOpts)
 					durationRetry := time.Since(startRetry)
+					if errors.Is(errExec, errQuotaWindowCredentialExhausted) {
+						authErr = errExec
+						break
+					}
+					if isQuotaWindowError(errExec) {
+						return cliproxyexecutor.Response{}, errExec
+					}
 					if errExec != nil {
 						warnLogUpstreamFailure(execCtx, entry, provider, upstreamModel, auth, durationRetry, errExec)
 						if errCtx := execCtx.Err(); errCtx != nil {
@@ -464,6 +478,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			return resp, nil
 		}
 		if authErr != nil {
+			if errors.Is(authErr, errQuotaWindowCredentialExhausted) {
+				delete(attempted, auth.ID)
+			}
 			action, okAction := matchRequestScopedErrorAction(auth, authErr, m.runtimeConfigSnapshot())
 			if okAction {
 				if isRequestScopedStop(action, okAction) {
@@ -493,6 +510,11 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 	}
 	routeModel := authSelectionModelFromOptions(opts, req.Model)
 	executionModel, restoreExecutionModel := executionModelForAuthSelection(opts, req.Model)
+	quotaModel := routeModel
+	if restoreExecutionModel {
+		quotaModel = executionModel
+	}
+	opts = withQuotaWindowBillingModel(opts, quotaModel)
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	homeMode := m.HomeEnabled()
 	homeAuthCount := 1
@@ -574,8 +596,15 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				execReq = attachResolvedAPIKeyModelInfo(routing, execReq, auth, routeModel, upstreamModel)
 			}
 			startExec := time.Now()
-			resp, errExec := executor.CountTokens(execCtx, auth, execReq, execOpts)
+			resp, errExec := m.countQuotaAttempt(execCtx, executor, auth, quotaModel, execReq, execOpts)
 			durationExec := time.Since(startExec)
+			if errors.Is(errExec, errQuotaWindowCredentialExhausted) {
+				authErr = errExec
+				break
+			}
+			if isQuotaWindowError(errExec) {
+				return cliproxyexecutor.Response{}, errExec
+			}
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
 					return cliproxyexecutor.Response{}, errCtx
@@ -586,8 +615,15 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 					didRefreshOnUnauthorized = true
 					execCtx = newUpstreamAttemptContext(execCtx)
 					startRetry := time.Now()
-					resp, errExec = executor.CountTokens(execCtx, auth, execReq, execOpts)
+					resp, errExec = m.countQuotaAttempt(execCtx, executor, auth, quotaModel, execReq, execOpts)
 					durationRetry := time.Since(startRetry)
+					if errors.Is(errExec, errQuotaWindowCredentialExhausted) {
+						authErr = errExec
+						break
+					}
+					if isQuotaWindowError(errExec) {
+						return cliproxyexecutor.Response{}, errExec
+					}
 					if errExec != nil {
 						warnLogUpstreamFailure(execCtx, entry, provider, upstreamModel, auth, durationRetry, errExec)
 						if errCtx := execCtx.Err(); errCtx != nil {
@@ -646,6 +682,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			return resp, nil
 		}
 		if authErr != nil {
+			if errors.Is(authErr, errQuotaWindowCredentialExhausted) {
+				delete(attempted, auth.ID)
+			}
 			action, okAction := matchRequestScopedErrorAction(auth, authErr, m.runtimeConfigSnapshot())
 			if okAction {
 				if isRequestScopedStop(action, okAction) {

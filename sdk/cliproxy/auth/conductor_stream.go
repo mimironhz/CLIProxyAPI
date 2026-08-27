@@ -239,8 +239,11 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		}
 		entry := logEntryWithRequestID(ctx)
 		startStream := time.Now()
-		streamResult, errStream := executor.ExecuteStream(ctx, auth, execReq, execOpts)
+		streamResult, errStream := m.streamQuotaAttempt(ctx, executor, auth, quotaModel, execReq, execOpts)
 		durationStream := time.Since(startStream)
+		if errors.Is(errStream, errQuotaWindowCredentialExhausted) || isQuotaWindowError(errStream) {
+			return nil, errStream
+		}
 		if errStream != nil {
 			if errCtx := ctx.Err(); errCtx != nil {
 				return nil, errCtx
@@ -266,8 +269,11 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					didRefreshOnUnauthorized = true
 					ctx = newUpstreamAttemptContext(ctx)
 					startRetry := time.Now()
-					streamResult, errStream = executor.ExecuteStream(ctx, auth, execReq, execOpts)
+					streamResult, errStream = m.streamQuotaAttempt(ctx, executor, auth, quotaModel, execReq, execOpts)
 					durationRetry := time.Since(startRetry)
+					if errors.Is(errStream, errQuotaWindowCredentialExhausted) || isQuotaWindowError(errStream) {
+						return nil, errStream
+					}
 					if errStream != nil {
 						warnLogUpstreamFailure(ctx, entry, provider, execModel, auth, durationRetry, errStream)
 						if errCtx := ctx.Err(); errCtx != nil {
@@ -347,7 +353,10 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					didRefreshOnUnauthorized = true
 					ctx = newUpstreamAttemptContext(ctx)
 					startRetry := time.Now()
-					retryStream, retryErr := executor.ExecuteStream(ctx, auth, execReq, execOpts)
+					retryStream, retryErr := m.streamQuotaAttempt(ctx, executor, auth, quotaModel, execReq, execOpts)
+					if errors.Is(retryErr, errQuotaWindowCredentialExhausted) || isQuotaWindowError(retryErr) {
+						return nil, retryErr
+					}
 					retryStream, retryErr = validateStreamResult(retryStream, retryErr)
 					if retryErr != nil {
 						if errCtx := ctx.Err(); errCtx != nil {

@@ -2529,6 +2529,7 @@ func TestXAIExecutorCompactUsesCompactEndpoint(t *testing.T) {
 
 func TestXAIExecutorCompactDropsOrphanedImageGenerationToolChoice(t *testing.T) {
 	var gotBody []byte
+	validEncryptedContent := testValidGrokEncryptedContentForSeed(33)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var errRead error
@@ -2537,7 +2538,7 @@ func TestXAIExecutorCompactDropsOrphanedImageGenerationToolChoice(t *testing.T) 
 			t.Fatalf("read body: %v", errRead)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"resp_1","object":"response.compaction","output":[{"type":"compaction","encrypted_content":"opaque-out"}]}`))
+		_, _ = fmt.Fprintf(w, `{"id":"resp_1","object":"response.compaction","output":[{"type":"compaction","encrypted_content":%q}]}`, validEncryptedContent)
 	}))
 	defer server.Close()
 

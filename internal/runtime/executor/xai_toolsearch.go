@@ -76,7 +76,7 @@ func harvestXAILoadedTools(body []byte) [][]byte {
 	wrapped = append(wrapped, collected...)
 	wrapped = append(wrapped, ']')
 
-	normalized, _, ok := normalizeXAIToolArray(gjson.ParseBytes(wrapped))
+	normalized, _, ok := normalizeXAIToolArray(gjson.ParseBytes(wrapped), false, false)
 	if !ok {
 		return nil
 	}

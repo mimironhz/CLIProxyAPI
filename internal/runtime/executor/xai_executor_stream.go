@@ -111,7 +111,9 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 				eventDataList := xaiNormalizeReasoningSummaryDataEvents(bytes.TrimSpace(line[len(xaiDataTag):]))
 				hasPendingEventLine := pendingEventLine != nil
 				for i, eventData := range eventDataList {
+					eventData = restoreXAIViewImageToolAlias(eventData, prepared.viewImageToolAlias)
 					eventData = namespaceRestorer.restore(eventData)
+					eventData = restoreXAIToolSearchCalls(eventData)
 					eventData = responseFilter.apply(eventData)
 					if len(eventData) == 0 {
 						if hasPendingEventLine && i == 0 {

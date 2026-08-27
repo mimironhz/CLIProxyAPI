@@ -78,7 +78,8 @@ func walkResponsesToolDeclarations(root gjson.Result, visit func(responsesToolDe
 	scan(root.Get("tools"))
 	if input := root.Get("input"); input.Exists() && input.IsArray() {
 		input.ForEach(func(_, item gjson.Result) bool {
-			if item.Get("type").String() == "additional_tools" {
+			switch item.Get("type").String() {
+			case "additional_tools", "tool_search_output":
 				scan(item.Get("tools"))
 			}
 			return proceed
@@ -266,7 +267,7 @@ func responsesSingleCustomToolName(requestRawJSON []byte) (string, bool) {
 	// once and freeform unwrapping stays enabled.
 	toolCount := len(mergeResponsesRequestChatTools(gjson.ParseBytes(requestRawJSON)))
 	for name := range customToolNames {
-		return name, len(toolNames) == 1
+		return name, toolCount == 1
 	}
 	return "", false
 }
