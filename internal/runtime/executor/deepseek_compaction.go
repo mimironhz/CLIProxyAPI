@@ -18,9 +18,10 @@ import (
 )
 
 const (
-	deepSeekCompactionEncryptedContentPrefix = "deepseek-compaction-v1:"
-	deepSeekCompactionReplayHeader           = "Summary of the conversation so far, standing in for the messages that were compacted away:"
-	deepSeekCompactionInstructions           = `You are compacting a coding agent's conversation that has reached its context limit. Replace the transcript with one summary complete enough that the agent can continue with no other memory of it.
+	deepSeekCompactionEncryptedContentPrefix     = "deepseek-compaction-v1:"
+	deepSeekCompactionSummaryRequiredMetadataKey = "cliproxy.deepseek_compaction_summary_required"
+	deepSeekCompactionReplayHeader               = "Summary of the conversation so far, standing in for the messages that were compacted away:"
+	deepSeekCompactionInstructions               = `You are compacting a coding agent's conversation that has reached its context limit. Replace the transcript with one summary complete enough that the agent can continue with no other memory of it.
 
 Cover, omitting any heading with nothing to report:
 - Objective: what the user asked for, including constraints and preferences they stated.
@@ -127,6 +128,11 @@ func (e *OpenAICompatExecutor) executeDeepSeekCompaction(ctx context.Context, au
 	compactOpts.Alt = ""
 	compactOpts.Stream = false
 	compactOpts.OriginalRequest = nil
+	compactOpts.Metadata = make(map[string]any, len(opts.Metadata)+1)
+	for key, value := range opts.Metadata {
+		compactOpts.Metadata[key] = value
+	}
+	compactOpts.Metadata[deepSeekCompactionSummaryRequiredMetadataKey] = true
 
 	response, errExecute := e.Execute(ctx, auth, compactReq, compactOpts)
 	if errExecute != nil {
@@ -148,6 +154,11 @@ func (e *OpenAICompatExecutor) executeDeepSeekCompaction(ctx context.Context, au
 	helpLog.Info("compaction capture")
 
 	return summary, deepSeekCompactionUsage(summary, req.Model), response.Headers.Clone(), nil
+}
+
+func deepSeekCompactionSummaryRequired(opts cliproxyexecutor.Options) bool {
+	required, _ := opts.Metadata[deepSeekCompactionSummaryRequiredMetadataKey].(bool)
+	return required
 }
 
 func deepSeekResponsesMessageText(body []byte) string {

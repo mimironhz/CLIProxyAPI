@@ -824,6 +824,19 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 					}
 				case "response.done":
 					logXAIWebsocketTerminalResponse(executionSessionID, authID, wsURL, eventType, payload)
+					payload = xaiPatchCompletedOutput(payload, outputItemsByIndex, outputItemsFallback)
+					payload = xaiNormalizeReasoningSummaryData(payload)
+					if completionErr, reasoningOnly := xaiReasoningOnlyCompletionError(payload); reasoningOnly {
+						terminateReason = "reasoning_only_completion"
+						terminateErr = completionErr
+						helps.RecordAPIWebsocketError(ctx, e.cfg, terminateReason, completionErr)
+						reporter.PublishFailure(usageCtx, completionErr)
+						if sess != nil {
+							e.invalidateUpstreamConnWithoutDisconnectNotify(sess, conn, terminateReason, completionErr)
+						}
+						_ = send(cliproxyexecutor.StreamChunk{Err: completionErr})
+						return
+					}
 					if detail, ok := helps.ParseCodexUsage(payload); ok {
 						reporter.Publish(usageCtx, detail)
 					}

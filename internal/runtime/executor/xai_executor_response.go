@@ -1109,7 +1109,8 @@ func xaiPatchCompletedOutput(eventData []byte, outputItemsByIndex map[int64][]by
 }
 
 func xaiReasoningOnlyCompletionError(eventData []byte) (statusErr, bool) {
-	if gjson.GetBytes(eventData, "type").String() != "response.completed" {
+	eventType := gjson.GetBytes(eventData, "type").String()
+	if eventType != "response.completed" && eventType != "response.done" {
 		return statusErr{}, false
 	}
 	output := gjson.GetBytes(eventData, "response.output")

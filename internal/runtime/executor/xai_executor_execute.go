@@ -293,6 +293,10 @@ func (e *XAIExecutor) executeNativeCompactAttempt(ctx context.Context, auth *cli
 		err = xaiStatusErr(httpResp.StatusCode, data)
 		return data, httpResp.Header.Clone(), httpResp.StatusCode, err
 	}
+	if _, _, errValidate := validateXAINativeCompactionResponse(data); errValidate != nil {
+		err = errValidate
+		return data, httpResp.Header.Clone(), httpResp.StatusCode, err
+	}
 
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(data))
 	reporter.EnsurePublished(ctx)

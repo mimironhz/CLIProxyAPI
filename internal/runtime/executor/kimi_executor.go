@@ -486,12 +486,12 @@ func (e *KimiExecutor) executeCompaction(ctx context.Context, auth *cliproxyauth
 		return "", nil, nil, err
 	}
 
-	reporter.Publish(ctx, helps.ParseOpenAIUsage(data))
 	summary = strings.TrimSpace(gjson.GetBytes(data, "choices.0.message.content").String())
 	if summary == "" {
 		err = statusErr{code: http.StatusBadGateway, msg: "kimi compaction produced an empty summary"}
 		return "", nil, nil, err
 	}
+	reporter.Publish(ctx, helps.ParseOpenAIUsage(data))
 	return summary, kimiCompactionUsage(data), httpResp.Header.Clone(), nil
 }
 
