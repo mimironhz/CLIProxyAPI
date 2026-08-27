@@ -81,6 +81,12 @@ func TestBuildOpenAICompatibilityConfigModelsInheritsStaticThinking(t *testing.T
 	}
 	assertModelThinkingLevels(t, models[0], "high", "max")
 	assertModelThinkingLevels(t, models[1], "low", "medium", "high")
+	if got := joinModalities(models[0].SupportedInputModalities); got != "text" {
+		t.Fatalf("inherited input modalities = %q, want text", got)
+	}
+	if got := joinModalities(models[0].SupportedOutputModalities); got != "text" {
+		t.Fatalf("inherited output modalities = %q, want text", got)
+	}
 }
 
 func assertModelThinkingLevels(t *testing.T, model *ModelInfo, want ...string) {

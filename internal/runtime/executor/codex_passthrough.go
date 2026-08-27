@@ -25,9 +25,7 @@ func codexBearerFromHeaders(headers http.Header) string {
 }
 
 // codexLooksLikeOAuthToken reports whether a bearer is a JWT, which is the shape
-// ChatGPT OAuth access tokens use. This is the guard that keeps a configured
-// proxy API key — which clients also send as a bearer — from being forwarded
-// upstream as if it were a ChatGPT credential.
+// ChatGPT OAuth access tokens use.
 func codexLooksLikeOAuthToken(token string) bool {
 	token = strings.TrimSpace(token)
 	segments := strings.Split(token, ".")
@@ -63,6 +61,11 @@ func codexPassthroughToken(cfg *config.Config, ginHeaders http.Header) string {
 	token := codexBearerFromHeaders(ginHeaders)
 	if token == "" || !codexLooksLikeOAuthToken(token) {
 		return ""
+	}
+	for _, apiKey := range cfg.APIKeys {
+		if token == strings.TrimSpace(apiKey) {
+			return ""
+		}
 	}
 	return token
 }

@@ -727,9 +727,13 @@ func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []
 		if info == nil {
 			continue
 		}
+		var staticInfo *registry.ModelInfo
+		if !model.Image {
+			staticInfo = modelconfig.ResolveModelInfo(model.Name, modelType, nil)
+		}
 		thinkingSupport := model.Thinking
 		if thinkingSupport == nil && !model.Image {
-			thinkingSupport = modelconfig.ResolveModelInfo(model.Name, modelType, nil).Thinking
+			thinkingSupport = staticInfo.Thinking
 			if thinkingSupport == nil {
 				thinkingSupport = &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}}
 			}
@@ -737,6 +741,12 @@ func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []
 		info.Thinking = modelconfig.NormalizeThinkingSupport(thinkingSupport)
 		info.SupportedInputModalities = normalizeCompatConfigModalities(model.InputModalities)
 		info.SupportedOutputModalities = normalizeCompatConfigModalities(model.OutputModalities)
+		if staticInfo != nil && len(model.InputModalities) == 0 {
+			info.SupportedInputModalities = append([]string(nil), staticInfo.SupportedInputModalities...)
+		}
+		if staticInfo != nil && len(model.OutputModalities) == 0 {
+			info.SupportedOutputModalities = append([]string(nil), staticInfo.SupportedOutputModalities...)
+		}
 		models = append(models, info)
 	}
 	return models

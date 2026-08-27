@@ -56,6 +56,11 @@ func TestCodexPassthroughTokenRequiresFlagAndJWT(t *testing.T) {
 	if got := codexPassthroughToken(enabled, headers); got != token {
 		t.Fatalf("passthrough token = %q, want %q", got, token)
 	}
+	enabled.APIKeys = []string{token}
+	if got := codexPassthroughToken(enabled, headers); got != "" {
+		t.Fatalf("passthrough forwarded configured JWT proxy key = %q, want empty", got)
+	}
+	enabled.APIKeys = nil
 
 	// A configured proxy API key is also presented as a bearer and must never be
 	// forwarded upstream as if it were a ChatGPT credential.

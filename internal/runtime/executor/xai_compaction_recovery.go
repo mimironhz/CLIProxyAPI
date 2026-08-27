@@ -312,22 +312,18 @@ func (e *XAIExecutor) executeXAICompactionSummary(ctx context.Context, auth *cli
 		case "response.completed":
 			completedData := xaiPatchCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
 			completedData = xaiNormalizeReasoningSummaryData(completedData)
-			if detail, ok := helps.ParseCodexUsage(completedData); ok {
-				reporter.Publish(ctx, detail)
-			}
-			reporter.EnsurePublished(ctx)
 			summary = xaiAssistantTextFromCompleted(completedData)
 			if summary == "" {
 				return "", statusErr{code: http.StatusBadGateway, msg: "xai compact fallback summary response has no assistant text"}
 			}
+			if detail, ok := helps.ParseCodexUsage(completedData); ok {
+				reporter.Publish(ctx, detail)
+			}
+			reporter.EnsurePublished(ctx)
 			return summary, nil
 		case "response.incomplete":
 			incompleteData := xaiPatchCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
 			incompleteData = xaiNormalizeReasoningSummaryData(incompleteData)
-			if detail, ok := helps.ParseCodexUsage(incompleteData); ok {
-				reporter.Publish(ctx, detail)
-			}
-			reporter.EnsurePublished(ctx)
 			reason := strings.TrimSpace(gjson.GetBytes(incompleteData, "response.incomplete_details.reason").String())
 			if reason != "max_output_tokens" {
 				return "", statusErr{code: http.StatusBadGateway, msg: "xai compact fallback summary response was incomplete for an unsupported reason"}
@@ -336,6 +332,10 @@ func (e *XAIExecutor) executeXAICompactionSummary(ctx context.Context, auth *cli
 			if summary == "" {
 				return "", statusErr{code: http.StatusBadGateway, msg: "xai compact fallback summary response has no assistant text"}
 			}
+			if detail, ok := helps.ParseCodexUsage(incompleteData); ok {
+				reporter.Publish(ctx, detail)
+			}
+			reporter.EnsurePublished(ctx)
 			return summary, nil
 		}
 	}
