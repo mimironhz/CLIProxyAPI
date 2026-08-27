@@ -74,6 +74,8 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 	attempted := make(map[string]struct{})
 	var lastErr error
 	var roundTiming homeRetryRoundTiming
+
+homeSelectionLoop:
 	for homeAuthCount := 1; ; homeAuthCount++ {
 		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
 			if lastErr != nil {
@@ -219,6 +221,20 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			startHomeExec := time.Now()
 			response, errExecute = execute()
 			durationHomeExec := time.Since(startHomeExec)
+			if isQuotaWindowError(errExecute) {
+				releaseAttempt()
+				selection.End("quota_window_exhausted")
+				return cliproxyexecutor.Response{}, errExecute
+			}
+			if errors.Is(errExecute, errQuotaWindowCredentialExhausted) {
+				releaseAttempt()
+				if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "quota_window_credential_exhausted"); errEnd != nil {
+					return cliproxyexecutor.Response{}, errEnd
+				}
+				delete(attempted, auth.ID)
+				lastErr = errExecute
+				continue homeSelectionLoop
+			}
 			refreshAuth := preparedAuth
 			if countTokens {
 				if observedAuth, fingerprint := getEffectiveAuth(); isUnauthorizedError(errExecute) {
@@ -247,6 +263,20 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 					startHomeRetry := time.Now()
 					response, errExecute = execute()
 					durationHomeRetry := time.Since(startHomeRetry)
+					if isQuotaWindowError(errExecute) {
+						releaseAttempt()
+						selection.End("quota_window_exhausted")
+						return cliproxyexecutor.Response{}, errExecute
+					}
+					if errors.Is(errExecute, errQuotaWindowCredentialExhausted) {
+						releaseAttempt()
+						if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "quota_window_credential_exhausted"); errEnd != nil {
+							return cliproxyexecutor.Response{}, errEnd
+						}
+						delete(attempted, auth.ID)
+						lastErr = errExecute
+						continue homeSelectionLoop
+					}
 					if errExecute != nil {
 						warnLogUpstreamFailure(execCtx, entry, selection.Provider, upstreamModel, preparedAuth, durationHomeRetry, errExecute)
 						if countTokens && isUnauthorizedError(errExecute) {

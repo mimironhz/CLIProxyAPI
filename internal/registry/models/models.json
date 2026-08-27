@@ -3345,6 +3345,12 @@
       "description": "DeepSeek V4 Flash - DeepSeek's fast V4 tier (284B MoE, 13B activated) with 1M context",
       "context_length": 1048576,
       "max_completion_tokens": 393216,
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
       "thinking": {
         "zero_allowed": false,
         "levels": [
@@ -3388,6 +3394,12 @@
       "description": "DeepSeek V4 Pro - DeepSeek's flagship V4 tier (1.6T MoE, 49B activated) with 1M context",
       "context_length": 1048576,
       "max_completion_tokens": 393216,
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
       "thinking": {
         "zero_allowed": false,
         "levels": [

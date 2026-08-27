@@ -236,7 +236,7 @@ func xaiBuildTextOnlyCompactBody(model, summary string) ([]byte, error) {
 	return json.Marshal(body)
 }
 
-func (e *XAIExecutor) executeXAICompactionSummary(ctx context.Context, auth *cliproxyauth.Auth, prepared *xaiPreparedRequest, body []byte, fallbackSessionID string) (summary string, err error) {
+func (e *XAIExecutor) executeXAICompactionSummary(ctx context.Context, auth *cliproxyauth.Auth, prepared *xaiPreparedRequest, body []byte, fallbackSessionID string, clientHeaders http.Header) (summary string, err error) {
 	if prepared == nil {
 		return "", statusErr{code: http.StatusInternalServerError, msg: "xai compact fallback summary request is unavailable"}
 	}
@@ -260,7 +260,7 @@ func (e *XAIExecutor) executeXAICompactionSummary(ctx context.Context, auth *cli
 	if err != nil {
 		return "", err
 	}
-	applyXAIChatHeaders(httpReq, auth, token, true, fallbackSessionID)
+	applyXAIChatHeaders(httpReq, auth, token, true, fallbackSessionID, clientHeaders)
 	e.recordXAIRequest(ctx, auth, requestURL, httpReq.Header.Clone(), body)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)

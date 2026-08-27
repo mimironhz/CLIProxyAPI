@@ -729,7 +729,10 @@ func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []
 		}
 		thinkingSupport := model.Thinking
 		if thinkingSupport == nil && !model.Image {
-			thinkingSupport = &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}}
+			thinkingSupport = modelconfig.ResolveModelInfo(model.Name, modelType, nil).Thinking
+			if thinkingSupport == nil {
+				thinkingSupport = &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}}
+			}
 		}
 		info.Thinking = modelconfig.NormalizeThinkingSupport(thinkingSupport)
 		info.SupportedInputModalities = normalizeCompatConfigModalities(model.InputModalities)

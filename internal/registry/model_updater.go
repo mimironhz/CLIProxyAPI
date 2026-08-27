@@ -120,6 +120,7 @@ func tryRefreshModels(ctx context.Context, label string) {
 		log.Warnf("%s: fetch failed from all URLs, keeping current data", label)
 		return
 	}
+	preserveLocalProviderSections(oldData, parsed)
 
 	// Detect changes before updating store.
 	changed := detectChangedProviders(oldData, parsed)
@@ -214,6 +215,7 @@ func detectChangedProviders(oldData, newData *staticModelsJSON) []string {
 		{"codex", oldData.CodexPlus, newData.CodexPlus},
 		{"codex", oldData.CodexPro, newData.CodexPro},
 		{"kimi", oldData.Kimi, newData.Kimi},
+		{"deepseek", oldData.DeepSeek, newData.DeepSeek},
 		{"antigravity", oldData.Antigravity, newData.Antigravity},
 		{"xai", oldData.XAI, newData.XAI},
 	}
@@ -230,6 +232,63 @@ func detectChangedProviders(oldData, newData *staticModelsJSON) []string {
 		}
 	}
 	return changed
+}
+
+// preserveLocalProviderSections keeps provider catalogs maintained by this
+// distribution when the shared remote catalog does not publish that section,
+// and retains narrowly scoped capability floors for newly released models.
+func preserveLocalProviderSections(current, fetched *staticModelsJSON) {
+	if current == nil || fetched == nil {
+		return
+	}
+	if len(fetched.DeepSeek) == 0 {
+		fetched.DeepSeek = cloneModelInfos(current.DeepSeek)
+	}
+	preserveLocalModelCapabilities(current.XAI, &fetched.XAI, "grok-4.6")
+}
+
+// preserveLocalModelCapabilities keeps a newly released local model when the
+// shared catalog has not published it yet, and fills capability metadata while
+// that catalog catches up. Once present remotely, the remote model remains
+// authoritative for all other fields; locally published levels remain a floor
+// until the embedded catalog is updated or the remote capability list catches up.
+func preserveLocalModelCapabilities(current []*ModelInfo, fetched *[]*ModelInfo, modelID string) {
+	var local *ModelInfo
+	for _, model := range current {
+		if model != nil && model.ID == modelID {
+			local = model
+			break
+		}
+	}
+	if local == nil || local.Thinking == nil || len(local.Thinking.Levels) == 0 {
+		return
+	}
+
+	for _, remote := range *fetched {
+		if remote == nil || remote.ID != modelID {
+			continue
+		}
+		if remote.Thinking == nil {
+			remote.Thinking = &ThinkingSupport{}
+		}
+		for _, level := range local.Thinking.Levels {
+			if !containsModelCapability(remote.Thinking.Levels, level) {
+				remote.Thinking.Levels = append(remote.Thinking.Levels, level)
+			}
+		}
+		return
+	}
+
+	*fetched = append(*fetched, cloneModelInfo(local))
+}
+
+func containsModelCapability(capabilities []string, target string) bool {
+	for _, capability := range capabilities {
+		if strings.EqualFold(strings.TrimSpace(capability), strings.TrimSpace(target)) {
+			return true
+		}
+	}
+	return false
 }
 
 // modelSectionChanged reports whether two model slices differ.
@@ -334,6 +393,7 @@ func validateModelsCatalog(data *staticModelsJSON) error {
 		{name: "codex-plus", models: data.CodexPlus},
 		{name: "codex-pro", models: data.CodexPro},
 		{name: "kimi", models: data.Kimi},
+		{name: "deepseek", models: data.DeepSeek},
 		{name: "antigravity", models: data.Antigravity},
 		{name: "xai", models: data.XAI},
 	}

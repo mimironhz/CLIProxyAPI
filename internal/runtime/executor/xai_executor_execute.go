@@ -109,6 +109,10 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 			completedData := xaiPatchCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
 			completedData = xaiNormalizeReasoningSummaryData(completedData)
 			if eventType == "response.completed" {
+				if completionErr, reasoningOnly := xaiReasoningOnlyCompletionError(completedData); reasoningOnly {
+					helps.RecordAPIResponseError(ctx, e.cfg, completionErr)
+					return resp, completionErr
+				}
 				// A truncated turn carries no replayable terminal state, so only a
 				// completed response may refresh the reasoning replay cache.
 				cacheXAIReasoningReplayFromCompleted(ctx, prepared.replayScope, completedData)
@@ -172,14 +176,14 @@ func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxya
 	media := xaiInlineMediaInPreparedBody(prepared.body)
 	if media.count > 0 && contextLimit > 0 && estimatedTokens > contextLimit {
 		xaiLogCompactionFallback(ctx, "estimated_context_limit", estimatedTokens, contextLimit, media)
-		return e.executeCompactMediaFallback(ctx, auth, prepared, requestKind)
+		return e.executeCompactMediaFallback(ctx, auth, prepared, requestKind, opts.Headers)
 	}
 
-	data, headers, status, err := e.executeNativeCompactAttempt(ctx, auth, prepared, prepared.body, requestKind, "upstream_request", prepared.sessionID)
+	data, headers, status, err := e.executeNativeCompactAttempt(ctx, auth, prepared, prepared.body, requestKind, "upstream_request", prepared.sessionID, opts.Headers)
 	if err != nil {
 		if media.count > 0 && xaiIsExactCompactContextLengthError(status, data) {
 			xaiLogCompactionFallback(ctx, "native_context_limit", estimatedTokens, contextLimit, media)
-			return e.executeCompactMediaFallback(ctx, auth, prepared, requestKind)
+			return e.executeCompactMediaFallback(ctx, auth, prepared, requestKind, opts.Headers)
 		}
 		return nil, nil, nil, err
 	}
@@ -190,10 +194,10 @@ func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxya
 	return prepared, data, headers, nil
 }
 
-func (e *XAIExecutor) executeCompactMediaFallback(ctx context.Context, auth *cliproxyauth.Auth, prepared *xaiPreparedRequest, requestKind string) (*xaiPreparedRequest, []byte, http.Header, error) {
+func (e *XAIExecutor) executeCompactMediaFallback(ctx context.Context, auth *cliproxyauth.Auth, prepared *xaiPreparedRequest, requestKind string, clientHeaders http.Header) (*xaiPreparedRequest, []byte, http.Header, error) {
 	fallbackSessionID := uuid.NewString()
 	summaryBody := xaiBuildCompactionSummaryBody(prepared.body, fallbackSessionID)
-	summary, err := e.executeXAICompactionSummary(ctx, auth, prepared, summaryBody, fallbackSessionID)
+	summary, err := e.executeXAICompactionSummary(ctx, auth, prepared, summaryBody, fallbackSessionID, clientHeaders)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -201,7 +205,7 @@ func (e *XAIExecutor) executeCompactMediaFallback(ctx context.Context, auth *cli
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("xai compact fallback: build text-only request: %w", err)
 	}
-	data, headers, _, err := e.executeNativeCompactAttempt(ctx, auth, prepared, finalBody, requestKind, "fallback_native_request", fallbackSessionID)
+	data, headers, _, err := e.executeNativeCompactAttempt(ctx, auth, prepared, finalBody, requestKind, "fallback_native_request", fallbackSessionID, clientHeaders)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -212,7 +216,7 @@ func (e *XAIExecutor) executeCompactMediaFallback(ctx context.Context, auth *cli
 	return prepared, data, headers, nil
 }
 
-func (e *XAIExecutor) executeNativeCompactAttempt(ctx context.Context, auth *cliproxyauth.Auth, prepared *xaiPreparedRequest, body []byte, requestKind, requestPhase, sessionID string) (data []byte, headers http.Header, status int, err error) {
+func (e *XAIExecutor) executeNativeCompactAttempt(ctx context.Context, auth *cliproxyauth.Auth, prepared *xaiPreparedRequest, body []byte, requestKind, requestPhase, sessionID string, clientHeaders http.Header) (data []byte, headers http.Header, status int, err error) {
 	ctx, err = cliproxyauth.QuotaWindowContextForUpstreamAttempt(ctx)
 	if err != nil {
 		return nil, nil, 0, err
@@ -237,8 +241,8 @@ func (e *XAIExecutor) executeNativeCompactAttempt(ctx context.Context, auth *cli
 	}
 	// Official API / custom compact endpoints use standard API headers, not CLI
 	// chat-proxy identity headers (which applyXAIChatHeaders may still attach for OAuth chat).
-	applyXAIHeaders(httpReq, auth, token, false, sessionID)
-	e.recordXAIRequest(ctx, auth, requestURL, httpReq.Header.Clone(), prepared.body)
+	applyXAIHeaders(httpReq, auth, token, false, sessionID, clientHeaders)
+	e.recordXAIRequest(ctx, auth, requestURL, httpReq.Header.Clone(), body)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpClient = reporter.TrackHTTPClient(httpClient)
