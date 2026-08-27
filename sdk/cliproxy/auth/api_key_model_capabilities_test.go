@@ -38,6 +38,34 @@ func TestAttachResolvedAPIKeyModelInfoUsesSelectedCredential(t *testing.T) {
 	assertResolvedThinkingLevels(t, manager.attachResolvedAPIKeyModelInfo(cliproxyexecutor.Request{}, authMax, "tenant/public-model", "shared-upstream"), "max")
 }
 
+func TestCompileOpenAICompatibleModelCapabilitiesInheritsStaticThinking(t *testing.T) {
+	out := make(map[string][]apiKeyModelCapabilityRoute)
+	compileOpenAICompatibleModelCapabilities(out, []internalconfig.OpenAICompatibilityModel{
+		{Name: "deepseek-v4-pro", Alias: "deepseek-pro"},
+		{Name: "unknown-reasoning-model"},
+	})
+
+	assertCapabilityThinkingLevels(t, out, "deepseek-pro", "high", "max")
+	assertCapabilityThinkingLevels(t, out, "unknown-reasoning-model", "low", "medium", "high")
+}
+
+func assertCapabilityThinkingLevels(t *testing.T, routes map[string][]apiKeyModelCapabilityRoute, model string, want ...string) {
+	t.Helper()
+	modelRoutes := routes[model]
+	if len(modelRoutes) != 1 || modelRoutes[0].modelInfo == nil || modelRoutes[0].modelInfo.Thinking == nil {
+		t.Fatalf("routes[%q] = %+v, want one route with thinking levels %v", model, modelRoutes, want)
+	}
+	levels := modelRoutes[0].modelInfo.Thinking.Levels
+	if len(levels) != len(want) {
+		t.Fatalf("routes[%q] thinking levels = %v, want %v", model, levels, want)
+	}
+	for i := range want {
+		if levels[i] != want[i] {
+			t.Fatalf("routes[%q] thinking levels = %v, want %v", model, levels, want)
+		}
+	}
+}
+
 func TestAttachResolvedAPIKeyModelInfoUsesExactDuplicateCredentialConfig(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
 	highModels := []internalconfig.ClaudeModel{{

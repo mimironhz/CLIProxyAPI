@@ -235,6 +235,7 @@ homeSelectionLoop:
 				lastErr = errExecute
 				continue homeSelectionLoop
 			}
+			firstAttemptErr := errExecute
 			refreshAuth := preparedAuth
 			if countTokens {
 				if observedAuth, fingerprint := getEffectiveAuth(); isUnauthorizedError(errExecute) {
@@ -273,8 +274,7 @@ homeSelectionLoop:
 						if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "quota_window_credential_exhausted"); errEnd != nil {
 							return cliproxyexecutor.Response{}, errEnd
 						}
-						delete(attempted, auth.ID)
-						lastErr = errExecute
+						lastErr = firstAttemptErr
 						continue homeSelectionLoop
 					}
 					if errExecute != nil {

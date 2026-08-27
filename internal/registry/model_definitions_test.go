@@ -49,6 +49,8 @@ func TestDeepSeekModelsExposeOfficialLimits(t *testing.T) {
 		if info.Thinking == nil {
 			t.Fatalf("%s thinking support = nil, want levels", modelID)
 		}
+		assertStringSlice(t, modelID+" input modalities", info.SupportedInputModalities, []string{"text"})
+		assertStringSlice(t, modelID+" output modalities", info.SupportedOutputModalities, []string{"text"})
 		if want := []string{"high", "max"}; len(info.Thinking.Levels) != len(want) {
 			t.Fatalf("%s thinking levels = %v, want %v", modelID, info.Thinking.Levels, want)
 		} else {
@@ -57,6 +59,38 @@ func TestDeepSeekModelsExposeOfficialLimits(t *testing.T) {
 					t.Fatalf("%s thinking levels = %v, want %v", modelID, info.Thinking.Levels, want)
 				}
 			}
+		}
+	}
+}
+
+func TestGrok46ExposesPublishedCapabilities(t *testing.T) {
+	info := LookupStaticModelInfo("grok-4.6")
+	if info == nil {
+		t.Fatal("LookupStaticModelInfo(\"grok-4.6\") = nil, want model info")
+	}
+	if info.ContextLength != 500000 {
+		t.Fatalf("context length = %d, want 500000", info.ContextLength)
+	}
+	if want := []string{"low", "medium", "high", "xhigh"}; info.Thinking == nil {
+		t.Fatalf("thinking support = nil, want levels %v", want)
+	} else {
+		assertStringSlice(t, "thinking levels", info.Thinking.Levels, want)
+	}
+	assertStringSlice(t, "input modalities", info.SupportedInputModalities, []string{"text", "image"})
+	assertStringSlice(t, "output modalities", info.SupportedOutputModalities, []string{"text"})
+	if LookupStaticModelInfo("grok-4.5") == nil {
+		t.Fatal("LookupStaticModelInfo(\"grok-4.5\") = nil, want retained model info")
+	}
+}
+
+func assertStringSlice(t *testing.T, label string, got, want []string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("%s = %v, want %v", label, got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("%s = %v, want %v", label, got, want)
 		}
 	}
 }

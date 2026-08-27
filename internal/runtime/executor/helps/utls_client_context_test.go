@@ -71,47 +71,13 @@ func TestUtlsConnectionAcquisitionHonorsCreatorCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	result := make(chan error, 1)
 	go func() {
-		_, errConnection := roundTripper.getOrCreateConnection(ctx, "chatgpt.com", "chatgpt.com:443")
+		_, errConnection := roundTripper.createConnection(ctx, "chatgpt.com", "chatgpt.com:443")
 		result <- errConnection
 	}()
 	waitForUtlsTestSignal(t, dialer.started)
 	cancel()
 	if errConnection := waitForUtlsTestResult(t, result); !errors.Is(errConnection, context.Canceled) {
 		t.Fatalf("connection error = %v, want context canceled", errConnection)
-	}
-}
-
-func TestUtlsConnectionAcquisitionHonorsWaiterCancellation(t *testing.T) {
-	dialer := &controlledContextDialer{
-		started: make(chan struct{}, 1),
-		release: make(chan struct{}),
-	}
-	roundTripper := newUtlsRoundTripper("")
-	roundTripper.dialer = dialer
-	creatorResult := make(chan error, 1)
-	go func() {
-		_, errConnection := roundTripper.getOrCreateConnection(context.Background(), "chatgpt.com", "chatgpt.com:443")
-		creatorResult <- errConnection
-	}()
-	waitForUtlsTestSignal(t, dialer.started)
-
-	waiterContext, cancelWaiter := context.WithCancel(context.Background())
-	waiterResult := make(chan error, 1)
-	go func() {
-		_, errConnection := roundTripper.getOrCreateConnection(waiterContext, "chatgpt.com", "chatgpt.com:443")
-		waiterResult <- errConnection
-	}()
-	cancelWaiter()
-	if errConnection := waitForUtlsTestResult(t, waiterResult); !errors.Is(errConnection, context.Canceled) {
-		t.Fatalf("waiter error = %v, want context canceled", errConnection)
-	}
-	if got := dialer.calls.Load(); got != 1 {
-		t.Fatalf("dial calls while waiter was pending = %d, want 1", got)
-	}
-
-	close(dialer.release)
-	if errConnection := waitForUtlsTestResult(t, creatorResult); !errors.Is(errConnection, errTestDialReleased) {
-		t.Fatalf("creator error = %v, want released dial", errConnection)
 	}
 }
 
@@ -130,7 +96,7 @@ func TestUtlsConnectionAcquisitionHonorsHandshakeCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	result := make(chan error, 1)
 	go func() {
-		_, errConnection := roundTripper.getOrCreateConnection(ctx, "chatgpt.com", "chatgpt.com:443")
+		_, errConnection := roundTripper.createConnection(ctx, "chatgpt.com", "chatgpt.com:443")
 		result <- errConnection
 	}()
 	waitForUtlsTestSignal(t, dialer.started)

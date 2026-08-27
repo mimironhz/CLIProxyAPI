@@ -23,13 +23,10 @@ import (
 )
 
 // utlsRoundTripper implements http.RoundTripper using a Chrome fingerprint for
-// providers that require a browser-like TLS and HTTP/2 transport. It reuses one
-// live HTTP/2 connection per host.
+// providers that require a browser-like TLS and HTTP/2 transport. Each request
+// gets a dedicated connection that is closed with the response body.
 type utlsRoundTripper struct {
-	mu          sync.Mutex
-	connections map[string]*http2.ClientConn
-	pending     map[string]chan struct{}
-	dialer      proxy.Dialer
+	dialer proxy.Dialer
 }
 
 type closeConnectionBody struct {
@@ -67,50 +64,7 @@ func newUtlsRoundTripper(proxyURL string) *utlsRoundTripper {
 			dialer = proxyDialer
 		}
 	}
-	return &utlsRoundTripper{
-		connections: make(map[string]*http2.ClientConn),
-		pending:     make(map[string]chan struct{}),
-		dialer:      dialer,
-	}
-}
-
-func (t *utlsRoundTripper) getOrCreateConnection(ctx context.Context, host, addr string) (*http2.ClientConn, error) {
-	for {
-		t.mu.Lock()
-		if t.connections == nil {
-			t.connections = make(map[string]*http2.ClientConn)
-		}
-		if t.pending == nil {
-			t.pending = make(map[string]chan struct{})
-		}
-		if h2Conn, ok := t.connections[host]; ok && h2Conn.CanTakeNewRequest() {
-			t.mu.Unlock()
-			return h2Conn, nil
-		}
-		if pending, ok := t.pending[host]; ok {
-			t.mu.Unlock()
-			select {
-			case <-pending:
-				continue
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			}
-		}
-
-		pending := make(chan struct{})
-		t.pending[host] = pending
-		t.mu.Unlock()
-
-		h2Conn, errConnection := t.createConnection(ctx, host, addr)
-		t.mu.Lock()
-		delete(t.pending, host)
-		if errConnection == nil {
-			t.connections[host] = h2Conn
-		}
-		close(pending)
-		t.mu.Unlock()
-		return h2Conn, errConnection
-	}
+	return &utlsRoundTripper{dialer: dialer}
 }
 
 func (t *utlsRoundTripper) createConnection(ctx context.Context, host, addr string) (*http2.ClientConn, error) {
@@ -186,20 +140,15 @@ func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 	}
 	addr := net.JoinHostPort(hostname, port)
 
-	h2Conn, err := t.getOrCreateConnection(req.Context(), hostname, addr)
+	h2Conn, err := t.createConnection(req.Context(), hostname, addr)
 	if err != nil {
 		return nil, err
 	}
 
 	resp, err := h2Conn.RoundTrip(req)
 	if err != nil {
-		state := h2Conn.State()
-		if state.Closed || state.Closing {
-			t.mu.Lock()
-			if cached, ok := t.connections[hostname]; ok && cached == h2Conn {
-				delete(t.connections, hostname)
-			}
-			t.mu.Unlock()
+		if errClose := h2Conn.Close(); errClose != nil {
+			log.Debugf("utls: close connection after round trip failure: %v", errClose)
 		}
 		return nil, err
 	}
@@ -208,6 +157,13 @@ func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 			log.Debugf("utls: close connection after empty response: %v", errClose)
 		}
 		return nil, fmt.Errorf("utls: upstream returned an empty response")
+	}
+	if resp.Body == nil {
+		resp.Body = http.NoBody
+	}
+	resp.Body = &closeConnectionBody{
+		ReadCloser:      resp.Body,
+		closeConnection: h2Conn.Close,
 	}
 	return resp, nil
 }

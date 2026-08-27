@@ -81,6 +81,11 @@ func describeOpenAICompatibilityUpdate(oldEntry, newEntry config.OpenAICompatibi
 	if oldEntry.Disabled != newEntry.Disabled {
 		details = append(details, fmt.Sprintf("disabled %t -> %t", oldEntry.Disabled, newEntry.Disabled))
 	}
+	oldAPI := config.NormalizeOpenAICompatAPI(oldEntry.API)
+	newAPI := config.NormalizeOpenAICompatAPI(newEntry.API)
+	if oldAPI != newAPI {
+		details = append(details, fmt.Sprintf("api %s -> %s", oldAPI, newAPI))
+	}
 	if oldEntry.SupportPromptCacheKey != newEntry.SupportPromptCacheKey {
 		details = append(details, fmt.Sprintf("support-prompt-cache-key %t -> %t", oldEntry.SupportPromptCacheKey, newEntry.SupportPromptCacheKey))
 	}

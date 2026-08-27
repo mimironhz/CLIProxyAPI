@@ -653,6 +653,15 @@ nonstream-keepalive-interval: 0
 #     disabled: false # optional: set to true to disable this provider without removing it
 #     prefix: "test" # optional: require calls like "test/kimi-k2" to target this provider's credentials
 #     base-url: "https://openrouter.ai/api/v1" # The base URL of the provider.
+#     api: chat-completions # optional: wire protocol spoken to this upstream.
+#       # "chat-completions" (the default) translates every request to
+#       # /chat/completions. Set "responses" only for an upstream that implements
+#       # the OpenAI Responses API itself (for example https://api.deepseek.com),
+#       # and requests reach /responses without the round trip through Chat
+#       # Completions. Note that "responses" applies to the whole provider, and
+#       # that only clients calling /v1/responses benefit: callers using
+#       # /v1/chat/completions and the Claude or Gemini endpoints keep Chat
+#       # Completions, because no translator reads a Responses upstream for them.
 #     support-prompt-cache-key: false # optional: derive prompt_cache_key for requests from all input protocols
 #     disable-cooling: false # optional provider override: true disables cooling, false enables it; omit to inherit global
 #     request-retry: 3 # optional per-provider override; 0 disables additional rounds; omit or set < 0 to inherit global
@@ -685,7 +694,7 @@ nonstream-keepalive-interval: 0
 #         input-modalities: [text, image] # optional: declare /v1/chat/completions and /v1/responses multimodal input for Codex clients. Use [text] for upstreams that reject multimodal tool result content.
 #         output-modalities: [text]       # optional: declare output modalities when known
 #         is-compat: false                # optional: preserve Claude thinking blocks for compatible upstreams
-#         thinking:                      # optional: omit to default to levels ["low","medium","high"]
+#         thinking:                      # optional: omit to inherit a known model's capability; unknown models default to ["low","medium","high"]
 #           levels: ["low", "medium", "high"]
 #       # You may repeat the same alias to build an internal model pool.
 #       # The client still sees only one alias in the model list.
@@ -698,6 +707,29 @@ nonstream-keepalive-interval: 0
 #         alias: "claude-opus-4.66"
 #       - name: "kimi-k2.5"
 #         alias: "claude-opus-4.66"
+#   - name: "deepseek"
+#     base-url: "https://api.deepseek.com"
+#     api: responses # DeepSeek's native Responses API
+#     # quota: # optional inline alternative to provider-quota.deepseek; inline wins
+#     #   timezone: "UTC"
+#     #   windows:
+#     #     - name: "peak"
+#     #       start: "00:30"
+#     #       end: "16:30"
+#     #       budget: {requests: 800}
+#     api-key-entries:
+#       - api-key: "sk-..."
+#     models:
+#       - name: "deepseek-v4-pro"
+#         alias: "deepseek-v4-pro"
+#         # quota: # optional replacement schedule for this client-visible model
+#         #   windows: [{name: "peak", start: "00:30", end: "16:30", budget: {requests: 0}}]
+#         display-name: "DS/v4 Pro"
+#         max-context-length: 1048576
+#         input-modalities: [text]
+#         output-modalities: [text]
+#         thinking:
+#           levels: ["high", "max"]
 
 # Vertex API keys (Vertex-compatible endpoints, base-url is optional)
 # vertex-api-key:
