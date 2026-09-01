@@ -660,6 +660,11 @@ func xaiCompareGrokVersion(a, b xaiGrokVersion) int {
 	return 0
 }
 
+// normalizeXAIOrphanCodexAppFunctionCallOutputs rewrites verified orphan Codex
+// app task and heartbeat deliveries that replay as function_call_output items
+// with a null call_id. Official Responses semantics require a pairing call_id,
+// so these items are converted in place to user message/input_text instead of
+// inventing IDs. Valid pairings and unrelated/malformed outputs are unchanged.
 func normalizeXAIOrphanCodexAppFunctionCallOutputs(body []byte) []byte {
 	input := gjson.GetBytes(body, "input")
 	if !input.Exists() || !input.IsArray() {
@@ -669,7 +674,7 @@ func normalizeXAIOrphanCodexAppFunctionCallOutputs(body []byte) []byte {
 	changed := false
 	items := make([]json.RawMessage, 0, len(input.Array()))
 	for _, item := range input.Array() {
-		if converted, ok := xaiCodexAppTaskDeliveryUserMessage(item); ok {
+		if converted, ok := xaiCodexAppDeliveryUserMessage(item); ok {
 			items = append(items, json.RawMessage(converted))
 			changed = true
 			continue
@@ -690,7 +695,7 @@ func normalizeXAIOrphanCodexAppFunctionCallOutputs(body []byte) []byte {
 	return updated
 }
 
-func xaiCodexAppTaskDeliveryUserMessage(item gjson.Result) ([]byte, bool) {
+func xaiCodexAppDeliveryUserMessage(item gjson.Result) ([]byte, bool) {
 	if item.Get("type").String() != "function_call_output" {
 		return nil, false
 	}
@@ -703,8 +708,9 @@ func xaiCodexAppTaskDeliveryUserMessage(item gjson.Result) ([]byte, bool) {
 	if item.Get("namespace").String() != "codex_app" {
 		return nil, false
 	}
-	switch item.Get("name").String() {
-	case "create_thread", "send_message_to_thread":
+	name := item.Get("name").String()
+	switch name {
+	case "create_thread", "send_message_to_thread", "automation_update":
 	default:
 		return nil, false
 	}
@@ -716,12 +722,22 @@ func xaiCodexAppTaskDeliveryUserMessage(item gjson.Result) ([]byte, bool) {
 	if strings.TrimSpace(text) == "" {
 		return nil, false
 	}
+	if name == "automation_update" && !xaiCodexAppHeartbeatDeliveryOutput(text) {
+		return nil, false
+	}
 	msg := []byte(`{"type":"message","role":"user","content":[{"type":"input_text","text":""}]}`)
 	updated, errSet := sjson.SetBytes(msg, "content.0.text", text)
 	if errSet != nil {
 		return nil, false
 	}
 	return updated, true
+}
+
+func xaiCodexAppHeartbeatDeliveryOutput(text string) bool {
+	return strings.Contains(text, "<heartbeat>") &&
+		strings.Contains(text, "<automation_id>") &&
+		strings.Contains(text, "<current_time_iso>") &&
+		strings.Contains(text, "<instructions>")
 }
 
 func sanitizeXAIResponsesBody(body []byte, model string) []byte {
