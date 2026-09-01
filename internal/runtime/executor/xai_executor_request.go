@@ -118,6 +118,7 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 	// optimization settings.
 	body = helps.NormalizeCodexDelegationMessageSchema(body)
 	body = helps.NormalizeCodexAgentMessageInput(body)
+	body = normalizeXAIOrphanCodexAppFunctionCallOutputs(body)
 	willInjectXSearch := e.cfg != nil && e.cfg.XAI.InjectXSearch
 	shouldFold := xaiShouldFoldNamespaceTools(body, willInjectXSearch)
 	namespaceTools := collectXAINamespaceToolRefsWithFold(body, shouldFold)
@@ -657,6 +658,70 @@ func xaiCompareGrokVersion(a, b xaiGrokVersion) int {
 		return 1
 	}
 	return 0
+}
+
+func normalizeXAIOrphanCodexAppFunctionCallOutputs(body []byte) []byte {
+	input := gjson.GetBytes(body, "input")
+	if !input.Exists() || !input.IsArray() {
+		return body
+	}
+
+	changed := false
+	items := make([]json.RawMessage, 0, len(input.Array()))
+	for _, item := range input.Array() {
+		if converted, ok := xaiCodexAppTaskDeliveryUserMessage(item); ok {
+			items = append(items, json.RawMessage(converted))
+			changed = true
+			continue
+		}
+		items = append(items, json.RawMessage(item.Raw))
+	}
+	if !changed {
+		return body
+	}
+	rawInput, errMarshal := json.Marshal(items)
+	if errMarshal != nil {
+		return body
+	}
+	updated, errSet := sjson.SetRawBytes(body, "input", rawInput)
+	if errSet != nil {
+		return body
+	}
+	return updated
+}
+
+func xaiCodexAppTaskDeliveryUserMessage(item gjson.Result) ([]byte, bool) {
+	if item.Get("type").String() != "function_call_output" {
+		return nil, false
+	}
+	if strings.TrimSpace(item.Get("call_id").String()) != "" {
+		return nil, false
+	}
+	if !strings.HasPrefix(item.Get("id").String(), "fco_") {
+		return nil, false
+	}
+	if item.Get("namespace").String() != "codex_app" {
+		return nil, false
+	}
+	switch item.Get("name").String() {
+	case "create_thread", "send_message_to_thread":
+	default:
+		return nil, false
+	}
+	output := item.Get("output")
+	if output.Type != gjson.String {
+		return nil, false
+	}
+	text := output.String()
+	if strings.TrimSpace(text) == "" {
+		return nil, false
+	}
+	msg := []byte(`{"type":"message","role":"user","content":[{"type":"input_text","text":""}]}`)
+	updated, errSet := sjson.SetBytes(msg, "content.0.text", text)
+	if errSet != nil {
+		return nil, false
+	}
+	return updated, true
 }
 
 func sanitizeXAIResponsesBody(body []byte, model string) []byte {
