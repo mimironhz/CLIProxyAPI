@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
 	"strconv"
@@ -662,9 +664,10 @@ func xaiCompareGrokVersion(a, b xaiGrokVersion) int {
 
 // normalizeXAIOrphanCodexAppFunctionCallOutputs rewrites verified orphan Codex
 // app task and heartbeat deliveries that replay as function_call_output items
-// with a null call_id. Official Responses semantics require a pairing call_id,
-// so these items are converted in place to user message/input_text instead of
-// inventing IDs. Valid pairings and unrelated/malformed outputs are unchanged.
+// with a missing or empty call_id. Official Responses semantics require a pairing
+// call_id, so these items are converted in place to user message/input_text
+// instead of inventing IDs. Valid pairings and unrelated/malformed outputs are
+// unchanged.
 func normalizeXAIOrphanCodexAppFunctionCallOutputs(body []byte) []byte {
 	input := gjson.GetBytes(body, "input")
 	if !input.Exists() || !input.IsArray() {
@@ -734,10 +737,90 @@ func xaiCodexAppDeliveryUserMessage(item gjson.Result) ([]byte, bool) {
 }
 
 func xaiCodexAppHeartbeatDeliveryOutput(text string) bool {
-	return strings.Contains(text, "<heartbeat>") &&
-		strings.Contains(text, "<automation_id>") &&
-		strings.Contains(text, "<current_time_iso>") &&
-		strings.Contains(text, "<instructions>")
+	dec := xml.NewDecoder(strings.NewReader(text))
+	dec.Strict = true
+	if !xaiXMLExpectStart(dec, "heartbeat", true) {
+		return false
+	}
+	for _, name := range []string{"automation_id", "current_time_iso", "instructions"} {
+		if !xaiXMLConsumeSimpleChild(dec, name) {
+			return false
+		}
+	}
+	if !xaiXMLExpectEnd(dec, "heartbeat", true) {
+		return false
+	}
+	return xaiXMLExpectEOF(dec)
+}
+
+func xaiXMLNextToken(dec *xml.Decoder, skipSpace bool) (xml.Token, bool) {
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return nil, false
+		}
+		if skipSpace {
+			if charData, ok := tok.(xml.CharData); ok && strings.TrimSpace(string(charData)) == "" {
+				continue
+			}
+		}
+		return tok, true
+	}
+}
+
+func xaiXMLExpectStart(dec *xml.Decoder, local string, skipSpace bool) bool {
+	tok, ok := xaiXMLNextToken(dec, skipSpace)
+	if !ok {
+		return false
+	}
+	start, ok := tok.(xml.StartElement)
+	return ok && start.Name.Space == "" && start.Name.Local == local && len(start.Attr) == 0
+}
+
+func xaiXMLExpectEnd(dec *xml.Decoder, local string, skipSpace bool) bool {
+	tok, ok := xaiXMLNextToken(dec, skipSpace)
+	if !ok {
+		return false
+	}
+	end, ok := tok.(xml.EndElement)
+	return ok && end.Name.Space == "" && end.Name.Local == local
+}
+
+func xaiXMLConsumeSimpleChild(dec *xml.Decoder, local string) bool {
+	if !xaiXMLExpectStart(dec, local, true) {
+		return false
+	}
+	var value strings.Builder
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return false
+		}
+		switch t := tok.(type) {
+		case xml.CharData:
+			value.Write(t)
+		case xml.EndElement:
+			return t.Name.Space == "" && t.Name.Local == local && strings.TrimSpace(value.String()) != ""
+		default:
+			return false
+		}
+	}
+}
+
+func xaiXMLExpectEOF(dec *xml.Decoder) bool {
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			return true
+		}
+		if err != nil {
+			return false
+		}
+		charData, ok := tok.(xml.CharData)
+		if !ok || strings.TrimSpace(string(charData)) != "" {
+			return false
+		}
+	}
 }
 
 func sanitizeXAIResponsesBody(body []byte, model string) []byte {
