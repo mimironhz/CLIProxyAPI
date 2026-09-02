@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -51,7 +52,7 @@ func TestNormalizeRelayMultiAgentParentPayloadAliasesCollaborationBeforeRemoving
 		]}]
 	}`)
 
-	disabled, disabledOptimized := normalizeRelayMultiAgentParentPayload(payload, false)
+	disabled, disabledOptimized := normalizeRelayMultiAgentParentPayload(payload, false, nil)
 	if disabledOptimized {
 		t.Fatal("disabled Relay multi-agent shaping reported an optimized namespace")
 	}
@@ -59,7 +60,7 @@ func TestNormalizeRelayMultiAgentParentPayloadAliasesCollaborationBeforeRemoving
 		t.Fatalf("disabled Relay multi-agent shaping changed payload: %s", disabled)
 	}
 
-	got, optimized := normalizeRelayMultiAgentParentPayload(payload, true)
+	got, optimized := normalizeRelayMultiAgentParentPayload(payload, true, nil)
 	if !optimized {
 		t.Fatal("Relay multi-agent shaping did not alias the collaboration namespace")
 	}
@@ -79,7 +80,33 @@ func TestNormalizeRelayMultiAgentParentPayloadAliasesCollaborationBeforeRemoving
 		t.Fatalf("unrelated send_message encryption marker changed: %s", got)
 	}
 	if description := gjson.GetBytes(got, "tools.0.tools.0.description").String(); description != "unchanged spawn description" {
-		t.Fatalf("spawn_agent description = %q", description)
+		t.Fatalf("spawn_agent description = %q, want unchanged without a catalog", description)
+	}
+
+	catalog := &modelsHandler{body: []byte(`{"models":[
+		{"slug":"gpt-5.6-sol","description":"Reliable agentic workhorse","priority":1,"multi_agent_version":"v2","default_reasoning_level":"low","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"},{"effort":"xhigh"}]},
+		{"slug":"gpt-5.6-luna","description":"Faster GPT","priority":2,"multi_agent_version":"v1","default_reasoning_level":"medium","supported_reasoning_levels":[{"effort":"medium"}]},
+		{"slug":"grok-4.6","description":"SpaceXAI long-running agent","priority":3,"multi_agent_version":"v2","default_reasoning_level":"medium","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"},{"effort":"xhigh"}]}
+	]}`)}
+	got, optimized = normalizeRelayMultiAgentParentPayload(payload, true, catalog)
+	if !optimized {
+		t.Fatal("Relay multi-agent shaping did not alias the collaboration namespace with a catalog")
+	}
+	description := gjson.GetBytes(got, "tools.0.tools.0.description").String()
+	if !strings.Contains(description, "unchanged spawn description") {
+		t.Fatalf("spawn_agent original description lost: %q", description)
+	}
+	if !strings.Contains(description, "Available model overrides (optional; inherited parent model is preferred):") {
+		t.Fatalf("spawn_agent model override heading missing: %q", description)
+	}
+	if !strings.Contains(description, "- `gpt-5.6-sol`: Reliable agentic workhorse. Reasoning efforts: low (default), medium, high, xhigh.") {
+		t.Fatalf("spawn_agent stock v2 override missing: %q", description)
+	}
+	if !strings.Contains(description, "- `grok-4.6`: SpaceXAI long-running agent. Reasoning efforts: low, medium (default), high, xhigh.") {
+		t.Fatalf("spawn_agent relay v2 override missing: %q", description)
+	}
+	if strings.Contains(description, "gpt-5.6-luna") {
+		t.Fatalf("spawn_agent listed ineligible v1 model: %q", description)
 	}
 	if description := gjson.GetBytes(got, "tools.0.description").String(); description != "unchanged namespace" {
 		t.Fatalf("namespace description = %q, want unchanged namespace", description)
@@ -92,12 +119,12 @@ func TestNormalizeRelayMultiAgentParentPayloadPromotesOfficialWorkerPlaintext(t 
 	opaque := validGPTReasoningEncryptedContentForRootTest()
 	payload := []byte(`{"input":[{"type":"agent_message","id":"amsg_official","author":"/root","recipient":"/root/official_worker","content":[{"type":"input_text","text":` + string(mustJSON(t, envelope)) + `},{"type":"encrypted_content","encrypted_content":` + string(mustJSON(t, task)) + `},{"type":"encrypted_content","encrypted_content":` + string(mustJSON(t, opaque)) + `}]}]}`)
 
-	disabled, optimized := normalizeRelayMultiAgentParentPayload(payload, false)
+	disabled, optimized := normalizeRelayMultiAgentParentPayload(payload, false, nil)
 	if optimized || !bytes.Equal(disabled, payload) {
 		t.Fatalf("disabled official worker normalization changed payload: %s", disabled)
 	}
 
-	got, optimized := normalizeRelayMultiAgentParentPayload(payload, true)
+	got, optimized := normalizeRelayMultiAgentParentPayload(payload, true, nil)
 	if optimized {
 		t.Fatal("worker payload without collaboration tools unexpectedly mapped a namespace")
 	}

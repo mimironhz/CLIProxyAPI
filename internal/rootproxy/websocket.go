@@ -52,6 +52,7 @@ type websocketBridge struct {
 	relayAPIKey       string
 	fastModels        map[string]struct{}
 	relayAgents       bool
+	models            *modelsHandler
 	maxMessage        int64
 	maxPending        int
 	dialOfficial      websocketDialFunc
@@ -361,7 +362,7 @@ func (b *websocketBridge) ServeHTTP(response http.ResponseWriter, request *http.
 	upstreamPayload := firstPayload
 	restoreDelegationNamespace := false
 	if selected == routeOfficial {
-		upstreamPayload, restoreDelegationNamespace = normalizeRelayMultiAgentParentPayload(firstPayload, b.relayAgents)
+		upstreamPayload, restoreDelegationNamespace = normalizeRelayMultiAgentParentPayload(firstPayload, b.relayAgents, b.models)
 		upstreamPayload, errEnvelope = prepareOfficialPayload(upstreamPayload)
 		if errEnvelope == nil {
 			// The first message is always a response.create, so it is a turn.
@@ -735,7 +736,7 @@ func (b *websocketBridge) runController(
 				}
 			}
 			if state.route == routeOfficial {
-				upstreamPayload, restoreDelegationNamespace = normalizeRelayMultiAgentParentPayload(result.payload, b.relayAgents)
+				upstreamPayload, restoreDelegationNamespace = normalizeRelayMultiAgentParentPayload(result.payload, b.relayAgents, b.models)
 				upstreamPayload, errInspect = prepareOfficialPayload(upstreamPayload)
 				if errInspect == nil && isCreate {
 					upstreamPayload, errInspect = applyOfficialFastServiceTier(upstreamPayload, nextModel, b.fastModels)
@@ -896,7 +897,7 @@ func (b *websocketBridge) performHandoff(
 		}
 	}
 	if nextRoute == routeOfficial {
-		payload, restoreDelegationNamespace = normalizeRelayMultiAgentParentPayload(request.payload, b.relayAgents)
+		payload, restoreDelegationNamespace = normalizeRelayMultiAgentParentPayload(request.payload, b.relayAgents, b.models)
 		payload, errRoute = prepareOfficialPayload(payload)
 		if errRoute == nil {
 			// A handoff only ever carries the response.create that changed target.

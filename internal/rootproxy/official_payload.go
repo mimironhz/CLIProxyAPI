@@ -30,12 +30,16 @@ const officialFastServiceTier = "priority"
 // The official service also reserves the collaboration schema, so Root moves
 // it to a non-reserved alias before removing delivery-message encryption
 // markers. Responses must restore the client-visible namespace.
-func normalizeRelayMultiAgentParentPayload(payload []byte, enabled bool) ([]byte, bool) {
+// The model-visible spawn_agent override list is then refreshed from Root's
+// current merged catalog so eligible Relay v2 models are not hidden behind a
+// stale stock-only client description.
+func normalizeRelayMultiAgentParentPayload(payload []byte, enabled bool, models *modelsHandler) ([]byte, bool) {
 	if !enabled {
 		return payload, false
 	}
 	payload = multiagentv2.PromoteCodexPlaintextAgentMessageContent(payload)
-	return multiagentv2.PrepareCodexRelayDelegationRequest(payload)
+	payload, optimized := multiagentv2.PrepareCodexRelayDelegationRequest(payload)
+	return multiagentv2.ApplyCodexSpawnAgentCatalog(payload, models.currentCatalog()), optimized
 }
 
 func restoreRelayMultiAgentResponse(payload []byte, optimized bool) []byte {

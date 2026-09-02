@@ -102,6 +102,8 @@ func NewServer(config *Config) (*Server, error) {
 	if errModels != nil {
 		return nil, fmt.Errorf("create root model catalog: %w", errModels)
 	}
+	httpBridge.models = models
+	bridge.models = models
 	mux := http.NewServeMux()
 	responses := &responsesEndpointHandler{
 		websocket:     bridge,

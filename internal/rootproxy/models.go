@@ -64,6 +64,26 @@ func (h *modelsHandler) cached() ([]byte, string, time.Time) {
 	return h.cachedBody, h.cachedETag, h.cachedAt
 }
 
+// currentCatalog returns the same catalog body GET /v1/models would serve:
+// the static catalog, the latest merged cache, or a cold-start synthesis.
+func (h *modelsHandler) currentCatalog() []byte {
+	if h == nil {
+		return nil
+	}
+	if h.mode != discoveryAuto {
+		return h.body
+	}
+	body, _, _ := h.cached()
+	if body != nil {
+		return body
+	}
+	body, _, errFallback := h.coldStartCatalog()
+	if errFallback != nil {
+		return nil
+	}
+	return body
+}
+
 func (h *modelsHandler) storeCache(body []byte, etag string) {
 	h.cacheMu.Lock()
 	defer h.cacheMu.Unlock()

@@ -125,6 +125,49 @@ func PrepareCodexRelayDelegationRequest(payload []byte) ([]byte, bool) {
 	return optimizeCodexCollaborationNamespace(updated, toolPaths)
 }
 
+// ApplyCodexSpawnAgentCatalog refreshes spawn_agent descriptions from a Codex
+// models catalog payload. Only entries advertising multi_agent_version "v2"
+// are listed, matching spawn eligibility. An empty or unusable catalog leaves
+// the payload unchanged.
+func ApplyCodexSpawnAgentCatalog(payload, catalogJSON []byte) []byte {
+	models := codexSpawnAgentModelsFromCatalog(catalogJSON)
+	if len(models) == 0 {
+		return payload
+	}
+	return rewriteCodexSpawnAgentDescription(payload, models)
+}
+
+func codexSpawnAgentModelsFromCatalog(catalogJSON []byte) []codexSpawnAgentModel {
+	if len(catalogJSON) == 0 {
+		return nil
+	}
+	var catalog codexClientModelsCatalog
+	if err := json.Unmarshal(catalogJSON, &catalog); err != nil || len(catalog.Models) == 0 {
+		return nil
+	}
+	models := make([]codexSpawnAgentModel, 0, len(catalog.Models))
+	for _, metadata := range catalog.Models {
+		if mapString(metadata, "multi_agent_version") != "v2" {
+			continue
+		}
+		modelID := mapString(metadata, "slug")
+		if modelID == "" {
+			modelID = mapString(metadata, "id")
+		}
+		if modelID == "" {
+			continue
+		}
+		models = append(models, codexSpawnAgentModelFromMetadata(modelID, metadata))
+	}
+	sort.SliceStable(models, func(i, j int) bool {
+		if models[i].priority == models[j].priority {
+			return models[i].id < models[j].id
+		}
+		return models[i].priority < models[j].priority
+	})
+	return models
+}
+
 // TranslateRequestWithCodexMultiAgentV2 normalizes official Codex multi-agent
 // input before translating it to a non-Codex target protocol.
 func TranslateRequestWithCodexMultiAgentV2(ctx context.Context, headers http.Header, cfg *config.Config, from, to sdktranslator.Format, model string, payload []byte, stream bool) []byte {
