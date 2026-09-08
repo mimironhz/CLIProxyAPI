@@ -316,10 +316,11 @@ func (b *httpBridge) serve(response http.ResponseWriter, request *http.Request, 
 			writeStockHTTPError(response, exchange, http.StatusBadRequest, "invalid_request_error", "HTTP Responses requires stream true", "stream", "rejected", "streaming_required")
 			return
 		}
+		normalizedBody := decodedBody
 		if selected == routeOfficial {
-			parentBody := decodedBody
-			parentBody, restoreDelegationNamespace = normalizeRelayMultiAgentParentPayload(parentBody, b.relayAgents)
-			normalizedBody, errPrepare := prepareOfficialPayload(parentBody)
+			normalizedBody, restoreDelegationNamespace = normalizeRelayMultiAgentParentPayload(normalizedBody, b.relayAgents)
+			var errPrepare error
+			normalizedBody, errPrepare = prepareOfficialPayload(normalizedBody)
 			if errPrepare != nil {
 				writeStockHTTPError(response, exchange, http.StatusBadRequest, "invalid_request_error", errPrepare.Error(), "input", "rejected", "official_payload_invalid")
 				return
@@ -330,10 +331,11 @@ func (b *httpBridge) serve(response http.ResponseWriter, request *http.Request, 
 				writeStockHTTPError(response, exchange, http.StatusBadRequest, "invalid_request_error", errTier.Error(), "service_tier", "rejected", "official_service_tier_not_applied")
 				return
 			}
-			if !bytes.Equal(normalizedBody, decodedBody) {
-				forwardBody = normalizedBody
-				forwardEncoding = ""
-			}
+		}
+		normalizedBody = rewriteCreateThreadSchema(normalizedBody)
+		if !bytes.Equal(normalizedBody, decodedBody) {
+			forwardBody = normalizedBody
+			forwardEncoding = ""
 		}
 	case httpEndpointCompact:
 		if stream.present && !stream.isNull && stream.value {

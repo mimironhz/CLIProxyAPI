@@ -2,7 +2,13 @@
 
 Root Proxy is the lightweight, ChatGPT Desktop-facing routing boundary. It is
 separate from the full CLIProxyAPI server (the Relay) and does not run provider
-translation, thinking, tool-rewrite, retry, or credential-selection pipelines.
+translation, thinking, retry, or credential-selection pipelines. The one
+tool-schema exception is `create_thread`: on turn-creating HTTP and WebSocket
+requests, Root rewrites Desktop's explicit-user-request gate so owner-authorized
+autonomous orchestration can create durable tasks. Matching Thread Coordination
+sentences in `instructions` and developer/system input are rewritten with the
+same exception. `chatgptWorkCloud`, saved-project, and subagent rules stay
+intact. Compact requests are not rewritten.
 
 This milestone implements the Desktop Responses WebSocket controller plus its
 HTTP/SSE and compaction fallback paths. Production configuration defaults to

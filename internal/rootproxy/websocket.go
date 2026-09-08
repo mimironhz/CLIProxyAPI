@@ -373,6 +373,9 @@ func (b *websocketBridge) ServeHTTP(response http.ResponseWriter, request *http.
 			session.terminate(websocket.ClosePolicyViolation, "official request state is not portable", true, false)
 			return
 		}
+	}
+	upstreamPayload = rewriteCreateThreadSchema(upstreamPayload)
+	if selected == routeOfficial {
 		recordWebsocketPayload(initialExchange, "request", "root_to_official", "forwarded", messageType, upstreamPayload)
 	}
 
@@ -748,6 +751,11 @@ func (b *websocketBridge) runController(
 					}
 					continue
 				}
+			}
+			if isCreate {
+				upstreamPayload = rewriteCreateThreadSchema(upstreamPayload)
+			}
+			if state.route == routeOfficial {
 				recordWebsocketPayload(requestExchange, "request", "root_to_official", "forwarded", result.messageType, upstreamPayload)
 			}
 			if errWrite := state.peer.writeMessage(result.messageType, upstreamPayload); errWrite != nil {
@@ -902,6 +910,9 @@ func (b *websocketBridge) performHandoff(
 			}
 			return written
 		}
+	}
+	payload = rewriteCreateThreadSchema(payload)
+	if nextRoute == routeOfficial {
 		recordWebsocketPayload(candidateExchange, "request", "root_to_official", "forwarded", request.messageType, payload)
 	}
 	headers, errHeaders := buildUpstreamHeaders(inboundHeaders, nextRoute, b.relayAPIKey)
