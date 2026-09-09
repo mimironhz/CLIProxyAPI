@@ -9,8 +9,6 @@ import (
 )
 
 const (
-	// MaxGrokEncryptedContentLen is a transport safety cap for opaque replay blobs.
-	MaxGrokEncryptedContentLen = 8 * 1024 * 1024
 	// MinGrokEncryptedContentDecodedLen is a deliberately loose floor, and the
 	// headroom has already proven necessary. An earlier corpus of 207 samples put
 	// the shortest native payload at exactly 50 bytes, with several samples piled
@@ -46,9 +44,6 @@ func InspectGrokEncryptedContent(raw string) (*GrokEncryptedContentInfo, error) 
 	sig := strings.TrimSpace(raw)
 	if sig == "" {
 		return nil, fmt.Errorf("empty Grok encrypted_content")
-	}
-	if len(sig) > MaxGrokEncryptedContentLen {
-		return nil, fmt.Errorf("Grok encrypted_content exceeds maximum length (%d bytes)", MaxGrokEncryptedContentLen)
 	}
 	if sig != raw {
 		return nil, fmt.Errorf("Grok encrypted_content has leading or trailing whitespace")

@@ -162,44 +162,191 @@ func xaiBuildCompactionSummaryBody(fullCompactBody []byte, fallbackSessionID str
 	for _, itemType := range []string{"compaction_trigger", "additional_tools", xaiToolSearchOutputItemType} {
 		body = xaiRemoveInputItemsByType(body, itemType)
 	}
-	return xaiSanitizeCompactionSummaryInlineMedia(body)
+	body = xaiSanitizeCompactionMessageInlineMedia(body)
+	return xaiSanitizeCompactionFunctionOutputInlineMedia(body)
 }
 
-func xaiSanitizeCompactionSummaryInlineMedia(body []byte) []byte {
+func xaiSanitizeCompactionMessageInlineMedia(body []byte) []byte {
 	input := gjson.GetBytes(body, "input")
 	if !input.IsArray() {
 		return body
 	}
 	for inputIndex, item := range input.Array() {
-		content := item.Get("content")
-		if !content.IsArray() {
+		if item.Get("type").String() != "message" {
 			continue
 		}
-		for contentIndex, part := range content.Array() {
-			placeholder := ""
-			switch part.Get("type").String() {
-			case "input_image":
-				imageURL := strings.TrimSpace(part.Get("image_url").String())
-				if strings.HasPrefix(strings.ToLower(imageURL), "data:") || xaiHasInlineMediaData(part.Get("file_data")) {
-					placeholder = xaiCompactionInlineImagePlaceholder
-				}
-			case "input_file":
-				if xaiHasInlineMediaData(part.Get("file_data")) {
-					placeholder = xaiCompactionInlineFilePlaceholder
-				}
-			case "input_audio":
-				if xaiHasInlineMediaData(part.Get("data")) || xaiHasInlineMediaData(part.Get("input_audio.data")) {
-					placeholder = xaiCompactionInlineAudioPlaceholder
-				}
-			}
-			if placeholder == "" {
-				continue
-			}
-			path := fmt.Sprintf("input.%d.content.%d", inputIndex, contentIndex)
-			body, _ = sjson.SetBytes(body, path, map[string]string{"type": "input_text", "text": placeholder})
+		body = xaiSanitizeCompactionMediaParts(body, item.Get("content"), fmt.Sprintf("input.%d.content", inputIndex), xaiCompactionInlineMediaPlaceholder)
+	}
+	return body
+}
+
+func xaiSanitizeCompactionFunctionOutputInlineMedia(body []byte) []byte {
+	input := gjson.GetBytes(body, "input")
+	if !input.IsArray() {
+		return body
+	}
+	for inputIndex, item := range input.Array() {
+		if item.Get("type").String() != "function_call_output" {
+			continue
+		}
+		output := item.Get("output")
+		if output.IsArray() {
+			body = xaiSanitizeCompactionMediaParts(body, output, fmt.Sprintf("input.%d.output", inputIndex), xaiCompactionToolOutputMediaPlaceholder)
+			continue
+		}
+		if output.Type != gjson.String {
+			continue
+		}
+		encodedParts := []byte(strings.TrimSpace(output.String()))
+		if !gjson.ValidBytes(encodedParts) || !gjson.ParseBytes(encodedParts).IsArray() {
+			continue
+		}
+		sanitized := xaiSanitizeCompactionMediaParts(encodedParts, gjson.ParseBytes(encodedParts), "", xaiCompactionToolOutputMediaPlaceholder)
+		if !bytes.Equal(encodedParts, sanitized) {
+			body, _ = sjson.SetBytes(body, fmt.Sprintf("input.%d.output", inputIndex), string(sanitized))
 		}
 	}
 	return body
+}
+
+func xaiSanitizeCompactionMediaParts(body []byte, content gjson.Result, pathPrefix string, placeholderFor func(gjson.Result) string) []byte {
+	if !content.IsArray() {
+		return body
+	}
+	for contentIndex, part := range content.Array() {
+		placeholder := placeholderFor(part)
+		if placeholder == "" {
+			continue
+		}
+		path := strconv.Itoa(contentIndex)
+		if pathPrefix != "" {
+			path = pathPrefix + "." + path
+		}
+		body, _ = sjson.SetBytes(body, path, map[string]string{"type": "input_text", "text": placeholder})
+	}
+	return body
+}
+
+func xaiCompactionToolOutputMediaPlaceholder(part gjson.Result) string {
+	placeholder := xaiCompactionInlineMediaPlaceholder(part)
+	if placeholder == "" {
+		return ""
+	}
+	payload := xaiCompactionInlineMediaPayload(part)
+	metadata := make([]string, 0, 10)
+	if mimeType := xaiCompactionDataURLMIME(payload.String()); mimeType != "" {
+		metadata = append(metadata, "mime="+strconv.Quote(mimeType))
+	}
+	for _, field := range []string{"detail", "filename", "format", "dimensions", "path", "size", "width", "height"} {
+		metadata = xaiAppendCompactionMediaMetadata(metadata, field, part.Get(field))
+	}
+	metadata = xaiAppendCompactionMediaMetadata(metadata, "format", part.Get("input_audio.format"))
+	metadata = xaiAppendCompactionMediaMetadata(metadata, "width", part.Get("dimensions.width"))
+	metadata = xaiAppendCompactionMediaMetadata(metadata, "height", part.Get("dimensions.height"))
+	metadata = append(metadata, fmt.Sprintf("encoded_chars=%d", xaiCompactionEncodedPayloadChars(payload.String())))
+	return strings.TrimSuffix(placeholder, "]") + " Metadata: " + strings.Join(metadata, ", ") + ".]"
+}
+
+func xaiCompactionInlineMediaPayload(part gjson.Result) gjson.Result {
+	switch part.Get("type").String() {
+	case "input_image":
+		if imageURL := part.Get("image_url"); imageURL.Type == gjson.String && strings.HasPrefix(strings.ToLower(strings.TrimSpace(imageURL.String())), "data:") {
+			return imageURL
+		}
+		return part.Get("file_data")
+	case "input_file":
+		return part.Get("file_data")
+	case "input_audio":
+		if data := part.Get("data"); xaiHasInlineMediaData(data) {
+			return data
+		}
+		return part.Get("input_audio.data")
+	default:
+		return gjson.Result{}
+	}
+}
+
+func xaiAppendCompactionMediaMetadata(metadata []string, name string, value gjson.Result) []string {
+	var rendered string
+	switch value.Type {
+	case gjson.String:
+		rendered = xaiBoundCompactionMetadata(value.String())
+	case gjson.Number, gjson.True, gjson.False:
+		rendered = xaiBoundCompactionMetadata(value.Raw)
+	default:
+		return metadata
+	}
+	if rendered == "" {
+		return metadata
+	}
+	return append(metadata, name+"="+strconv.Quote(rendered))
+}
+
+func xaiBoundCompactionMetadata(value string) string {
+	const maxRunes = 128
+	value = strings.TrimSpace(value)
+	runeCount := 0
+	for index := range value {
+		if runeCount == maxRunes {
+			return value[:index] + "..."
+		}
+		runeCount++
+	}
+	return value
+}
+
+func xaiCompactionDataURLMIME(value string) string {
+	value = strings.TrimSpace(value)
+	if !strings.HasPrefix(strings.ToLower(value), "data:") {
+		return ""
+	}
+	headerEnd := strings.IndexByte(value, ',')
+	if headerEnd < 5 {
+		return ""
+	}
+	mimeType := value[5:headerEnd]
+	if parameterIndex := strings.IndexByte(mimeType, ';'); parameterIndex >= 0 {
+		mimeType = mimeType[:parameterIndex]
+	}
+	if len(mimeType) > 128 {
+		return ""
+	}
+	mimeType = strings.ToLower(mimeType)
+	for _, char := range mimeType {
+		if (char < 'a' || char > 'z') && (char < '0' || char > '9') && !strings.ContainsRune("!#$&^_.+-/", char) {
+			return ""
+		}
+	}
+	return mimeType
+}
+
+func xaiCompactionEncodedPayloadChars(value string) int {
+	value = strings.TrimSpace(value)
+	if strings.HasPrefix(strings.ToLower(value), "data:") {
+		if separator := strings.IndexByte(value, ','); separator >= 0 {
+			return len(value) - separator - 1
+		}
+	}
+	return len(value)
+}
+
+func xaiCompactionInlineMediaPlaceholder(part gjson.Result) string {
+	switch part.Get("type").String() {
+	case "input_image":
+		imageURL := strings.TrimSpace(part.Get("image_url").String())
+		if strings.HasPrefix(strings.ToLower(imageURL), "data:") || xaiHasInlineMediaData(part.Get("file_data")) {
+			return xaiCompactionInlineImagePlaceholder
+		}
+	case "input_file":
+		if xaiHasInlineMediaData(part.Get("file_data")) {
+			return xaiCompactionInlineFilePlaceholder
+		}
+	case "input_audio":
+		if xaiHasInlineMediaData(part.Get("data")) || xaiHasInlineMediaData(part.Get("input_audio.data")) {
+			return xaiCompactionInlineAudioPlaceholder
+		}
+	}
+	return ""
 }
 
 func xaiHasInlineMediaData(value gjson.Result) bool {

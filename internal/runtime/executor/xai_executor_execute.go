@@ -171,6 +171,7 @@ func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxya
 		prepared.body, _ = sjson.DeleteBytes(prepared.body, field)
 	}
 	prepared.body = xaiRemoveInputItemsByType(prepared.body, "compaction_trigger")
+	prepared.body = xaiSanitizeCompactionFunctionOutputInlineMedia(prepared.body)
 	estimatedTokens, err := xaiPreparedCompactTokenCount(prepared.body)
 	if err != nil {
 		return nil, nil, nil, err
