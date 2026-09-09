@@ -12,6 +12,28 @@ OrbStack clients -> 192.168.139.3:8318 -> Relay 127.0.0.1:8318
 
 The repository helper is `scripts/root-relay-cutover.zsh`. Run any operation that restarts Root from an external Terminal during a quiet interval. Restarting Root from a Codex task routed through Root disconnects that task, and the helper refuses to restart Root while it sees established inbound clients.
 
+## Activating from a Codex task routed through Root
+
+An active Codex connection is a scheduling constraint, not a reason to leave an authorized activation at configuration staging. Prepare and start an independently running Terminal script that survives Root restarting. Keep the helper's quiet-client checks intact.
+
+1. Fresh-read the loaded Root and Relay programs, installed plists, configuration paths, deployment state, and pending transactions. Preserve unrelated checkout changes. If deployment state exists, use normal activation; do not repeat migration.
+2. Prepare a service-specific candidate from the exact active binary and installed configuration for a configuration-only change. Apply only the requested values, include Root's environment without printing credentials, and verify the candidate manifest and exact plist argument array. Keep scripts and logs outside the immutable bundle.
+3. Review the wrapper and helper before execution. Bind the wrapper to the resolved candidate and expected live configuration; recheck those bytes before mutation. Use a single-instance lock and a durable attempt marker so failures cannot silently retrigger.
+4. Start the wrapper in an external Terminal. Wait for several consecutive quiet observations of established **inbound** Root connections, with a bounded overall wait. The helper must still recheck immediately before stopping Root. Do not kill clients or bypass the guard.
+5. Let the Codex request finish. If the connection persists, ask the user to quit Codex while leaving Terminal open. Quitting Codex is unnecessary if connections drain naturally during a tool wait or after the response. Verify that the external process is actually running before reporting it as scheduled.
+6. Run the required migration, if any, followed by candidate preflight and activation. Record the exit status, receipts, and verification result. Announce success only after the requested live behavior passes; on failure, reconcile the exact attempt before retrying. Supported rollback retains the same quiet-client gate.
+
+For model-context changes, Root loads the configuration at startup. YAML validation alone does not activate it. Verify both the installed `routing.model-context` entry and an authenticated `/v1/models` response for the exact advertised slug. Under auto discovery, allow the background catalog refresh to complete using the normally configured credential without logging it. For example, the 2026-09-07 GPT-6 activation required `gpt-6-astra` to advertise `context_window: 1000000`, `max_context_window: 1000000`, and `auto_compact_token_limit: 400000`. Health endpoints prove service readiness, not those catalog values.
+
+## Helper checks before execution
+
+The 2026-09-07 activation exposed two defects in the repository helper. They were repaired in the reviewed external copy used for that activation, **not in `scripts/root-relay-cutover.zsh`**. Until the repository implementation is corrected, do not blindly copy or execute it for another cutover; inspect these conditions and use a reviewed corrected copy. Do not rerun an old preparation script that overwrites the corrected helper.
+
+- A failed `mkdir "$lock_dir"` must return immediately from `acquire_lock`. Logging an error alone is insufficient when the caller continues without `errexit`; it must not overwrite another operator's lock PID or remove that lock on exit.
+- Replace the entire `ProgramArguments` array, not indexed elements with `plutil -replace ProgramArguments.0` or `.2`. On the activation host, indexed replacement inserted elements and produced duplicate arguments. Construct the full JSON array and pass it to `plutil -replace ProgramArguments -json`. Root requires exactly `[binary, "--config", config]`; Relay requires exactly `[binary, "--config", config, "--local-model"]`.
+
+Run `zsh -n` and exercise the actual helper's plist normalization and exact-argument validation against temporary plist copies for both services. Also validate the candidate with the helper's candidate checks; `plutil -lint` and valid checksums alone do not prove argument correctness. Preserve the original helper and failed-attempt evidence when repairing an external copy.
+
 ## State model
 
 `$HOME/.local/state/cliproxyapi/root-relay-cutover/deployment-state.json` is the sole reachability index. It records exactly two generations for each service: `active` and `rollback`.
@@ -82,10 +104,12 @@ launchd/com.user.cliproxy-relay.plist
 
 Migration preserves exact live config bytes even when an old whole-bundle manifest no longer matches because its config was edited after activation. It uses the named legacy active bundles only to identify the running binaries, normalizes the named legacy rollback bundle plists onto stable runtime paths for generation 1, restarts Relay and then Root, writes state, and prunes deeper history. Subsequent snapshots preserve the exact installed plist bytes.
 
-Run this only from an external Terminal when Root has no active clients:
+Resolve all four bundle identities from live jobs and recorded rollback evidence before execution. Migration restarts **both** services, even when the subsequent change is Root-only. Rollback manifests must pass validation. If an old paired rollback bundle fails because of an unrelated service file, do not rewrite its checksum or ignore the failure. Prepare and review a new service-specific rollback bundle from verified files. An exact snapshot of the current service is an acceptable migration baseline when explicitly recorded as such; it is not evidence that an older rollback version was validated.
+
+Run this only from an external Terminal when Root has no active clients. Set `HELPER` to the reviewed implementation that passes the helper checks above; the path below is a placeholder, not an instruction to use the uncorrected repository copy.
 
 ```bash
-HELPER=/Users/dwolf/Projects/CLIProxyAPI-mimironhz/scripts/root-relay-cutover.zsh
+HELPER=/absolute/path/to/reviewed/root-relay-cutover.zsh
 CUTOVER=$HOME/.local/state/cliproxyapi/root-relay-cutover
 
 "$HELPER" --migrate-state \
@@ -118,7 +142,7 @@ Activate only the service carried by the candidate. Automatic pruning is the def
 "$HELPER" --service root --candidate "$CUTOVER/<root-candidate>" --activate
 ```
 
-Use `--no-prune` only for a diagnosed cleanup problem; it is not a normal deployment option.
+Use `--no-prune` only for a diagnosed cleanup problem; it is not a normal deployment option. One such case is migration immediately before activation: migration's garbage collector would remove the already prepared, unreferenced candidate. Either prepare the candidate after migration or defer migration pruning with `--no-prune`. Record any further deferral needed to preserve unresolved legacy evidence, then inspect `--gc-dry-run` before later cleanup.
 
 ## Rollback
 
@@ -146,3 +170,5 @@ Preview and apply reachability-based cleanup with:
 ## Interrupted operations
 
 Do not delete a non-empty `transactions` entry just to clear the guard. Read `journal.json`, compare the active bundle recorded in state with the programs reported by `launchctl print`, verify both health endpoints, and compare the stable runtime files with the transaction's `before-*` and `staged-*` copies. Restore or commit the intended side first, verify the bridge, and only then remove the reconciled transaction and run `--gc`.
+
+A preparation failure can leave a transaction before `journal.json` exists. A missing journal is not proof that nothing changed. Compare both installed plists and configs, Root's environment, loaded arguments and working directories, listener identities, deployment state, runtime files, and rollback snapshots against the available pre-attempt evidence. If those checks prove no service changed, preserve the reconciled transaction and attempt marker outside `transactions/`, document the failure and repair, and only then admit a reviewed retry. Never erase an attempt marker simply to make a wrapper run again.
