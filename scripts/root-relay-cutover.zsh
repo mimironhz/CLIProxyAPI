@@ -334,9 +334,13 @@ normalize_plist() {
   local output=$2
   local service_name=$3
   local program=$4
+  local arguments
   install -m 600 "$template" "$output" || return 1
-  plutil -replace ProgramArguments.0 -string "$program" "$output" || return 1
-  plutil -replace ProgramArguments.2 -string "$(service_runtime_config "$service_name")" "$output" || return 1
+  # Replacing indexed plist entries can insert elements on macOS. Replace the
+  # whole array so activation and rollback retain the exact service arguments.
+  arguments=$(jq -cn --arg program "$program" --arg config "$(service_runtime_config "$service_name")" --arg service "$service_name" \
+    '[$program, "--config", $config] + (if $service == "relay" then ["--local-model"] else [] end)') || return 1
+  plutil -replace ProgramArguments -json "$arguments" "$output" || return 1
   plutil -replace WorkingDirectory -string "$(service_runtime_dir "$service_name")" "$output" || return 1
   plutil -lint "$output" >/dev/null || return 1
   verify_plist_arguments "$service_name" "$output" "$program" "$(service_runtime_config "$service_name")"
