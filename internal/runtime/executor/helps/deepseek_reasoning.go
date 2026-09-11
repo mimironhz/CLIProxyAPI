@@ -182,13 +182,26 @@ func sealDeepSeekReasoningEvent(data []byte) []byte {
 }
 
 // sealDeepSeekReasoningAtPath seals one item, leaving every other item and any
-// blob the upstream genuinely issued untouched.
+// blob this proxy already sealed untouched.
+//
+// Since 2026-09-10 DeepSeek populates encrypted_content itself with an opaque
+// "<response-id>-<n>" handle where it used to return an empty string. That
+// handle is decorative: replaying it carries no state back, so honouring it
+// would only suppress the sealing below. Probed against the live key in the
+// tool-call replay shape, 6 trials per variant, counting whether a fact planted
+// in the reasoning item reached the next turn — content 5/6, summary 0/6,
+// DeepSeek's own handle 0/6, no item 0/6. Only content is read on input.
+//
+// So the handle is overwritten rather than preserved. Callers are gated on
+// IsDeepSeekBaseURL, so no other provider's blob can reach this. Re-sealing is
+// skipped to stay idempotent across the stream's added/done/completed events,
+// which carry the same item more than once.
 func sealDeepSeekReasoningAtPath(data []byte, path string) []byte {
 	item := gjson.GetBytes(data, path)
 	if !item.IsObject() || item.Get("type").String() != "reasoning" {
 		return data
 	}
-	if strings.TrimSpace(item.Get("encrypted_content").String()) != "" {
+	if strings.HasPrefix(strings.TrimSpace(item.Get("encrypted_content").String()), deepSeekReasoningPrefix) {
 		return data
 	}
 	text := reasoningItemText(item)

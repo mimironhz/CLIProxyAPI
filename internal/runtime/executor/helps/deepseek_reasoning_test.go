@@ -1,6 +1,7 @@
 package helps
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 
@@ -105,10 +106,29 @@ func TestSealDeepSeekReasoningNonStream(t *testing.T) {
 }
 
 // A blob the upstream genuinely issued must survive untouched.
-func TestSealDeepSeekReasoningPreservesRealBlob(t *testing.T) {
-	body := []byte(`{"output":[{"type":"reasoning","encrypted_content":"gAAAAAreal","summary":[{"type":"summary_text","text":"x"}]}]}`)
-	if got := gjson.GetBytes(SealDeepSeekReasoning(body), "output.0.encrypted_content").String(); got != "gAAAAAreal" {
-		t.Errorf("encrypted_content = %q, want the upstream blob untouched", got)
+// Since 2026-09-10 DeepSeek fills encrypted_content with an opaque
+// "<response-id>-<n>" handle that carries no state when replayed, so it is
+// overwritten: leaving it in place would suppress sealing entirely and strip the
+// chain of thought from clients that round-trip only this field.
+func TestSealDeepSeekReasoningReplacesUpstreamHandle(t *testing.T) {
+	body := []byte(`{"output":[{"type":"reasoning","encrypted_content":"5c9f6139-0260-4288-9955-96ea99edeb3c-0","summary":[{"type":"summary_text","text":"x"}]}]}`)
+	sealed := gjson.GetBytes(SealDeepSeekReasoning(body), "output.0.encrypted_content").String()
+	if got := unsealDeepSeekReasoning(sealed); got != "x" {
+		t.Errorf("unsealed = %q, want %q", got, "x")
+	}
+}
+
+// The stream repeats the same item across added/done/completed, so sealing must
+// not re-encode a blob this proxy already minted.
+func TestSealDeepSeekReasoningIsIdempotent(t *testing.T) {
+	body := []byte(`{"output":[{"type":"reasoning","encrypted_content":"","summary":[{"type":"summary_text","text":"x"}]}]}`)
+	once := SealDeepSeekReasoning(body)
+	twice := SealDeepSeekReasoning(once)
+	if !bytes.Equal(once, twice) {
+		t.Errorf("second seal changed the body:\n once = %s\ntwice = %s", once, twice)
+	}
+	if got := unsealDeepSeekReasoning(gjson.GetBytes(twice, "output.0.encrypted_content").String()); got != "x" {
+		t.Errorf("unsealed = %q, want %q", got, "x")
 	}
 }
 
