@@ -3336,17 +3336,43 @@
   ],
   "deepseek": [
     {
+      "id": "deepseek-flash",
+      "object": "model",
+      "created": 1789084800,
+      "owned_by": "deepseek",
+      "type": "deepseek",
+      "display_name": "DS/v4.1 Flash",
+      "description": "DeepSeek V4.1 Flash - DeepSeek's fast tier with 1M context and native visual understanding",
+      "context_length": 1048576,
+      "max_completion_tokens": 393216,
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "thinking": {
+        "zero_allowed": false,
+        "levels": [
+          "high",
+          "max"
+        ]
+      }
+    },
+    {
       "id": "deepseek-v4-flash",
       "object": "model",
       "created": 1776988800,
       "owned_by": "deepseek",
       "type": "deepseek",
       "display_name": "DS/v4 Flash",
-      "description": "DeepSeek V4 Flash - DeepSeek's fast V4 tier (284B MoE, 13B activated) with 1M context",
+      "description": "Legacy name for DeepSeek V4 Flash; retired on 2026-09-10 and routed upstream to deepseek-flash (V4.1 Flash), which adds visual understanding",
       "context_length": 1048576,
       "max_completion_tokens": 393216,
       "supportedInputModalities": [
-        "text"
+        "text",
+        "image"
       ],
       "supportedOutputModalities": [
         "text"
@@ -3366,7 +3392,7 @@
       "owned_by": "deepseek",
       "type": "deepseek",
       "display_name": "DS/v4 Flash Vision Exp",
-      "description": "DS/v4 Flash Vision Exp",
+      "description": "Legacy name for the experimental V4 Flash vision model; retired on 2026-09-10 and routed upstream to deepseek-flash (V4.1 Flash), which supports vision natively",
       "context_length": 1048576,
       "max_completion_tokens": 393216,
       "supportedInputModalities": [
@@ -3391,7 +3417,7 @@
       "owned_by": "deepseek",
       "type": "deepseek",
       "display_name": "DS/v4 Pro",
-      "description": "DeepSeek V4 Pro - DeepSeek's flagship V4 tier (1.6T MoE, 49B activated) with 1M context",
+      "description": "DeepSeek V4 Pro - DeepSeek's flagship V4 tier (1.6T MoE, 49B activated) with 1M context; from 2026-09-14 requests are routed to V4.1 Flash and billed at its price",
       "context_length": 1048576,
       "max_completion_tokens": 393216,
       "supportedInputModalities": [

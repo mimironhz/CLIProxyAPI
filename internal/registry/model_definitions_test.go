@@ -28,17 +28,24 @@ func TestModelOverrideHeadersFromEmbeddedModels(t *testing.T) {
 // would offer Codex four levels that behave as two, so the static definitions
 // carry the effective pair.
 func TestDeepSeekModelsExposeOfficialLimits(t *testing.T) {
-	expectedDisplayNames := map[string]string{
-		"deepseek-v4-flash": "DS/v4 Flash",
-		"deepseek-v4-pro":   "DS/v4 Pro",
+	// deepseek-flash is V4.1 Flash and understands images natively. The legacy
+	// deepseek-v4-flash name is routed to it upstream, so it inherits vision;
+	// deepseek-v4-pro stays text-only until its own routing lands on 2026-09-14.
+	expected := map[string]struct {
+		displayName     string
+		inputModalities []string
+	}{
+		"deepseek-flash":    {displayName: "DS/v4.1 Flash", inputModalities: []string{"text", "image"}},
+		"deepseek-v4-flash": {displayName: "DS/v4 Flash", inputModalities: []string{"text", "image"}},
+		"deepseek-v4-pro":   {displayName: "DS/v4 Pro", inputModalities: []string{"text"}},
 	}
-	for modelID, expectedDisplayName := range expectedDisplayNames {
+	for modelID, want := range expected {
 		info := LookupStaticModelInfo(modelID)
 		if info == nil {
 			t.Fatalf("LookupStaticModelInfo(%q) = nil, want model info", modelID)
 		}
-		if info.DisplayName != expectedDisplayName {
-			t.Fatalf("%s display name = %q, want %q", modelID, info.DisplayName, expectedDisplayName)
+		if info.DisplayName != want.displayName {
+			t.Fatalf("%s display name = %q, want %q", modelID, info.DisplayName, want.displayName)
 		}
 		if info.ContextLength != 1048576 {
 			t.Fatalf("%s context length = %d, want 1048576", modelID, info.ContextLength)
@@ -49,7 +56,7 @@ func TestDeepSeekModelsExposeOfficialLimits(t *testing.T) {
 		if info.Thinking == nil {
 			t.Fatalf("%s thinking support = nil, want levels", modelID)
 		}
-		assertStringSlice(t, modelID+" input modalities", info.SupportedInputModalities, []string{"text"})
+		assertStringSlice(t, modelID+" input modalities", info.SupportedInputModalities, want.inputModalities)
 		assertStringSlice(t, modelID+" output modalities", info.SupportedOutputModalities, []string{"text"})
 		if want := []string{"high", "max"}; len(info.Thinking.Levels) != len(want) {
 			t.Fatalf("%s thinking levels = %v, want %v", modelID, info.Thinking.Levels, want)
