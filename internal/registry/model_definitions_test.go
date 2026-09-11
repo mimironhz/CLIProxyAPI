@@ -35,7 +35,7 @@ func TestDeepSeekModelsExposeOfficialLimits(t *testing.T) {
 		displayName     string
 		inputModalities []string
 	}{
-		"deepseek-flash":    {displayName: "DS/v4.1 Flash", inputModalities: []string{"text", "image"}},
+		"deepseek-flash":    {displayName: "DeepSeek Flash", inputModalities: []string{"text", "image"}},
 		"deepseek-v4-flash": {displayName: "DS/v4 Flash", inputModalities: []string{"text", "image"}},
 		"deepseek-v4-pro":   {displayName: "DS/v4 Pro", inputModalities: []string{"text"}},
 	}

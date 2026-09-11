@@ -3341,7 +3341,7 @@
       "created": 1789084800,
       "owned_by": "deepseek",
       "type": "deepseek",
-      "display_name": "DS/v4.1 Flash",
+      "display_name": "DeepSeek Flash",
       "description": "DeepSeek V4.1 Flash - DeepSeek's fast tier with 1M context and native visual understanding",
       "context_length": 1048576,
       "max_completion_tokens": 393216,
