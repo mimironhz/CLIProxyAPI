@@ -8,8 +8,9 @@ import (
 )
 
 // NormalizeCodexAppTaskMessages restores app-delivered task instructions to
-// user messages. Codex records these deliveries as function_call_output items
-// without call_id; they are not replies to model-issued tool calls. Keep the
+// user messages, including scheduled task wakes. Codex records these deliveries
+// as function_call_output items without call_id; they are not replies to
+// model-issued tool calls. Keep the
 // exact text and position without inventing a call or borrowing another ID.
 func NormalizeCodexAppTaskMessages(payload []byte) []byte {
 	input := gjson.GetBytes(payload, "input")
@@ -26,7 +27,7 @@ func NormalizeCodexAppTaskMessages(payload []byte) []byte {
 			continue
 		}
 		name := item.Get("name").String()
-		if name != "create_thread" && name != "send_message_to_thread" {
+		if name != "create_thread" && name != "send_message_to_thread" && name != "automation_update" {
 			continue
 		}
 		output := item.Get("output")
