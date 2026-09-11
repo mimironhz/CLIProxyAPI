@@ -1005,6 +1005,7 @@ func prepareDeepSeekCodexInput(baseURL string, payload []byte) []byte {
 	}
 	payload = deepSeekExpandCompactionInputItems(payload)
 	payload = helps.NormalizeCodexDelegationMessageSchema(payload)
+	payload = helps.NormalizeCodexAppTaskMessages(payload)
 	return helps.NormalizeCodexAgentMessageInput(payload)
 }
 
