@@ -148,7 +148,7 @@ release_lock() {
 }
 
 acquire_lock() {
-  mkdir "$lock_dir" 2>/dev/null || fail "Cutover lock exists; inspect it instead of assuming it is stale."
+  mkdir "$lock_dir" 2>/dev/null || { fail "Cutover lock exists; inspect it instead of assuming it is stale."; return 1; }
   print -r -- "$$" >"$lock_dir/pid" || { rmdir "$lock_dir" 2>/dev/null || true; return 1; }
   chmod 600 "$lock_dir/pid"
   lock_held=true
