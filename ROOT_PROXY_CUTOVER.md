@@ -27,7 +27,7 @@ For model-context changes, Root loads the configuration at startup. YAML validat
 
 ## Helper checks before execution
 
-The 2026-09-07 activation exposed two defects in the repository helper. They were repaired in the reviewed external copy used for that activation, **not in `scripts/root-relay-cutover.zsh`**. Until the repository implementation is corrected, do not blindly copy or execute it for another cutover; inspect these conditions and use a reviewed corrected copy. Do not rerun an old preparation script that overwrites the corrected helper.
+The 2026-09-07 activation exposed two defects, initially repaired in an external copy. Both corrections are now in `scripts/root-relay-cutover.zsh`. Verify these conditions before execution, especially when using an older checkout or external copy. Do not rerun an old preparation script that overwrites the corrected helper.
 
 - A failed `mkdir "$lock_dir"` must return immediately from `acquire_lock`. Logging an error alone is insufficient when the caller continues without `errexit`; it must not overwrite another operator's lock PID or remove that lock on exit.
 - Replace the entire `ProgramArguments` array, not indexed elements with `plutil -replace ProgramArguments.0` or `.2`. On the activation host, indexed replacement inserted elements and produced duplicate arguments. Construct the full JSON array and pass it to `plutil -replace ProgramArguments -json`. Root requires exactly `[binary, "--config", config]`; Relay requires exactly `[binary, "--config", config, "--local-model"]`.
@@ -106,7 +106,7 @@ Migration preserves exact live config bytes even when an old whole-bundle manife
 
 Resolve all four bundle identities from live jobs and recorded rollback evidence before execution. Migration restarts **both** services, even when the subsequent change is Root-only. Rollback manifests must pass validation. If an old paired rollback bundle fails because of an unrelated service file, do not rewrite its checksum or ignore the failure. Prepare and review a new service-specific rollback bundle from verified files. An exact snapshot of the current service is an acceptable migration baseline when explicitly recorded as such; it is not evidence that an older rollback version was validated.
 
-Run this only from an external Terminal when Root has no active clients. Set `HELPER` to the reviewed implementation that passes the helper checks above; the path below is a placeholder, not an instruction to use the uncorrected repository copy.
+Run this only from an external Terminal when Root has no active clients. Set `HELPER` to the reviewed implementation that passes the helper checks above; the path below is a placeholder.
 
 ```bash
 HELPER=/absolute/path/to/reviewed/root-relay-cutover.zsh
