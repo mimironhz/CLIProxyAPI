@@ -9,13 +9,13 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	internalsignature "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
-	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	internalsignature "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
+	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	"github.com/tidwall/gjson"
 	"google.golang.org/protobuf/encoding/protowire"
 )
@@ -473,9 +473,13 @@ func TestGeminiVertexExecutorCountTokens_GeminiPayload_SanitizesClaudeCAISSignat
 
 	req, opts := geminiRequestWithThinkingSignature(testClaudeCAISSample)
 
-	_, err := executor.CountTokens(context.Background(), auth, req, opts)
+	ctx := cliproxyexecutor.WithUpstreamAttemptTracker(context.Background())
+	_, err := executor.CountTokens(ctx, auth, req, opts)
 	if err != nil {
 		t.Fatalf("CountTokens() error = %v", err)
+	}
+	if !cliproxyexecutor.UpstreamAttempted(ctx) {
+		t.Fatal("CountTokens() did not mark the HTTP request as an upstream attempt")
 	}
 
 	if bytes.Contains(upstreamBody, []byte(testClaudeCAISSample)) {

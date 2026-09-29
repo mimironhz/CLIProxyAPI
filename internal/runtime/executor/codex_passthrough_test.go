@@ -9,10 +9,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 // fakeOAuthToken builds a JWT-shaped bearer, which is the shape ChatGPT OAuth
@@ -108,7 +108,7 @@ func TestApplyCodexHeadersUsesPassthroughBearer(t *testing.T) {
 		t.Fatalf("Originator = %q, want %q", got, codexOriginator)
 	}
 
-	websocketHeaders := applyCodexWebsocketHeaders(context.Background(), http.Header{}, auth, "stored-token", cfg, ginHeaders)
+	websocketHeaders := applyCodexWebsocketHeaders(context.Background(), http.Header{}, auth, "stored-token", cfg, false, ginHeaders)
 	if got := websocketHeaders.Get("Authorization"); got != "Bearer "+clientToken {
 		t.Fatalf("websocket Authorization = %q, want the client bearer", got)
 	}

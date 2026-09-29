@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/quotawindow"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/quotawindow"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
 
 func TestShutdownFlushesQuotaWindowsWhenUsageDrainFails(t *testing.T) {

@@ -7,12 +7,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
-	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
+	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
 type noopUsagePlugin struct{}
@@ -103,6 +103,9 @@ func TestHandlerPluginExecutorPublishesUsageNonStreamOpenAI(t *testing.T) {
 	if record.Provider != targetPluginID {
 		t.Errorf("record.Provider = %q, want %q", record.Provider, targetPluginID)
 	}
+	if record.Stream {
+		t.Errorf("record.Stream = true, want false")
+	}
 	if record.Detail.InputTokens != 12 || record.Detail.OutputTokens != 34 || record.Detail.TotalTokens != 46 {
 		t.Errorf("record.Detail = %+v, want prompt=12 completion=34 total=46", record.Detail)
 	}
@@ -144,6 +147,9 @@ func TestHandlerPluginExecutorPublishesUsageStreamOpenAI(t *testing.T) {
 	record := plugin.waitRecord(t)
 	if record.Provider != targetPluginID {
 		t.Errorf("record.Provider = %q, want %q", record.Provider, targetPluginID)
+	}
+	if !record.Stream {
+		t.Errorf("record.Stream = false, want true")
 	}
 	if record.Detail.InputTokens != 15 || record.Detail.OutputTokens != 25 || record.Detail.TotalTokens != 40 {
 		t.Errorf("record.Detail = %+v, want prompt=15 completion=25 total=40", record.Detail)

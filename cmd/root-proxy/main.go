@@ -15,7 +15,7 @@ import (
 	"syscall"
 
 	"github.com/joho/godotenv"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/rootproxy"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/rootproxy"
 	log "github.com/sirupsen/logrus"
 )
 

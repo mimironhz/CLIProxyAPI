@@ -15,7 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	openaihandler "github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers/openai"
+	openaihandler "github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers/openai"
 	log "github.com/sirupsen/logrus"
 )
 

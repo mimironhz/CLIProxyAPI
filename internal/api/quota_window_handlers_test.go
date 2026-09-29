@@ -3,7 +3,7 @@ package api
 import (
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/quotawindow"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/quotawindow"
 )
 
 func TestFilterQuotaModelStatusesNarrowsToRequestedModels(t *testing.T) {

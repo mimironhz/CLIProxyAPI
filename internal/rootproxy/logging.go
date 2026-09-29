@@ -22,7 +22,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	sharedlogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	sharedlogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
@@ -373,13 +373,22 @@ func rootOwnsLogFilename(name string) bool {
 	return rootRotatedLogName.MatchString(name)
 }
 
+func rootRequestID() string {
+	requestID, errGenerate := sharedlogging.GenerateRequestID()
+	if errGenerate != nil {
+		log.WithError(errGenerate).Error("root proxy failed to generate request ID")
+		return ""
+	}
+	return requestID
+}
+
 func (m *rootLogManager) accessMiddleware(next http.Handler) http.Handler {
 	if m == nil || m.accessWriter == nil {
 		return next
 	}
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		started := time.Now()
-		requestID := sharedlogging.GenerateRequestID()
+		requestID := rootRequestID()
 		metadata := &accessMetadata{transport: "http"}
 		ctx := sharedlogging.WithRequestID(request.Context(), requestID)
 		ctx = context.WithValue(ctx, accessMetadataKey{}, metadata)
@@ -637,7 +646,7 @@ func (m *rootLogManager) beginStockExchange(ctx context.Context, selected route,
 	}
 	requestID := sharedlogging.GetRequestID(ctx)
 	if requestID == "" {
-		requestID = sharedlogging.GenerateRequestID()
+		requestID = rootRequestID()
 	}
 	ordinal := m.exchangeCounter.Add(1)
 	exchange := &stockExchange{
