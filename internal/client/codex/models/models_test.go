@@ -896,7 +896,7 @@ func TestCodexClientModelsResponse_UnrelatedProviderCannotWidenSearchTool(t *tes
 		},
 	}
 
-	resp := BuildResponseForClient(availableModels, modelRegistry.GetModelProviders, false, "0.153.4")
+	resp := BuildResponseForClientWithToolCapabilities(availableModels, modelRegistry.GetModelProviders, nil, func(string) bool { return true }, false, "0.153.4")
 	models, ok := resp["models"].([]map[string]any)
 	if !ok || len(models) != 1 {
 		t.Fatalf("models = %#v, want one model", resp["models"])
@@ -920,7 +920,9 @@ func TestCodexClientModelsResponse_UnrelatedProviderCannotWidenSearchTool(t *tes
 	if got, _ := entry["prefer_websockets"].(bool); got {
 		t.Errorf("prefer_websockets = %v, want false for non-Codex provider", got)
 	}
-	assertCodexNullableFieldCleared(t, entry, "apply_patch_tool_type")
+	if value, present := entry["apply_patch_tool_type"]; !present || value != "freeform" {
+		t.Errorf("apply_patch_tool_type = %#v (present %v), want freeform for bridged execution", value, present)
+	}
 	if tiers, okTiers := entry["service_tiers"].([]any); !okTiers || len(tiers) != 0 {
 		t.Errorf("service_tiers = %#v, want empty array for non-Codex provider", entry["service_tiers"])
 	}
@@ -993,7 +995,7 @@ func TestCodexClientModelsResponse_MixedProvidersRestrictProtocolCapabilities(t 
 				{"id": aliasName},
 			}
 
-			resp := BuildResponseForClient(availableModels, modelRegistry.GetModelProviders, false, "0.153.4")
+			resp := BuildResponseForClientWithToolCapabilities(availableModels, modelRegistry.GetModelProviders, nil, func(string) bool { return true }, false, "0.153.4")
 			models, ok := resp["models"].([]map[string]any)
 			if !ok || len(models) != 1 {
 				t.Fatalf("models = %#v, want one model", resp["models"])
@@ -1014,7 +1016,9 @@ func TestCodexClientModelsResponse_MixedProvidersRestrictProtocolCapabilities(t 
 			if got, _ := entry["prefer_websockets"].(bool); got {
 				t.Errorf("prefer_websockets = %v, want false for mixed provider", got)
 			}
-			assertCodexNullableFieldCleared(t, entry, "apply_patch_tool_type")
+			if value, present := entry["apply_patch_tool_type"]; !present || value != "freeform" {
+				t.Errorf("apply_patch_tool_type = %#v (present %v), want freeform for bridged execution", value, present)
+			}
 			if tiers, okTiers := entry["service_tiers"].([]any); !okTiers || len(tiers) != 0 {
 				t.Errorf("service_tiers = %#v, want empty array for mixed provider", entry["service_tiers"])
 			}

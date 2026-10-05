@@ -45,6 +45,7 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 	reporter.SetTranslatedReasoningEffort(prepared.body, e.Identifier())
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
+	prepared.body = prepared.finalizePayload(prepared.body)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(prepared.body))
 	if err != nil {
 		return resp, err
@@ -93,6 +94,7 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 		}
 		eventData := xaiNormalizeReasoningSummaryData(bytes.TrimSpace(line[len(xaiDataTag):]))
 		eventData = restoreXAIViewImageToolAlias(eventData, prepared.viewImageToolAlias)
+		prepared.applyPatch.RememberDispatcherEvent(eventData)
 		eventData = namespaceRestorer.restore(eventData)
 		eventData = normalizeCodexWebsocketCompletion(eventData)
 		eventData = restoreXAIToolSearchCalls(eventData)
@@ -103,55 +105,80 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 		if len(eventData) == 0 {
 			continue
 		}
-		reporter.ObserveResponseModel(eventData)
-		eventType := gjson.GetBytes(eventData, "type").String()
-		switch eventType {
-		case "response.output_item.done":
-			xaiCollectOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
-		case "response.completed", "response.incomplete", "response.done":
-			completedData := xaiPatchCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
-			completedData = xaiNormalizeReasoningSummaryData(completedData)
-			completedData = normalizeCodexWebsocketCompletion(completedData)
-			normalizedEventType := gjson.GetBytes(completedData, "type").String()
-			if normalizedEventType == "response.completed" {
-				if completionErr, reasoningOnly := xaiReasoningOnlyCompletionError(completedData); reasoningOnly {
-					helps.RecordAPIResponseError(ctx, e.cfg, completionErr)
-					return resp, completionErr
+		events, errBridge := prepared.applyPatch.Transform(eventData)
+		if errBridge != nil {
+			errBridge = statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+			return resp, errBridge
+		}
+		for _, eventData := range events {
+			reporter.ObserveResponseModel(eventData)
+			eventType := gjson.GetBytes(eventData, "type").String()
+			switch eventType {
+			case "response.output_item.done":
+				xaiCollectOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
+			case "response.completed", "response.incomplete", "response.done":
+				completedData := xaiPatchCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
+				completedData = xaiNormalizeReasoningSummaryData(completedData)
+				completedData = normalizeCodexWebsocketCompletion(completedData)
+				normalizedEventType := gjson.GetBytes(completedData, "type").String()
+				if normalizedEventType == "response.completed" || eventType == "response.done" {
+					if completionErr, reasoningOnly := xaiReasoningOnlyCompletionError(completedData); reasoningOnly {
+						helps.RecordAPIResponseError(ctx, e.cfg, completionErr)
+						return resp, completionErr
+					}
+					// A truncated turn carries no replayable terminal state, so only a
+					// completed response may refresh the reasoning replay cache.
+					if normalizedEventType == "response.completed" {
+						cacheXAIReasoningReplayFromCompleted(ctx, prepared.replayScope, completedData)
+					}
 				}
-				// A truncated turn carries no replayable terminal state, so only a
-				// completed response may refresh the reasoning replay cache.
-				cacheXAIReasoningReplayFromCompleted(ctx, prepared.replayScope, completedData)
+				var param any
+				out := sdktranslator.TranslateNonStream(ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, completedData, &param)
+				if helps.ApplyPatchTranslationError(param) != nil || len(out) == 0 {
+					return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+				}
+				if detail, ok := helps.ParseCodexUsage(eventData); ok {
+					reporter.Publish(ctx, detail)
+				}
+				if prepared.responseFormat == sdktranslator.FormatOpenAIResponse {
+					out = helps.EnsureResponsesUsageDetails(out)
+				}
+				return cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}, nil
 			}
-			if detail, ok := helps.ParseCodexUsage(completedData); ok {
-				reporter.Publish(ctx, detail)
-			}
-			var param any
-			out := sdktranslator.TranslateNonStream(ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, completedData, &param)
-			if prepared.responseFormat == sdktranslator.FormatOpenAIResponse {
-				out = helps.EnsureResponsesUsageDetails(out)
-			}
-			return cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}, nil
 		}
 	}
 
-	return resp, statusErr{code: http.StatusRequestTimeout, msg: "xai stream error: stream disconnected before a terminal response event"}
+	if errFinish := prepared.applyPatch.Finish(); errFinish != nil {
+		return resp, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+	}
+	return resp, statusErr{code: http.StatusRequestTimeout, msg: "xai stream error: stream disconnected before response.completed or response.incomplete"}
 }
 
 func (e *XAIExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
-	prepared, data, headers, errCompact := e.executeCompactRequest(ctx, auth, req, opts)
-	if errCompact != nil {
-		return resp, errCompact
+	prepared, data, headers, reporter, errCompactRequest := e.executeCompactRequest(ctx, auth, req, opts)
+	if errCompactRequest != nil {
+		return resp, errCompactRequest
 	}
 
+	defer reporter.TrackFailure(ctx, &err)
+	converted, errBridge := prepared.applyPatch.Bridge.TransformNonStream(data)
+	if errBridge != nil {
+		errBridge = statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+		return resp, errBridge
+	}
 	var param any
-	out := sdktranslator.TranslateNonStream(ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, data, &param)
+	out := sdktranslator.TranslateNonStream(ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, converted, &param)
+	if helps.ApplyPatchTranslationError(param) != nil || len(out) == 0 {
+		return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+	}
+	reporter.Publish(ctx, helps.ParseOpenAIUsage(data))
 	if prepared.responseFormat == sdktranslator.FormatOpenAIResponse {
 		out = helps.EnsureResponsesUsageDetails(out)
 	}
 	return cliproxyexecutor.Response{Payload: out, Headers: headers}, nil
 }
 
-func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*xaiPreparedRequest, []byte, http.Header, error) {
+func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*xaiPreparedRequest, []byte, http.Header, *helps.UsageReporter, error) {
 	requestKind := "websocket_trigger"
 	if opts.Alt == "responses/compact" {
 		requestKind = "responses_compact"
@@ -164,7 +191,7 @@ func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxya
 
 	prepared, err := e.prepareResponsesRequestTo(ctx, req, opts, false, sdktranslator.FormatOpenAIResponse)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	prepared.body, _ = sjson.DeleteBytes(prepared.body, "stream")
 	prepared.body, _ = sjson.DeleteBytes(prepared.body, "tools")
@@ -182,7 +209,7 @@ func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxya
 	}
 	estimatedTokens, err := xaiPreparedCompactTokenCount(prepared.body)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	contextLimit := xaiModelContextLimit(prepared.baseModel)
 	media := xaiInlineMediaInPreparedBody(prepared.body)
@@ -191,55 +218,59 @@ func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxya
 		return e.executeCompactMediaFallback(ctx, auth, prepared, requestKind, opts.Headers)
 	}
 
-	data, headers, status, err := e.executeNativeCompactAttempt(ctx, auth, prepared, prepared.body, requestKind, "upstream_request", prepared.sessionID, opts.Headers)
+	data, headers, reporter, status, err := e.executeNativeCompactAttempt(ctx, auth, prepared, prepared.body, requestKind, "upstream_request", prepared.sessionID, opts.Headers)
 	if err != nil {
 		if media.count > 0 && xaiIsExactCompactContextLengthError(status, data) {
 			xaiLogCompactionFallback(ctx, "native_context_limit", estimatedTokens, contextLimit, media)
 			return e.executeCompactMediaFallback(ctx, auth, prepared, requestKind, opts.Headers)
 		}
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
-	if _, _, errValidate := validateXAINativeCompactionResponse(data); errValidate != nil {
-		return nil, nil, nil, errValidate
+	if requestKind != "responses_compact" {
+		if _, _, errValidate := validateXAINativeCompactionResponse(data); errValidate != nil {
+			return nil, nil, nil, nil, errValidate
+		}
 	}
 	clearXAIReasoningReplayAfterCompaction(ctx, prepared.replayScope)
-	return prepared, data, headers, nil
+	return prepared, data, headers, reporter, nil
 }
 
-func (e *XAIExecutor) executeCompactMediaFallback(ctx context.Context, auth *cliproxyauth.Auth, prepared *xaiPreparedRequest, requestKind string, clientHeaders http.Header) (*xaiPreparedRequest, []byte, http.Header, error) {
+func (e *XAIExecutor) executeCompactMediaFallback(ctx context.Context, auth *cliproxyauth.Auth, prepared *xaiPreparedRequest, requestKind string, clientHeaders http.Header) (*xaiPreparedRequest, []byte, http.Header, *helps.UsageReporter, error) {
 	fallbackSessionID := uuid.NewString()
 	summaryBody := xaiBuildCompactionSummaryBody(prepared.body, fallbackSessionID)
 	summary, err := e.executeXAICompactionSummary(ctx, auth, prepared, summaryBody, fallbackSessionID, clientHeaders)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	finalBody, err := xaiBuildTextOnlyCompactBody(prepared.baseModel, summary)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("xai compact fallback: build text-only request: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("xai compact fallback: build text-only request: %w", err)
 	}
-	data, headers, _, err := e.executeNativeCompactAttempt(ctx, auth, prepared, finalBody, requestKind, "fallback_native_request", fallbackSessionID, clientHeaders)
+	data, headers, reporter, _, err := e.executeNativeCompactAttempt(ctx, auth, prepared, finalBody, requestKind, "fallback_native_request", fallbackSessionID, clientHeaders)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	if _, _, errValidate := validateXAINativeCompactionResponse(data); errValidate != nil {
-		return nil, nil, nil, errValidate
+		return nil, nil, nil, nil, errValidate
 	}
 	clearXAIReasoningReplayAfterCompaction(ctx, prepared.replayScope)
-	return prepared, data, headers, nil
+	return prepared, data, headers, reporter, nil
 }
 
-func (e *XAIExecutor) executeNativeCompactAttempt(ctx context.Context, auth *cliproxyauth.Auth, prepared *xaiPreparedRequest, body []byte, requestKind, requestPhase, sessionID string, clientHeaders http.Header) (data []byte, headers http.Header, status int, err error) {
+func (e *XAIExecutor) executeNativeCompactAttempt(ctx context.Context, auth *cliproxyauth.Auth, prepared *xaiPreparedRequest, body []byte, requestKind, requestPhase, sessionID string, clientHeaders http.Header) (data []byte, headers http.Header, reporter *helps.UsageReporter, status int, err error) {
 	ctx, err = cliproxyauth.QuotaWindowContextForUpstreamAttempt(ctx)
 	if err != nil {
-		return nil, nil, 0, err
+		return nil, nil, nil, 0, err
 	}
 	token, _ := xaiCreds(auth)
 	baseURL := xaiCompactBaseURL(auth)
 	logXAIResolvedBaseURL(ctx, baseURL)
-	reporter := helps.NewExecutorUsageReporter(ctx, e, prepared.baseModel, auth)
-	defer reporter.TrackFailure(ctx, &err)
-	reporter.SetTranslatedReasoningEffort(body, e.Identifier())
+	usageReporter := helps.NewExecutorUsageReporter(ctx, e, prepared.baseModel, auth)
+	reporter = usageReporter
+	defer usageReporter.TrackFailure(ctx, &err)
+	usageReporter.SetTranslatedReasoningEffort(body, e.Identifier())
 
+	body = prepared.finalizePayload(body)
 	requestURL := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
 	helps.LogWithRequestID(ctx).WithFields(helps.CompactionDiagnosticFields(body)).WithFields(log.Fields{
 		"compaction_provider": "xai",
@@ -249,7 +280,7 @@ func (e *XAIExecutor) executeNativeCompactAttempt(ctx context.Context, auth *cli
 	}).Info("compaction capture")
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, bytes.NewReader(body))
 	if err != nil {
-		return nil, nil, 0, err
+		return nil, nil, nil, 0, err
 	}
 	// Official API / custom compact endpoints use standard API headers, not CLI
 	// chat-proxy identity headers (which applyXAIChatHeaders may still attach for OAuth chat).
@@ -267,7 +298,7 @@ func (e *XAIExecutor) executeNativeCompactAttempt(ctx context.Context, auth *cli
 			"request_kind":        requestKind,
 			"upstream_url":        requestURL,
 		}).Warn("compaction capture")
-		return nil, nil, 0, err
+		return nil, nil, nil, 0, err
 	}
 	defer func() {
 		if errClose := httpResp.Body.Close(); errClose != nil {
@@ -286,7 +317,7 @@ func (e *XAIExecutor) executeNativeCompactAttempt(ctx context.Context, auth *cli
 			"request_kind":        requestKind,
 			"upstream_url":        requestURL,
 		}).Warn("compaction capture")
-		return nil, nil, httpResp.StatusCode, err
+		return nil, nil, nil, httpResp.StatusCode, err
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 	responseFields := helps.CompactionDiagnosticFields(data)
@@ -303,25 +334,26 @@ func (e *XAIExecutor) executeNativeCompactAttempt(ctx context.Context, auth *cli
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
 		err = xaiStatusErr(httpResp.StatusCode, data)
-		return data, httpResp.Header.Clone(), httpResp.StatusCode, err
+		return data, httpResp.Header.Clone(), usageReporter, httpResp.StatusCode, err
 	}
-	if _, _, errValidate := validateXAINativeCompactionResponse(data); errValidate != nil {
-		err = errValidate
-		return data, httpResp.Header.Clone(), httpResp.StatusCode, err
+	if requestKind != "responses_compact" {
+		if _, _, errValidate := validateXAINativeCompactionResponse(data); errValidate != nil {
+			err = errValidate
+			return data, httpResp.Header.Clone(), usageReporter, httpResp.StatusCode, err
+		}
 	}
 
-	reporter.ObserveResponseModel(data)
-	reporter.Publish(ctx, helps.ParseOpenAIUsage(data))
-	reporter.EnsurePublished(ctx)
-	return data, httpResp.Header.Clone(), httpResp.StatusCode, nil
+	usageReporter.ObserveResponseModel(data)
+	return data, httpResp.Header.Clone(), usageReporter, httpResp.StatusCode, nil
 }
 
 func (e *XAIExecutor) executeCompactionTriggerStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
-	prepared, data, headers, err := e.executeCompactRequest(ctx, auth, req, opts)
-	if err != nil {
-		return nil, err
+	prepared, data, headers, reporter, errCompactRequest := e.executeCompactRequest(ctx, auth, req, opts)
+	if errCompactRequest != nil {
+		return nil, errCompactRequest
 	}
 
+	reporter.Publish(ctx, helps.ParseOpenAIUsage(data))
 	headers = headers.Clone()
 	if headers == nil {
 		headers = make(http.Header)
