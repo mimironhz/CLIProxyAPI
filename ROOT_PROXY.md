@@ -112,9 +112,14 @@ Before the first successful merge Root answers from a cold-start catalog
 synthesized from the `stock-models` pin plus the discovered Relay set, using the
 same metadata templates as `static` mode. Pinning `stock-models` under `auto` is
 therefore recommended: without it the first poll advertises only Relay models
-until the background merge completes. Root returns HTTP `502` only when there is
-no cache, no stock pin and no discovered Relay model — nothing it could
-truthfully advertise.
+until the background merge completes. A stock pin that the official catalog
+omits stays advertised after the merge too: Root synthesizes it from those
+templates and appends it after the official entries, before the Relay half, so
+the first upstream model remains Desktop's default. When ChatGPT later returns
+that slug, the upstream entry replaces the synthesis and `routing.model-context`
+still overrides its window. Root returns HTTP `502` only when there is no cache,
+no stock pin and no discovered Relay model — nothing it could truthfully
+advertise.
 
 A failed *Relay* refresh keeps the last known Relay set, because emptying it
 would silently reroute every Relay model to the official arm.
@@ -215,9 +220,55 @@ synthesized Relay entries, and a Relay upstream has no such tier. Under
 route decision and the tier is applied only when the turn actually routes
 official.
 
-Desktop's own tier indicator still reflects what the user selected — Root shapes
-the request without rewriting the advertised catalog, so a forced turn can read
-as "Standard" client-side while going out as `priority`.
+Desktop's own tier indicator still reflects what the user selected — `fast-models`
+does not rewrite that selection in the advertised catalog, so a forced turn can
+read as "Standard" client-side while going out as `priority`. A client config
+pinned to `service_tier = "default"` keeps that indicator on Standard for every
+model. Codex only consults a model's `default_service_tier` when the user has
+not pinned a tier and Fast mode is enabled.
+
+`routing.default-service-tier` sets that catalog field for one slug:
+
+```yaml
+routing:
+  default-service-tier:
+    gpt-6-luna: "priority"
+```
+
+Put the same slug in `fast-models` when the turn must be Fast even though the
+client is pinned to Standard.
+
+`routing.model-aliases` advertises an extra slug that routes to a stock model.
+Selecting the alias is the Fast choice; the target model keeps the tier the
+client selected:
+
+```yaml
+routing:
+  model-aliases:
+    - slug: "gpt-6.1-sol-fast"
+      model: "gpt-6.1-sol"
+      service-tier: "priority"
+```
+
+The alias is cloned from the target and inserted immediately after it, so it
+does not become Desktop's default. It keeps the target's context window and
+compatibility hash, and it does not advertise a nested speed toggle.
+Turn-creating requests rewrite `model` to the target and set
+`service_tier: "priority"`. `/v1/responses/compact` rewrites the model and
+leaves the tier alone. The target must be listed in `stock-models`. Relay
+identifiers are rejected, and a Relay catalog entry that reuses the alias slug
+is omitted.
+
+`routing.display-names` replaces `display_name` for an advertised slug,
+including Relay models, after Relay metadata sanitization:
+
+```yaml
+routing:
+  display-names:
+    gpt-6.1-sol-fast: "GPT-6.1 Sol(Fast)"
+    grok-4.7: "Grok 4.7"
+    grok-4.7-build-fast: "Grok 4.7(Fast)"
+```
 
 ## Multi-agent v2 advertisement
 

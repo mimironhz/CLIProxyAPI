@@ -373,6 +373,86 @@ routing:
     "grok 4.6":
       context-window: 1000000
 `,
+		"model alias target outside stock-models": `
+routing:
+  stock-models: ["gpt-stock"]
+  relay-models: ["relay-model"]
+  model-aliases:
+    - slug: "gpt-stock/fast"
+      model: "gpt-missing"
+      service-tier: "priority"
+`,
+		"model alias of a relay model": `
+routing:
+  stock-models: ["gpt-stock"]
+  relay-models: ["relay-model"]
+  model-aliases:
+    - slug: "relay-model/fast"
+      model: "relay-model"
+      service-tier: "priority"
+`,
+		"model alias slug collides with stock": `
+routing:
+  stock-models: ["gpt-stock"]
+  relay-models: ["relay-model"]
+  model-aliases:
+    - slug: "gpt-stock"
+      model: "gpt-stock"
+      service-tier: "priority"
+`,
+		"model alias service tier must be priority": `
+routing:
+  stock-models: ["gpt-stock"]
+  relay-models: ["relay-model"]
+  model-aliases:
+    - slug: "gpt-stock/fast"
+      model: "gpt-stock"
+      service-tier: "fast"
+`,
+		"duplicate model alias": `
+routing:
+  stock-models: ["gpt-stock"]
+  relay-models: ["relay-model"]
+  model-aliases:
+    - slug: "gpt-stock/fast"
+      model: "gpt-stock"
+      service-tier: "priority"
+    - slug: "gpt-stock/fast"
+      model: "gpt-stock"
+      service-tier: "priority"
+`,
+		"display name with surrounding whitespace": `
+routing:
+  stock-models: ["gpt-stock"]
+  relay-models: ["relay-model"]
+  display-names:
+    gpt-stock: " GPT "
+`,
+		"default service tier on a relay model": `
+routing:
+  stock-models: ["gpt-stock"]
+  relay-models: ["relay-model"]
+  default-service-tier:
+    relay-model: "priority"
+`,
+		"default service tier must be priority": `
+routing:
+  stock-models: ["gpt-stock"]
+  relay-models: ["relay-model"]
+  default-service-tier:
+    gpt-stock: "fast"
+`,
+		"default service tier on a model alias": `
+routing:
+  stock-models: ["gpt-stock"]
+  relay-models: ["relay-model"]
+  model-aliases:
+    - slug: "gpt-stock/fast"
+      model: "gpt-stock"
+      service-tier: "priority"
+  default-service-tier:
+    gpt-stock/fast: "priority"
+`,
 		"zero message limit": `
 routing:
   stock-models: ["gpt-stock"]
@@ -538,6 +618,48 @@ routing:
 `)
 	if _, errAuto := loadConfig(autoPath, staticEnvironment("relay-secret")); errAuto != nil {
 		t.Fatalf("loadConfig() under auto discovery error = %v", errAuto)
+	}
+}
+
+func TestLoadConfigResolvesModelAliasesAndDisplayNames(t *testing.T) {
+	path := writeRootConfig(t, `
+routing:
+  discovery: "auto"
+  stock-models: ["gpt-6.1-sol", "gpt-6-luna"]
+  fast-models: ["gpt-5.6-luna", "gpt-6-luna"]
+  model-aliases:
+    - slug: "gpt-6.1-sol-fast"
+      model: "gpt-6.1-sol"
+      service-tier: "priority"
+  display-names:
+    gpt-6.1-sol-fast: "GPT-6.1 Sol(Fast)"
+    grok-4.7: "Grok 4.7"
+    grok-4.7-build-fast: "Grok 4.7(Fast)"
+  default-service-tier:
+    gpt-6-luna: "priority"
+`)
+	config, errLoad := loadConfig(path, staticEnvironment("relay-secret"))
+	if errLoad != nil {
+		t.Fatalf("loadConfig() error = %v", errLoad)
+	}
+	alias, ok := config.modelAliases["gpt-6.1-sol-fast"]
+	if !ok || alias.model != "gpt-6.1-sol" || alias.serviceTier != officialFastServiceTier {
+		t.Fatalf("alias = %+v, present %v", alias, ok)
+	}
+	if len(config.modelAliasOrder) != 1 || config.modelAliasOrder[0].slug != "gpt-6.1-sol-fast" {
+		t.Fatalf("alias order = %+v", config.modelAliasOrder)
+	}
+	if config.displayNames["grok-4.7-build-fast"] != "Grok 4.7(Fast)" {
+		t.Fatalf("display names = %#v", config.displayNames)
+	}
+	if config.defaultServiceTier["gpt-6-luna"] != officialFastServiceTier {
+		t.Fatalf("default service tier = %#v", config.defaultServiceTier)
+	}
+	if _, fast := config.httpBridgeOptions().fastModels["gpt-6-luna"]; !fast {
+		t.Fatal("gpt-6-luna was not forced onto the Fast tier")
+	}
+	if got := config.bridgeOptions().modelAliases["gpt-6.1-sol-fast"].model; got != "gpt-6.1-sol" {
+		t.Fatalf("websocket alias target = %q", got)
 	}
 }
 

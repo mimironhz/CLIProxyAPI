@@ -31,6 +31,7 @@ type bridgeOptions struct {
 	relayModels      []string
 	relayProviders   map[string]string
 	fastModels       map[string]struct{}
+	modelAliases     map[string]modelAlias
 	relayAgents      bool
 	resolver         *routeResolver
 	discovery        *relayDiscovery
@@ -51,6 +52,7 @@ type websocketBridge struct {
 	relayURL          string
 	relayAPIKey       string
 	fastModels        map[string]struct{}
+	modelAliases      map[string]modelAlias
 	relayAgents       bool
 	models            *modelsHandler
 	maxMessage        int64
@@ -216,6 +218,7 @@ func newWebsocketBridge(options bridgeOptions) (*websocketBridge, error) {
 		relayURL:          options.relayURL,
 		relayAPIKey:       strings.TrimSpace(options.relayAPIKey),
 		fastModels:        options.fastModels,
+		modelAliases:      options.modelAliases,
 		relayAgents:       options.relayAgents,
 		maxMessage:        options.maxMessageBytes,
 		maxPending:        options.maxPendingRoutes,
@@ -331,7 +334,8 @@ func (b *websocketBridge) ServeHTTP(response http.ResponseWriter, request *http.
 	// Without this a Relay that was unreachable at startup would leave every
 	// Relay model looking like an official one.
 	b.discovery.ensure(request.Context())
-	selected, errRoute := b.routes.classify(model)
+	upstreamModel, _ := resolveModelAlias(model, b.modelAliases)
+	selected, errRoute := b.routes.classify(upstreamModel)
 	if errRoute != nil {
 		setAccessOutcome(request.Context(), "rejected", "model_not_routable", websocket.ClosePolicyViolation)
 		session.terminate(websocket.ClosePolicyViolation, "model is not routable", true, false)
@@ -350,7 +354,7 @@ func (b *websocketBridge) ServeHTTP(response http.ResponseWriter, request *http.
 	}
 	selectedRelayProvider := relayProvider("")
 	if selected == routeRelay {
-		selectedRelayProvider = b.routes.relayProvider(model)
+		selectedRelayProvider = b.routes.relayProvider(upstreamModel)
 		if errState := validateRelayPayloadState(firstPayload, selectedRelayProvider, false); errState != nil {
 			if b.writeNonPortableStateError(session) {
 				setAccessOutcome(request.Context(), "rejected", "relay_request_state_not_portable", websocket.CloseNormalClosure)
@@ -364,6 +368,9 @@ func (b *websocketBridge) ServeHTTP(response http.ResponseWriter, request *http.
 	if selected == routeOfficial {
 		upstreamPayload, restoreDelegationNamespace = normalizeRelayMultiAgentParentPayload(firstPayload, b.relayAgents, b.models)
 		upstreamPayload, errEnvelope = prepareOfficialPayload(upstreamPayload)
+		if errEnvelope == nil {
+			upstreamPayload, errEnvelope = rewriteModelAlias(upstreamPayload, model, b.modelAliases, true)
+		}
 		if errEnvelope == nil {
 			// The first message is always a response.create, so it is a turn.
 			upstreamPayload, errEnvelope = applyOfficialFastServiceTier(upstreamPayload, model, b.fastModels)
@@ -643,14 +650,15 @@ func (b *websocketBridge) runController(
 			nextModel := state.model
 			if envelope.hasModel {
 				var errRoute error
-				nextRoute, errRoute = b.routes.classify(envelope.model)
+				routeModel, _ := resolveModelAlias(envelope.model, b.modelAliases)
+				nextRoute, errRoute = b.routes.classify(routeModel)
 				if errRoute != nil {
 					session.terminatePolicyViolation()
 					return
 				}
 				nextModel = envelope.model
 				if nextRoute == routeRelay {
-					nextRelayProvider = b.routes.relayProvider(envelope.model)
+					nextRelayProvider = b.routes.relayProvider(routeModel)
 				} else {
 					nextRelayProvider = ""
 				}
@@ -738,6 +746,9 @@ func (b *websocketBridge) runController(
 			if state.route == routeOfficial {
 				upstreamPayload, restoreDelegationNamespace = normalizeRelayMultiAgentParentPayload(result.payload, b.relayAgents, b.models)
 				upstreamPayload, errInspect = prepareOfficialPayload(upstreamPayload)
+				if errInspect == nil {
+					upstreamPayload, errInspect = rewriteModelAlias(upstreamPayload, nextModel, b.modelAliases, isCreate)
+				}
 				if errInspect == nil && isCreate {
 					upstreamPayload, errInspect = applyOfficialFastServiceTier(upstreamPayload, nextModel, b.fastModels)
 				}
@@ -855,10 +866,11 @@ func (b *websocketBridge) performHandoff(
 		return false
 	}
 
-	nextRoute, errRoute := b.routes.classify(request.envelope.model)
+	routeModel, _ := resolveModelAlias(request.envelope.model, b.modelAliases)
+	nextRoute, errRoute := b.routes.classify(routeModel)
 	nextRelayProvider := relayProvider("")
 	if nextRoute == routeRelay {
-		nextRelayProvider = b.routes.relayProvider(request.envelope.model)
+		nextRelayProvider = b.routes.relayProvider(routeModel)
 	}
 	if errRoute != nil || !websocketTargetChanged(*state, nextRoute, nextRelayProvider, request.envelope.model) {
 		session.terminatePolicyViolation()
@@ -899,6 +911,9 @@ func (b *websocketBridge) performHandoff(
 	if nextRoute == routeOfficial {
 		payload, restoreDelegationNamespace = normalizeRelayMultiAgentParentPayload(request.payload, b.relayAgents, b.models)
 		payload, errRoute = prepareOfficialPayload(payload)
+		if errRoute == nil {
+			payload, errRoute = rewriteModelAlias(payload, request.envelope.model, b.modelAliases, true)
+		}
 		if errRoute == nil {
 			// A handoff only ever carries the response.create that changed target.
 			payload, errRoute = applyOfficialFastServiceTier(payload, request.envelope.model, b.fastModels)

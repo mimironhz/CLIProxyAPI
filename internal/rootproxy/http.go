@@ -37,6 +37,7 @@ type httpBridgeOptions struct {
 	relayModels     []string
 	relayProviders  map[string]string
 	fastModels      map[string]struct{}
+	modelAliases    map[string]modelAlias
 	relayAgents     bool
 	resolver        *routeResolver
 	discovery       *relayDiscovery
@@ -55,6 +56,7 @@ type httpBridge struct {
 	relayBaseURL    string
 	relayAPIKey     string
 	fastModels      map[string]struct{}
+	modelAliases    map[string]modelAlias
 	relayAgents     bool
 	models          *modelsHandler
 	maxRequestBody  int64
@@ -142,6 +144,7 @@ func newHTTPBridge(options httpBridgeOptions) (*httpBridge, error) {
 		relayBaseURL:    validatedRelay,
 		relayAPIKey:     relayAPIKey,
 		fastModels:      options.fastModels,
+		modelAliases:    options.modelAliases,
 		relayAgents:     options.relayAgents,
 		maxRequestBody:  options.maxRequestBody,
 		allowedOrigins:  allowedOrigins,
@@ -279,7 +282,8 @@ func (b *httpBridge) serve(response http.ResponseWriter, request *http.Request, 
 	// Without this a Relay that was unreachable at startup would leave every
 	// Relay model looking like an official one.
 	b.discovery.ensure(request.Context())
-	selected, errRoute := b.routes.classify(model)
+	upstreamModel, _ := resolveModelAlias(model, b.modelAliases)
+	selected, errRoute := b.routes.classify(upstreamModel)
 	if errRoute != nil {
 		writeHTTPError(response, http.StatusBadRequest, "invalid_request_error", "model is not routable", "model")
 		return
@@ -302,7 +306,7 @@ func (b *httpBridge) serve(response http.ResponseWriter, request *http.Request, 
 	}
 	if selected == routeRelay {
 		createsCompaction := endpoint == httpEndpointCompact
-		if errState := validateRelayPayloadState(decodedBody, b.routes.relayProvider(model), createsCompaction); errState != nil {
+		if errState := validateRelayPayloadState(decodedBody, b.routes.relayProvider(upstreamModel), createsCompaction); errState != nil {
 			writeHTTPError(response, http.StatusConflict, "cross_provider_compaction_not_portable", "Compaction state is not portable to the selected Relay provider; start a new conversation chain", "input")
 			return
 		}
@@ -324,6 +328,12 @@ func (b *httpBridge) serve(response http.ResponseWriter, request *http.Request, 
 			normalizedBody, errPrepare = prepareOfficialPayload(normalizedBody)
 			if errPrepare != nil {
 				writeStockHTTPError(response, exchange, http.StatusBadRequest, "invalid_request_error", errPrepare.Error(), "input", "rejected", "official_payload_invalid")
+				return
+			}
+			var errAlias error
+			normalizedBody, errAlias = rewriteModelAlias(normalizedBody, model, b.modelAliases, true)
+			if errAlias != nil {
+				writeStockHTTPError(response, exchange, http.StatusBadRequest, "invalid_request_error", errAlias.Error(), "model", "rejected", "model_alias_not_applied")
 				return
 			}
 			var errTier error
@@ -357,6 +367,12 @@ func (b *httpBridge) serve(response http.ResponseWriter, request *http.Request, 
 			normalizedBody, errPrepare = prepareOfficialPayload(normalizedBody)
 			if errPrepare != nil {
 				writeStockHTTPError(response, exchange, http.StatusBadRequest, "invalid_request_error", errPrepare.Error(), "input", "rejected", "official_payload_invalid")
+				return
+			}
+			var errAlias error
+			normalizedBody, errAlias = rewriteModelAlias(normalizedBody, model, b.modelAliases, false)
+			if errAlias != nil {
+				writeStockHTTPError(response, exchange, http.StatusBadRequest, "invalid_request_error", errAlias.Error(), "model", "rejected", "model_alias_not_applied")
 				return
 			}
 		}

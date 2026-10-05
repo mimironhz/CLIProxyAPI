@@ -85,6 +85,28 @@ routing:
   # Relay models are never eligible. Compaction requests are excluded.
   fast-models:
     - "gpt-5.6-luna"
+  # Extra catalog slug routed to a stock model. Turn-creating requests rewrite
+  # model to the target and set service_tier priority. The target must be listed
+  # in stock-models. The alias is inserted immediately after that model.
+  #
+  # model-aliases:
+  #   - slug: "gpt-6.1-sol-fast"
+  #     model: "gpt-6.1-sol"
+  #     service-tier: "priority"
+  #
+  # Catalog default Codex uses when the user has not pinned a service tier.
+  # A client pinned to service_tier = "default" ignores this and needs
+  # fast-models to actually send priority.
+  #
+  # default-service-tier:
+  #   gpt-6-luna: "priority"
+  #
+  # Replaces display_name after the catalog is assembled, including Relay models.
+  #
+  # display-names:
+  #   gpt-6.1-sol-fast: "GPT-6.1 Sol(Fast)"
+  #   grok-4.7: "Grok 4.7"
+  #   grok-4.7-build-fast: "Grok 4.7(Fast)"
   # Models advertised to Desktop as multi-agent v2. A v2 parent (currently
   # gpt-5.6-sol and gpt-5.6-terra) will only accept a spawn_agent target whose
   # catalog entry reports v2, and refuses everything else with "Unknown model

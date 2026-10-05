@@ -256,6 +256,168 @@ func TestModelsHandlerMergesOfficialAndRelayCatalogs(t *testing.T) {
 	}
 }
 
+func TestModelsHandlerAdvertisesStockPinsMissingFromOfficialCatalog(t *testing.T) {
+	official := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"models":[
+			{"slug":"gpt-6-astra","comp_hash":"abc","display_name":"Astra","context_window":272000,"max_context_window":272000},
+			{"slug":"gpt-6-sol","comp_hash":"sol","display_name":"Upstream Sol","context_window":272000,"max_context_window":272000,"auto_compact_token_limit":90000}
+		]}`))
+	}))
+	defer official.Close()
+	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[{"id":"grok-4.6","owned_by":"xai","max_context_length":500000}]}`))
+	}))
+	defer relay.Close()
+
+	pins := []string{"gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna"}
+	handler := newTestAutoModelsHandler(t, official, relay, pins, nil, nil)
+	handler.modelContext = map[string]ModelContextConfig{
+		"gpt-6.1-sol": {ContextWindow: 1000000, AutoCompactTokenLimit: 400000},
+		"gpt-6-sol":   {ContextWindow: 1000000, AutoCompactTokenLimit: 400000},
+		"gpt-6-luna":  {ContextWindow: 1000000, AutoCompactTokenLimit: 400000},
+	}
+	serveModels(t, handler, http.MethodGet, "/v1/models?client_version=0.146.0", nil)
+	waitForMergedCatalog(t, handler)
+	response := serveModels(t, handler, http.MethodGet, "/v1/models?client_version=0.146.0", nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", response.Code, response.Body.String())
+	}
+	var payload rootModelsPayload
+	if errDecode := json.Unmarshal(response.Body.Bytes(), &payload); errDecode != nil {
+		t.Fatalf("decode merged catalog: %v", errDecode)
+	}
+	gotSlugs := make([]string, 0, len(payload.Models))
+	bySlug := make(map[string]map[string]any, len(payload.Models))
+	for _, model := range payload.Models {
+		slug, _ := model["slug"].(string)
+		gotSlugs = append(gotSlugs, slug)
+		bySlug[slug] = model
+	}
+	want := []string{"gpt-6-astra", "gpt-6-sol", "gpt-6.1-sol", "gpt-6-luna", "grok-4.6"}
+	if !reflect.DeepEqual(gotSlugs, want) {
+		t.Fatalf("slugs = %#v, want %#v", gotSlugs, want)
+	}
+	if bySlug["gpt-6-sol"]["display_name"] != "Upstream Sol" || bySlug["gpt-6-sol"]["comp_hash"] != "sol" {
+		t.Fatalf("official gpt-6-sol was replaced: %#v", bySlug["gpt-6-sol"])
+	}
+	for _, slug := range []string{"gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna"} {
+		model := bySlug[slug]
+		if got := intModelField(t, model, "context_window"); got != 1000000 {
+			t.Errorf("%s context_window = %d, want 1000000", slug, got)
+		}
+		if got := intModelField(t, model, "max_context_window"); got != 1000000 {
+			t.Errorf("%s max_context_window = %d, want 1000000", slug, got)
+		}
+		if got := intModelField(t, model, "auto_compact_token_limit"); got != 400000 {
+			t.Errorf("%s auto_compact_token_limit = %d, want 400000", slug, got)
+		}
+	}
+}
+
+func intModelField(t *testing.T, model map[string]any, field string) int {
+	t.Helper()
+	value, ok := model[field].(float64)
+	if !ok {
+		t.Fatalf("%s = %#v, want a number", field, model[field])
+	}
+	return int(value)
+}
+
+func TestModelsHandlerAdvertisesFastAliasAndDisplayNames(t *testing.T) {
+	official := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"models":[
+			{"slug":"gpt-6.1-sol","display_name":"GPT-6.1-Sol","comp_hash":"3000","context_window":272000,"max_context_window":272000,"service_tiers":[{"id":"priority","name":"Fast"}],"additional_speed_tiers":["fast"]},
+			{"slug":"gpt-6-luna","display_name":"GPT-6-Luna","service_tiers":[{"id":"priority","name":"Fast"}],"additional_speed_tiers":["fast"]}
+		]}`))
+	}))
+	defer official.Close()
+	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[
+			{"id":"grok-4.7","owned_by":"xai"},
+			{"id":"grok-4.7-build-fast","owned_by":"xai"},
+			{"id":"gpt-6.1-sol-fast","owned_by":"xai"}
+		]}`))
+	}))
+	defer relay.Close()
+
+	handler := newTestAutoModelsHandler(t, official, relay, []string{"gpt-6.1-sol", "gpt-6-luna"}, nil, nil)
+	handler.modelContext = map[string]ModelContextConfig{
+		"gpt-6.1-sol": {ContextWindow: 1000000, AutoCompactTokenLimit: 400000},
+	}
+	handler.modelAliases = map[string]modelAlias{
+		"gpt-6.1-sol-fast": {slug: "gpt-6.1-sol-fast", model: "gpt-6.1-sol", serviceTier: officialFastServiceTier},
+	}
+	handler.modelAliasOrder = []modelAlias{{
+		slug: "gpt-6.1-sol-fast", model: "gpt-6.1-sol", serviceTier: officialFastServiceTier,
+	}}
+	handler.displayNames = map[string]string{
+		"gpt-6.1-sol-fast":    "GPT-6.1 Sol(Fast)",
+		"grok-4.7":            "Grok 4.7",
+		"grok-4.7-build-fast": "Grok 4.7(Fast)",
+	}
+	handler.defaultServiceTier = map[string]string{"gpt-6-luna": officialFastServiceTier}
+
+	serveModels(t, handler, http.MethodGet, "/v1/models?client_version=0.146.0", nil)
+	waitForMergedCatalog(t, handler)
+	response := serveModels(t, handler, http.MethodGet, "/v1/models?client_version=0.146.0", nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", response.Code, response.Body.String())
+	}
+	var payload rootModelsPayload
+	if errDecode := json.Unmarshal(response.Body.Bytes(), &payload); errDecode != nil {
+		t.Fatalf("decode merged catalog: %v", errDecode)
+	}
+	gotSlugs := make([]string, 0, len(payload.Models))
+	bySlug := make(map[string]map[string]any, len(payload.Models))
+	for index, model := range payload.Models {
+		slug, _ := model["slug"].(string)
+		gotSlugs = append(gotSlugs, slug)
+		bySlug[slug] = model
+		if priority, ok := model["priority"].(float64); !ok || int(priority) != index+1 {
+			t.Errorf("%s priority = %#v, want %d", slug, model["priority"], index+1)
+		}
+	}
+	want := []string{"gpt-6.1-sol", "gpt-6.1-sol-fast", "gpt-6-luna", "grok-4.7", "grok-4.7-build-fast"}
+	if !reflect.DeepEqual(gotSlugs, want) {
+		t.Fatalf("slugs = %#v, want %#v", gotSlugs, want)
+	}
+	base := bySlug["gpt-6.1-sol"]
+	if base["display_name"] != "GPT-6.1-Sol" || base["comp_hash"] != "3000" {
+		t.Fatalf("base model was rewritten: %#v", base)
+	}
+	if _, tiers := base["service_tiers"].([]any); !tiers || len(base["service_tiers"].([]any)) != 1 {
+		t.Fatalf("base service_tiers = %#v", base["service_tiers"])
+	}
+	alias := bySlug["gpt-6.1-sol-fast"]
+	if alias["display_name"] != "GPT-6.1 Sol(Fast)" || alias["comp_hash"] != "3000" {
+		t.Fatalf("alias identity = %#v", alias)
+	}
+	if got := intModelField(t, alias, "context_window"); got != 1000000 {
+		t.Errorf("alias context_window = %d", got)
+	}
+	if got := intModelField(t, alias, "auto_compact_token_limit"); got != 400000 {
+		t.Errorf("alias auto_compact_token_limit = %d", got)
+	}
+	if tiers, _ := alias["service_tiers"].([]any); len(tiers) != 0 {
+		t.Fatalf("alias service_tiers = %#v", alias["service_tiers"])
+	}
+	if tiers, _ := alias["additional_speed_tiers"].([]any); len(tiers) != 0 {
+		t.Fatalf("alias additional_speed_tiers = %#v", alias["additional_speed_tiers"])
+	}
+	if _, exists := alias["default_service_tier"]; exists {
+		t.Fatalf("alias default_service_tier = %#v", alias["default_service_tier"])
+	}
+	if bySlug["gpt-6-luna"]["default_service_tier"] != officialFastServiceTier {
+		t.Fatalf("luna default = %#v", bySlug["gpt-6-luna"]["default_service_tier"])
+	}
+	if bySlug["grok-4.7"]["display_name"] != "Grok 4.7" {
+		t.Fatalf("grok-4.7 display_name = %#v", bySlug["grok-4.7"]["display_name"])
+	}
+	if bySlug["grok-4.7-build-fast"]["display_name"] != "Grok 4.7(Fast)" {
+		t.Fatalf("grok-4.7-build-fast display_name = %#v", bySlug["grok-4.7-build-fast"]["display_name"])
+	}
+}
+
 func TestModelsHandlerOmitsRelayModelCollidingWithOfficial(t *testing.T) {
 	official := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"models":[{"slug":"gpt-5.6-sol","display_name":"Sol"}]}`))

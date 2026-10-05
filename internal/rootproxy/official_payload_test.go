@@ -288,6 +288,79 @@ func TestPrepareOfficialPayloadStripsSealedDeepSeekReasoning(t *testing.T) {
 	}
 }
 
+func TestRewriteModelAlias(t *testing.T) {
+	aliases := map[string]modelAlias{
+		"gpt-6.1-sol-fast": {slug: "gpt-6.1-sol-fast", model: "gpt-6.1-sol", serviceTier: officialFastServiceTier},
+	}
+	tests := []struct {
+		name      string
+		payload   string
+		model     string
+		applyTier bool
+		wantModel string
+		wantTier  string
+		wantSame  bool
+	}{
+		{
+			name:      "fast alias rewrites the model and selects priority",
+			payload:   `{"model":"gpt-6.1-sol-fast","service_tier":"default","input":[]}`,
+			model:     "gpt-6.1-sol-fast",
+			applyTier: true,
+			wantModel: "gpt-6.1-sol",
+			wantTier:  officialFastServiceTier,
+		},
+		{
+			name:      "compaction rewrites the model and leaves the tier",
+			payload:   `{"model":"gpt-6.1-sol-fast","input":[]}`,
+			model:     "gpt-6.1-sol-fast",
+			wantModel: "gpt-6.1-sol",
+		},
+		{
+			name:      "a later turn can take the tier without repeating the alias",
+			payload:   `{"input":[]}`,
+			model:     "gpt-6.1-sol-fast",
+			applyTier: true,
+			wantModel: "",
+			wantTier:  officialFastServiceTier,
+		},
+		{
+			name:      "an already fast alias keeps the selected tier",
+			payload:   `{"model":"gpt-6.1-sol-fast","service_tier":"priority","input":[]}`,
+			model:     "gpt-6.1-sol-fast",
+			applyTier: true,
+			wantModel: "gpt-6.1-sol",
+			wantTier:  officialFastServiceTier,
+		},
+		{
+			name:      "the base model is not an alias",
+			payload:   `{"model":"gpt-6.1-sol","service_tier":"default","input":[]}`,
+			model:     "gpt-6.1-sol",
+			applyTier: true,
+			wantModel: "gpt-6.1-sol",
+			wantTier:  "default",
+			wantSame:  true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			payload := []byte(test.payload)
+			got, errRewrite := rewriteModelAlias(payload, test.model, aliases, test.applyTier)
+			if errRewrite != nil {
+				t.Fatalf("rewriteModelAlias() error = %v", errRewrite)
+			}
+			if gotModel := gjson.GetBytes(got, "model").String(); gotModel != test.wantModel {
+				t.Fatalf("model = %q, want %q; body=%s", gotModel, test.wantModel, got)
+			}
+			if gotTier := gjson.GetBytes(got, "service_tier").String(); gotTier != test.wantTier {
+				t.Fatalf("service_tier = %q, want %q; body=%s", gotTier, test.wantTier, got)
+			}
+			if test.wantSame && !bytes.Equal(got, payload) {
+				t.Fatalf("payload was rewritten\ngot  = %s\nwant = %s", got, payload)
+			}
+		})
+	}
+}
+
 func TestApplyOfficialFastServiceTier(t *testing.T) {
 	fast := map[string]struct{}{"gpt-fast": {}}
 	tests := []struct {

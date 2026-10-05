@@ -56,6 +56,10 @@ type Config struct {
 	relayWebsocketURL       string
 	configDirectory         string
 	fastModels              map[string]struct{}
+	modelAliases            map[string]modelAlias
+	modelAliasOrder         []modelAlias
+	displayNames            map[string]string
+	defaultServiceTier      map[string]string
 	multiAgentV2Models      map[string]struct{}
 	multiAgentV2RelayModels map[string]struct{}
 }
@@ -80,17 +84,26 @@ type RelayConfig struct {
 // forced onto the ChatGPT "Fast" (priority) service tier instead of waiting for
 // Desktop to select it per turn.
 //
+// ModelAliases advertises extra catalog slugs that route to a stock model and
+// force that same tier. DisplayNames replaces catalog display_name values.
+// DefaultServiceTier sets the catalog default Codex uses when the user has not
+// pinned a service tier; a client pinned to "default" ignores it, so a model
+// that must run Fast anyway also belongs in FastModels.
+//
 // MultiAgentV2Models and MultiAgentV2Relay are likewise independent of routing.
 // They advertise multi_agent_version: v2 so a Codex multi-agent v2 parent will
 // accept the model as a spawn_agent target; see advertiseMultiAgentV2 for why
 // the client rejects anything else.
 type RoutingConfig struct {
-	Discovery           string            `yaml:"discovery"`
-	StockModels         []string          `yaml:"stock-models"`
-	RelayModels         []string          `yaml:"relay-models"`
-	RelayModelProviders map[string]string `yaml:"relay-model-providers"`
-	FastModels          []string          `yaml:"fast-models"`
-	MultiAgentV2Models  []string          `yaml:"multi-agent-v2-models"`
+	Discovery           string             `yaml:"discovery"`
+	StockModels         []string           `yaml:"stock-models"`
+	RelayModels         []string           `yaml:"relay-models"`
+	RelayModelProviders map[string]string  `yaml:"relay-model-providers"`
+	FastModels          []string           `yaml:"fast-models"`
+	ModelAliases        []ModelAliasConfig `yaml:"model-aliases"`
+	DisplayNames        map[string]string  `yaml:"display-names"`
+	DefaultServiceTier  map[string]string  `yaml:"default-service-tier"`
+	MultiAgentV2Models  []string           `yaml:"multi-agent-v2-models"`
 	// ModelContext overrides the Desktop catalog fields Codex uses for
 	// per-model context and auto-compaction. Keys are exact advertised slugs.
 	// Under auto discovery Relay max_context_length is applied first; these
@@ -98,6 +111,21 @@ type RoutingConfig struct {
 	ModelContext map[string]ModelContextConfig `yaml:"model-context"`
 
 	MultiAgentV2Relay MultiAgentV2RelaySelection `yaml:"multi-agent-v2-relay"`
+}
+
+// ModelAliasConfig advertises one extra catalog slug that routes to a stock
+// model. service-tier is written onto turn-creating requests for that slug.
+type ModelAliasConfig struct {
+	Slug        string `yaml:"slug"`
+	Model       string `yaml:"model"`
+	ServiceTier string `yaml:"service-tier"`
+}
+
+// modelAlias is the validated form of a catalog alias.
+type modelAlias struct {
+	slug        string
+	model       string
+	serviceTier string
 }
 
 // ModelContextConfig is the per-model Desktop catalog window. Either field may
@@ -302,6 +330,22 @@ func (c *Config) validateAndResolve(lookupEnv func(string) (string, bool)) error
 		return errFast
 	}
 	c.fastModels = fastModels
+	aliasOrder, aliases, errAliases := validateModelAliases(c.Routing.ModelAliases, c.Routing.StockModels, c.Routing.RelayModels)
+	if errAliases != nil {
+		return errAliases
+	}
+	c.modelAliasOrder = aliasOrder
+	c.modelAliases = aliases
+	displayNames, errNames := validateDisplayNames(c.Routing.DisplayNames)
+	if errNames != nil {
+		return errNames
+	}
+	c.displayNames = displayNames
+	defaultServiceTier, errDefaultTier := validateDefaultServiceTier(mode, c.Routing.DefaultServiceTier, c.Routing.StockModels, c.Routing.RelayModels, aliases)
+	if errDefaultTier != nil {
+		return errDefaultTier
+	}
+	c.defaultServiceTier = defaultServiceTier
 	multiAgentV2Models, errMultiAgentV2 := buildMultiAgentV2ModelSet(mode, c.Routing.MultiAgentV2Models, c.Routing.StockModels, c.Routing.RelayModels)
 	if errMultiAgentV2 != nil {
 		return errMultiAgentV2
@@ -419,6 +463,135 @@ func validateModelContext(entries map[string]ModelContextConfig) (map[string]Mod
 		validated[model] = entry
 	}
 	return validated, nil
+}
+
+// validateModelAliases checks fast-model aliases. The target has to be a
+// configured stock model so the catalog can clone a real entry, and the alias
+// slug has to stay out of both routing lists.
+func validateModelAliases(aliases []ModelAliasConfig, stockModels, relayModels []string) ([]modelAlias, map[string]modelAlias, error) {
+	if len(aliases) == 0 {
+		return nil, nil, nil
+	}
+	stock := make(map[string]struct{}, len(stockModels))
+	for _, model := range stockModels {
+		stock[model] = struct{}{}
+	}
+	relay := make(map[string]struct{}, len(relayModels))
+	for _, model := range relayModels {
+		relay[model] = struct{}{}
+	}
+	slugs := make(map[string]struct{}, len(aliases))
+	order := make([]modelAlias, 0, len(aliases))
+	bySlug := make(map[string]modelAlias, len(aliases))
+	for _, entry := range aliases {
+		if errSlug := addExactModel(slugs, entry.Slug, "model-alias"); errSlug != nil {
+			return nil, nil, errSlug
+		}
+		if strings.ContainsFunc(entry.Slug, unicode.IsSpace) {
+			return nil, nil, fmt.Errorf("model alias %q contains whitespace", entry.Slug)
+		}
+		if errTarget := addExactModel(make(map[string]struct{}, 1), entry.Model, "model-alias target"); errTarget != nil {
+			return nil, nil, errTarget
+		}
+		if strings.ContainsFunc(entry.Model, unicode.IsSpace) {
+			return nil, nil, fmt.Errorf("model alias %q target %q contains whitespace", entry.Slug, entry.Model)
+		}
+		if entry.Model == entry.Slug {
+			return nil, nil, fmt.Errorf("model alias %q must name a different model", entry.Slug)
+		}
+		if entry.ServiceTier != officialFastServiceTier {
+			return nil, nil, fmt.Errorf("model alias %q service-tier must be %q", entry.Slug, officialFastServiceTier)
+		}
+		if _, isStock := stock[entry.Slug]; isStock {
+			return nil, nil, fmt.Errorf("model alias %q collides with a stock model", entry.Slug)
+		}
+		if _, isRelay := relay[entry.Slug]; isRelay {
+			return nil, nil, fmt.Errorf("model alias %q collides with a relay model", entry.Slug)
+		}
+		if _, isRelay := relay[entry.Model]; isRelay {
+			return nil, nil, fmt.Errorf("model alias %q target %q is a relay model; the Fast service tier is official-only", entry.Slug, entry.Model)
+		}
+		if _, isStock := stock[entry.Model]; !isStock {
+			return nil, nil, fmt.Errorf("model alias %q target %q is not configured in stock-models", entry.Slug, entry.Model)
+		}
+		resolved := modelAlias{slug: entry.Slug, model: entry.Model, serviceTier: entry.ServiceTier}
+		order = append(order, resolved)
+		bySlug[entry.Slug] = resolved
+	}
+	return order, bySlug, nil
+}
+
+func validateDisplayNames(entries map[string]string) (map[string]string, error) {
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	seen := make(map[string]struct{}, len(entries))
+	validated := make(map[string]string, len(entries))
+	for model, name := range entries {
+		if errModel := addExactModel(seen, model, "display-name"); errModel != nil {
+			return nil, errModel
+		}
+		if strings.ContainsFunc(model, unicode.IsSpace) {
+			return nil, fmt.Errorf("display-name %q contains whitespace", model)
+		}
+		if name == "" || strings.TrimSpace(name) != name {
+			return nil, fmt.Errorf("display-name %q is empty or has surrounding whitespace", model)
+		}
+		validated[model] = name
+	}
+	return validated, nil
+}
+
+// validateDefaultServiceTier checks catalog defaults for the Fast tier. Codex
+// applies the field only when the user has not pinned a service tier. Relay
+// models have no such tier, and an alias already forces its own.
+func validateDefaultServiceTier(mode discoveryMode, entries map[string]string, stockModels, relayModels []string, aliases map[string]modelAlias) (map[string]string, error) {
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	stock := make(map[string]struct{}, len(stockModels))
+	for _, model := range stockModels {
+		stock[model] = struct{}{}
+	}
+	relay := make(map[string]struct{}, len(relayModels))
+	for _, model := range relayModels {
+		relay[model] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(entries))
+	validated := make(map[string]string, len(entries))
+	for model, tier := range entries {
+		if errModel := addExactModel(seen, model, "default-service-tier"); errModel != nil {
+			return nil, errModel
+		}
+		if strings.ContainsFunc(model, unicode.IsSpace) {
+			return nil, fmt.Errorf("default-service-tier %q contains whitespace", model)
+		}
+		if tier != officialFastServiceTier {
+			return nil, fmt.Errorf("default-service-tier %q must be %q", model, officialFastServiceTier)
+		}
+		if _, isAlias := aliases[model]; isAlias {
+			return nil, fmt.Errorf("default-service-tier %q is a model alias; set service-tier on the alias", model)
+		}
+		if _, isRelay := relay[model]; isRelay {
+			return nil, fmt.Errorf("default-service-tier %q is a relay model; the Fast service tier is official-only", model)
+		}
+		if _, isStock := stock[model]; !isStock && mode == discoveryStatic {
+			return nil, fmt.Errorf("default-service-tier %q is not configured in stock-models", model)
+		}
+		validated[model] = tier
+	}
+	return validated, nil
+}
+
+func cloneModelAliasMap(source map[string]modelAlias) map[string]modelAlias {
+	if len(source) == 0 {
+		return nil
+	}
+	cloned := make(map[string]modelAlias, len(source))
+	for key, value := range source {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 // discoveryMode resolves routing.discovery. It defaults to static so an existing
@@ -541,6 +714,7 @@ func (c *Config) bridgeOptions() bridgeOptions {
 		relayModels:      append([]string(nil), c.Routing.RelayModels...),
 		relayProviders:   cloneStringMap(c.Routing.RelayModelProviders),
 		fastModels:       cloneModelSet(c.fastModels),
+		modelAliases:     cloneModelAliasMap(c.modelAliases),
 		relayAgents:      c.Routing.MultiAgentV2Relay.All || len(c.multiAgentV2RelayModels) > 0,
 		maxMessageBytes:  c.Websocket.MaxMessageBytes,
 		maxPendingRoutes: c.Websocket.MaxPendingRoutes,
@@ -556,6 +730,7 @@ func (c *Config) httpBridgeOptions() httpBridgeOptions {
 		relayModels:    append([]string(nil), c.Routing.RelayModels...),
 		relayProviders: cloneStringMap(c.Routing.RelayModelProviders),
 		fastModels:     cloneModelSet(c.fastModels),
+		modelAliases:   cloneModelAliasMap(c.modelAliases),
 		relayAgents:    c.Routing.MultiAgentV2Relay.All || len(c.multiAgentV2RelayModels) > 0,
 		maxRequestBody: c.HTTP.MaxRequestBodyBytes,
 		allowedOrigins: append([]string(nil), c.Websocket.AllowedOrigins...),

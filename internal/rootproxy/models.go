@@ -50,6 +50,10 @@ type modelsHandler struct {
 	multiAgentV2RelayAll    bool
 	multiAgentV2RelayModels map[string]struct{}
 	modelContext            map[string]ModelContextConfig
+	modelAliases            map[string]modelAlias
+	modelAliasOrder         []modelAlias
+	displayNames            map[string]string
+	defaultServiceTier      map[string]string
 
 	cacheMu    sync.RWMutex
 	cachedBody []byte
@@ -146,6 +150,10 @@ func newModelsHandlerWithDiscovery(config *Config, resolver *routeResolver, disc
 		multiAgentV2RelayAll:    config.Routing.MultiAgentV2Relay.All,
 		multiAgentV2RelayModels: multiAgentV2RelayModels,
 		modelContext:            cloneModelContext(config.Routing.ModelContext),
+		modelAliases:            cloneModelAliasMap(config.modelAliases),
+		modelAliasOrder:         append([]modelAlias(nil), config.modelAliasOrder...),
+		displayNames:            cloneStringMap(config.displayNames),
+		defaultServiceTier:      cloneStringMap(config.defaultServiceTier),
 	}
 	if mode == discoveryAuto {
 		if resolver == nil || discovery == nil || officialClient == nil || handler.officialBaseURL == "" {
@@ -173,6 +181,10 @@ func newModelsHandlerWithDiscovery(config *Config, resolver *routeResolver, disc
 		}
 		return selected, routes.relayProvider(slug), nil
 	}, preferWebsockets, handler.multiAgentV2Policy(), handler.modelContextPolicy(routes))
+	if errBuild != nil {
+		return nil, errBuild
+	}
+	models, errBuild = handler.presentCatalog(models)
 	if errBuild != nil {
 		return nil, errBuild
 	}
@@ -345,6 +357,122 @@ func synthesizeCodexModels(slugs []string, classify func(string) (route, relayPr
 	return models, nil
 }
 
+// appendMissingStockPins synthesizes official-arm entries for stock pins the
+// live ChatGPT catalog did not return. Pins already present are left untouched.
+func (h *modelsHandler) appendMissingStockPins(stockModels []map[string]any, contextPolicy modelContextPolicy) ([]map[string]any, error) {
+	if h == nil || len(h.stockPinOrder) == 0 {
+		return stockModels, nil
+	}
+	present := make(map[string]struct{}, len(stockModels))
+	for _, model := range stockModels {
+		slug, _ := model["slug"].(string)
+		slug = strings.TrimSpace(slug)
+		if slug != "" {
+			present[slug] = struct{}{}
+		}
+	}
+	missing := make([]string, 0)
+	for _, slug := range h.stockPinOrder {
+		if _, exists := present[slug]; exists {
+			continue
+		}
+		missing = append(missing, slug)
+	}
+	if len(missing) == 0 {
+		return stockModels, nil
+	}
+	synthesized, errBuild := synthesizeCodexModels(missing, func(string) (route, relayProvider, error) {
+		return routeOfficial, "", nil
+	}, h.preferWebsockets, h.multiAgentV2Policy(), contextPolicy)
+	if errBuild != nil {
+		return nil, errBuild
+	}
+	return append(stockModels, synthesized...), nil
+}
+
+func (h *modelsHandler) isModelAlias(slug string) bool {
+	if h == nil {
+		return false
+	}
+	_, alias := h.modelAliases[slug]
+	return alias
+}
+
+// presentCatalog applies display names, per-model Fast defaults, and fast-model
+// aliases. An alias is cloned from its stock target and placed immediately
+// after that target so it cannot become Desktop's default. The clone keeps the
+// target's context window and compatibility hash, and drops the nested speed
+// toggle because selecting the alias is itself the Fast choice.
+func (h *modelsHandler) presentCatalog(models []map[string]any) ([]map[string]any, error) {
+	if h == nil {
+		return models, nil
+	}
+	for _, model := range models {
+		slug, _ := model["slug"].(string)
+		if name, ok := h.displayNames[slug]; ok {
+			model["display_name"] = name
+		}
+		if tier, ok := h.defaultServiceTier[slug]; ok {
+			model["default_service_tier"] = tier
+		}
+	}
+	for _, alias := range h.modelAliasOrder {
+		if catalogIndex(models, alias.slug) >= 0 {
+			continue
+		}
+		targetIndex := catalogIndex(models, alias.model)
+		if targetIndex < 0 {
+			return nil, fmt.Errorf("model alias %q target %q is not in the catalog", alias.slug, alias.model)
+		}
+		cloned, errClone := cloneCatalogModel(models[targetIndex])
+		if errClone != nil {
+			return nil, errClone
+		}
+		cloned["slug"] = alias.slug
+		cloned["additional_speed_tiers"] = []any{}
+		cloned["service_tiers"] = []any{}
+		delete(cloned, "default_service_tier")
+		if name, ok := h.displayNames[alias.slug]; ok {
+			cloned["display_name"] = name
+		}
+		applyModelContext(cloned, alias.slug, routeOfficial, modelContextPolicy{overrides: h.modelContext})
+		models = insertCatalogModel(models, targetIndex+1, cloned)
+	}
+	for index, model := range models {
+		model["priority"] = index + 1
+		model["prefer_websockets"] = h.preferWebsockets
+	}
+	return models, nil
+}
+
+func catalogIndex(models []map[string]any, slug string) int {
+	for index, model := range models {
+		if name, _ := model["slug"].(string); name == slug {
+			return index
+		}
+	}
+	return -1
+}
+
+func insertCatalogModel(models []map[string]any, index int, model map[string]any) []map[string]any {
+	models = append(models, nil)
+	copy(models[index+1:], models[index:])
+	models[index] = model
+	return models
+}
+
+func cloneCatalogModel(model map[string]any) (map[string]any, error) {
+	raw, errMarshal := json.Marshal(model)
+	if errMarshal != nil {
+		return nil, fmt.Errorf("clone catalog model: %w", errMarshal)
+	}
+	var cloned map[string]any
+	if errUnmarshal := json.Unmarshal(raw, &cloned); errUnmarshal != nil {
+		return nil, fmt.Errorf("clone catalog model: %w", errUnmarshal)
+	}
+	return cloned, nil
+}
+
 func encodeModelsPayload(models []map[string]any) ([]byte, error) {
 	body, errMarshal := json.Marshal(rootModelsPayload{Models: models})
 	if errMarshal != nil {
@@ -494,6 +622,10 @@ func (h *modelsHandler) coldStartCatalog() ([]byte, string, error) {
 	contextPolicy := h.modelContextPolicy(table)
 	relaySlugs := make([]string, 0, len(table.relay))
 	for slug := range table.relay {
+		if h.isModelAlias(slug) {
+			log.Warnf("root proxy: relay model %q collides with a model alias and is omitted from the catalog", slug)
+			continue
+		}
 		relaySlugs = append(relaySlugs, slug)
 	}
 	sort.Strings(relaySlugs)
@@ -514,6 +646,10 @@ func (h *modelsHandler) coldStartCatalog() ([]byte, string, error) {
 		}
 		return routeRelay, table.relayProvider(slug), nil
 	}, h.preferWebsockets, h.multiAgentV2Policy(), contextPolicy)
+	if errBuild != nil {
+		return nil, "", errBuild
+	}
+	models, errBuild = h.presentCatalog(models)
 	if errBuild != nil {
 		return nil, "", errBuild
 	}
@@ -555,6 +691,10 @@ func (h *modelsHandler) assemble(ctx context.Context, authorization, clientVersi
 			log.Warnf("root proxy: relay model %q collides with an official model and is omitted from the catalog", slug)
 			continue
 		}
+		if h.isModelAlias(slug) {
+			log.Warnf("root proxy: relay model %q collides with a model alias and is omitted from the catalog", slug)
+			continue
+		}
 		relaySlugs = append(relaySlugs, slug)
 	}
 	sort.Strings(relaySlugs)
@@ -575,15 +715,23 @@ func (h *modelsHandler) assemble(ctx context.Context, authorization, clientVersi
 		advertiseMultiAgentV2(model, slug, routeOfficial, "", multiAgentV2)
 		applyModelContext(model, slug, routeOfficial, contextPolicy)
 	}
+	// A configured stock pin stays advertised even when ChatGPT omits it. The
+	// synthesized entry follows the official list so the first upstream model
+	// remains Desktop's default. An upstream entry for the same slug wins.
+	stockModels, errStockPins := h.appendMissingStockPins(stockModels, contextPolicy)
+	if errStockPins != nil {
+		return nil, "", errStockPins
+	}
 
-	merged := make([]map[string]any, 0, len(stockModels)+len(relayModels))
+	merged := make([]map[string]any, 0, len(stockModels)+len(relayModels)+len(h.modelAliasOrder))
 	merged = append(merged, stockModels...)
 	merged = append(merged, relayModels...)
-	// Stock entries keep their upstream order and precede every Relay entry, so
-	// the first official model remains Desktop's default.
-	for index, model := range merged {
-		model["priority"] = index + 1
-		model["prefer_websockets"] = h.preferWebsockets
+	// Aliases are inserted after their target, and display names are applied
+	// after Relay sanitization. The first official model stays Desktop's default.
+	var errPresent error
+	merged, errPresent = h.presentCatalog(merged)
+	if errPresent != nil {
+		return nil, "", errPresent
 	}
 
 	body, errEncode := encodeModelsPayload(merged)

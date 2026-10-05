@@ -118,6 +118,45 @@ func inspectRelayCompactionProvider(encryptedContent string) relayProvider {
 	return ""
 }
 
+// resolveModelAlias reports the stock model and Fast tier behind an advertised
+// alias. Other models pass through with an empty tier.
+func resolveModelAlias(model string, aliases map[string]modelAlias) (string, string) {
+	if alias, ok := aliases[model]; ok {
+		return alias.model, alias.serviceTier
+	}
+	return model, ""
+}
+
+// rewriteModelAlias sends an alias slug upstream as its stock model. Turn-creating
+// requests also receive the alias service tier. Frames that do not name the alias
+// keep their model field, and a tier that is already selected stays byte-identical
+// apart from a model rewrite that was actually required.
+func rewriteModelAlias(payload []byte, advertised string, aliases map[string]modelAlias, applyTier bool) ([]byte, error) {
+	alias, ok := aliases[advertised]
+	if !ok {
+		return payload, nil
+	}
+	updated := payload
+	if gjson.GetBytes(payload, "model").String() == advertised {
+		var errSet error
+		updated, errSet = sjson.SetBytes(payload, "model", alias.model)
+		if errSet != nil {
+			return nil, fmt.Errorf("rewrite model alias %q: %w", advertised, errSet)
+		}
+	}
+	if !applyTier || alias.serviceTier == "" {
+		return updated, nil
+	}
+	if gjson.GetBytes(updated, "service_tier").String() == alias.serviceTier {
+		return updated, nil
+	}
+	updated, errSet := sjson.SetBytes(updated, "service_tier", alias.serviceTier)
+	if errSet != nil {
+		return nil, fmt.Errorf("set official service tier for model alias %q: %w", advertised, errSet)
+	}
+	return updated, nil
+}
+
 // applyOfficialFastServiceTier forces the ChatGPT "Fast" service tier on stock
 // turns for the models an operator opted in. Desktop expresses the tier as a
 // top-level service_tier field it only sends when the user picks Fast by hand,
