@@ -107,6 +107,9 @@ func describeOpenAICompatibilityUpdate(oldEntry, newEntry config.OpenAICompatibi
 	if !reflect.DeepEqual(oldEntry.Quota, newEntry.Quota) || !reflect.DeepEqual(openAIModelQuotas(oldEntry.Models), openAIModelQuotas(newEntry.Models)) {
 		details = append(details, "quota windows updated")
 	}
+	if openAICompatConnectionPoolChanged(oldEntry, newEntry) {
+		details = append(details, "connection-pool updated")
+	}
 	if len(details) == 0 {
 		return ""
 	}
@@ -126,6 +129,43 @@ func openAIModelQuotas(models []config.OpenAICompatibilityModel) map[string]*con
 		}
 	}
 	return out
+}
+
+func openAICompatConnectionPoolChanged(oldEntry, newEntry config.OpenAICompatibility) bool {
+	if !connectionPoolConfigEqual(oldEntry.ConnectionPool, newEntry.ConnectionPool) {
+		return true
+	}
+	if len(oldEntry.APIKeyEntries) != len(newEntry.APIKeyEntries) {
+		for _, item := range oldEntry.APIKeyEntries {
+			if item.ConnectionPool != nil {
+				return true
+			}
+		}
+		for _, item := range newEntry.APIKeyEntries {
+			if item.ConnectionPool != nil {
+				return true
+			}
+		}
+		return false
+	}
+	for i := range oldEntry.APIKeyEntries {
+		if !connectionPoolConfigEqual(oldEntry.APIKeyEntries[i].ConnectionPool, newEntry.APIKeyEntries[i].ConnectionPool) {
+			return true
+		}
+	}
+	return false
+}
+
+func connectionPoolConfigEqual(a, b *config.ProxyConnectionPoolConfig) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return optionalBoolEqual(a.Enabled, b.Enabled) &&
+		strings.TrimSpace(a.IdleConnTimeout) == strings.TrimSpace(b.IdleConnTimeout) &&
+		optionalIntEqual(a.MaxIdleConnsPerHost, b.MaxIdleConnsPerHost)
 }
 
 func countAPIKeys(entry config.OpenAICompatibility) int {

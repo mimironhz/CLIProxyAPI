@@ -3,7 +3,7 @@ package executor
 import (
 	"testing"
 
-	"github.com/tidwall/gjson"
+	gjson "github.com/MoeForge/moego/ojson"
 )
 
 func TestXAIToolSearchToolBecomesFunction(t *testing.T) {

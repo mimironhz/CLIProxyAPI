@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
-	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -30,7 +30,7 @@ const xaiToolSearchFunctionJSON = `{"type":"function","name":"codex_tool_search"
 // invisible to the model: it re-runs tool_search forever instead of calling the
 // tool the client just loaded.
 func stripXAIDeferLoading(raw []byte) ([]byte, bool) {
-	if !gjson.GetBytes(raw, "defer_loading").Exists() {
+	if !ojson.GetBytes(raw, "defer_loading").Exists() {
 		return raw, false
 	}
 	updated, errDelete := sjson.DeleteBytes(raw, "defer_loading")
@@ -46,7 +46,7 @@ func stripXAIDeferLoading(raw []byte) ([]byte, bool) {
 // never sees the loaded tool. Returned tools are normalized to the same flat,
 // active function shape as the rest of the tools array.
 func harvestXAILoadedTools(body []byte) [][]byte {
-	input := gjson.GetBytes(body, "input")
+	input := ojson.GetBytes(body, "input")
 	if !input.IsArray() {
 		return nil
 	}
@@ -76,15 +76,15 @@ func harvestXAILoadedTools(body []byte) [][]byte {
 	wrapped = append(wrapped, collected...)
 	wrapped = append(wrapped, ']')
 
-	normalized, _, ok := normalizeXAIToolArray(gjson.ParseBytes(wrapped), false, false)
+	normalized, _, ok := normalizeXAIToolArray(ojson.ParseBytes(wrapped), false, false)
 	if !ok {
 		return nil
 	}
 	// normalizeXAIToolArray reports changed=false when nothing needed rewriting,
 	// in which case it returns no bytes and the input array is already correct.
-	source := gjson.ParseBytes(wrapped)
+	source := ojson.ParseBytes(wrapped)
 	if len(normalized) > 0 {
-		source = gjson.ParseBytes(normalized)
+		source = ojson.ParseBytes(normalized)
 	}
 	out := make([][]byte, 0, count)
 	for _, tool := range source.Array() {
@@ -101,14 +101,14 @@ func mergeXAIHarvestedTools(body []byte, harvested [][]byte) []byte {
 		return body
 	}
 	seen := make(map[string]struct{})
-	key := func(tool gjson.Result) string {
+	key := func(tool ojson.Result) string {
 		if name := strings.TrimSpace(tool.Get("name").String()); name != "" {
 			return "name:" + name
 		}
 		return "type:" + strings.TrimSpace(tool.Get("type").String())
 	}
 
-	existing := gjson.GetBytes(body, "tools")
+	existing := ojson.GetBytes(body, "tools")
 	merged := make([][]byte, 0, len(existing.Array())+len(harvested))
 	if existing.IsArray() {
 		for _, tool := range existing.Array() {
@@ -118,7 +118,7 @@ func mergeXAIHarvestedTools(body []byte, harvested [][]byte) []byte {
 	}
 	added := false
 	for _, raw := range harvested {
-		toolKey := key(gjson.ParseBytes(raw))
+		toolKey := key(ojson.ParseBytes(raw))
 		if _, ok := seen[toolKey]; ok {
 			continue
 		}
@@ -147,7 +147,7 @@ func mergeXAIHarvestedTools(body []byte, harvested [][]byte) []byte {
 // xAI untouched, so this only affects the HTTP path.
 func dropXAIToolSearchInputItems(body []byte) []byte {
 	body = helps.RewriteToolSearchInputItems(body)
-	input := gjson.GetBytes(body, "input")
+	input := ojson.GetBytes(body, "input")
 	if !input.IsArray() {
 		return body
 	}
@@ -169,7 +169,7 @@ func dropXAIToolSearchInputItems(body []byte) []byte {
 // a namespace, and each occurrence normalizes to the same flat function, which
 // xAI rejects as a duplicate tool name.
 func dedupeXAIToolSearchTools(body []byte) []byte {
-	tools := gjson.GetBytes(body, "tools")
+	tools := ojson.GetBytes(body, "tools")
 	if !tools.IsArray() {
 		return body
 	}
@@ -203,7 +203,7 @@ func dedupeXAIToolSearchTools(body []byte) []byte {
 // hosted tool_search_call item Codex Desktop expects. The item is marked
 // execution=client so Desktop's own loader resolves it and injects the deferred
 // tools it names; those then arrive on the next turn as tool_search_output.
-func xaiToToolSearchCall(item gjson.Result, final bool) ([]byte, bool) {
+func xaiToToolSearchCall(item ojson.Result, final bool) ([]byte, bool) {
 	out := []byte(`{"type":"tool_search_call","execution":"client"}`)
 	status := "in_progress"
 	if final {
@@ -227,10 +227,10 @@ func xaiToToolSearchCall(item gjson.Result, final bool) ([]byte, bool) {
 	arguments := []byte(`{}`)
 	if raw := item.Get("arguments"); raw.Exists() {
 		candidate := raw.Raw
-		if raw.Type == gjson.String {
+		if raw.Type == ojson.String {
 			candidate = coerceXAIToolArgumentsJSON(strings.TrimSpace(raw.String()))
 		}
-		if parsed := gjson.Parse(candidate); parsed.IsObject() {
+		if parsed := ojson.Parse(candidate); parsed.IsObject() {
 			arguments = []byte(parsed.Raw)
 		}
 	}
@@ -245,7 +245,7 @@ func xaiToToolSearchCall(item gjson.Result, final bool) ([]byte, bool) {
 // tool_search_call item and coerces integer-typed arguments on every other
 // function call. Returns the data unchanged when the path is not a function call.
 func rewriteXAIToolCallItemAtPath(data []byte, path string, final bool) []byte {
-	item := gjson.GetBytes(data, path)
+	item := ojson.GetBytes(data, path)
 	if !item.IsObject() || item.Get("type").String() != "function_call" {
 		return data
 	}
@@ -263,7 +263,7 @@ func rewriteXAIToolCallItemAtPath(data []byte, path string, final bool) []byte {
 	}
 
 	arguments := item.Get("arguments")
-	if arguments.Type != gjson.String {
+	if arguments.Type != ojson.String {
 		return data
 	}
 	coerced := coerceXAIToolArgumentsJSON(arguments.String())
@@ -281,17 +281,17 @@ func rewriteXAIToolCallItemAtPath(data []byte, path string, final bool) []byte {
 // tool_search shim reaches Codex as a real tool_search_call, and so tool call
 // arguments carry the integer types Codex expects.
 func restoreXAIToolSearchCalls(data []byte) []byte {
-	if len(data) == 0 || !gjson.ValidBytes(data) {
+	if len(data) == 0 || !ojson.ValidBytes(data) {
 		return data
 	}
-	switch gjson.GetBytes(data, "type").String() {
+	switch ojson.GetBytes(data, "type").String() {
 	case "response.output_item.added":
 		return rewriteXAIToolCallItemAtPath(data, "item", false)
 	case "response.output_item.done":
 		return rewriteXAIToolCallItemAtPath(data, "item", true)
 	case "response.function_call_arguments.done":
-		arguments := gjson.GetBytes(data, "arguments")
-		if arguments.Type != gjson.String {
+		arguments := ojson.GetBytes(data, "arguments")
+		if arguments.Type != ojson.String {
 			return data
 		}
 		coerced := coerceXAIToolArgumentsJSON(arguments.String())
@@ -304,7 +304,7 @@ func restoreXAIToolSearchCalls(data []byte) []byte {
 		}
 		return updated
 	case "response.completed":
-		output := gjson.GetBytes(data, "response.output")
+		output := ojson.GetBytes(data, "response.output")
 		if !output.IsArray() {
 			return data
 		}
@@ -321,7 +321,7 @@ func restoreXAIToolSearchCalls(data []byte) []byte {
 // Harvesting reads the pre-normalization input, so callers must invoke this
 // before the input items are rewritten.
 func applyXAIToolSearchRequest(body []byte) []byte {
-	if !gjson.ValidBytes(body) {
+	if !ojson.ValidBytes(body) {
 		return body
 	}
 	harvested := harvestXAILoadedTools(body)
