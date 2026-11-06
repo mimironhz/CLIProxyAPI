@@ -3,12 +3,12 @@ package responses
 import (
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
-func chatToolParameters(t *testing.T, out []byte, name string) gjson.Result {
+func chatToolParameters(t *testing.T, out []byte, name string) ojson.Result {
 	t.Helper()
-	tools := gjson.GetBytes(out, "tools")
+	tools := ojson.GetBytes(out, "tools")
 	if !tools.IsArray() {
 		t.Fatalf("tools is not an array; out=%s", out)
 	}
@@ -18,7 +18,7 @@ func chatToolParameters(t *testing.T, out []byte, name string) gjson.Result {
 		}
 	}
 	t.Fatalf("tool %q not found; out=%s", name, out)
-	return gjson.Result{}
+	return ojson.Result{}
 }
 
 // codex_app.automation_update declares a bare root union with no "type". The
@@ -43,7 +43,10 @@ func TestResponsesToChatStampsRootTypeOnRootUnionParameters(t *testing.T) {
 		"input": [{"type":"message","role":"user","content":"hi"}]
 	}`)
 
-	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("k3", payload, false)
+	out, errConvert := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("k3", payload, false)
+	if errConvert != nil {
+		t.Fatalf("translate request: %v", errConvert)
+	}
 	parameters := chatToolParameters(t, out, "codex_app__automation_update")
 
 	if got := parameters.Get("type").String(); got != "object" {
@@ -71,7 +74,10 @@ func TestResponsesToChatLeavesTypedParametersUntouched(t *testing.T) {
 		"input": [{"type":"message","role":"user","content":"hi"}]
 	}`)
 
-	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("k3", payload, false)
+	out, errConvert := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("k3", payload, false)
+	if errConvert != nil {
+		t.Fatalf("translate request: %v", errConvert)
+	}
 
 	shell := chatToolParameters(t, out, "shell")
 	if got := shell.Get("type").String(); got != "object" {
@@ -103,7 +109,10 @@ func TestResponsesToChatStampsRootTypeFromAdditionalTools(t *testing.T) {
 		]
 	}`)
 
-	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("k3", payload, false)
+	out, errConvert := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("k3", payload, false)
+	if errConvert != nil {
+		t.Fatalf("translate request: %v", errConvert)
+	}
 
 	if got := chatToolParameters(t, out, "deferred").Get("type").String(); got != "object" {
 		t.Fatalf("parameters.type = %q, want object", got)
@@ -119,7 +128,10 @@ func TestResponsesToChatKeepsMissingParametersEmpty(t *testing.T) {
 		"input": [{"type":"message","role":"user","content":"hi"}]
 	}`)
 
-	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("k3", payload, false)
+	out, errConvert := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("k3", payload, false)
+	if errConvert != nil {
+		t.Fatalf("translate request: %v", errConvert)
+	}
 
 	if got := chatToolParameters(t, out, "noargs").Raw; got != "{}" {
 		t.Fatalf("parameters = %s, want {}", got)

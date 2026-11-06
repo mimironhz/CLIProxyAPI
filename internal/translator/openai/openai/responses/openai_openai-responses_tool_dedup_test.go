@@ -3,12 +3,12 @@ package responses
 import (
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func chatToolNames(t *testing.T, out []byte) []string {
 	t.Helper()
-	tools := gjson.GetBytes(out, "tools")
+	tools := ojson.GetBytes(out, "tools")
 	if !tools.IsArray() {
 		return nil
 	}
@@ -48,7 +48,10 @@ func TestResponsesToChatDedupesToolsAcrossSources(t *testing.T) {
 		]
 	}`)
 
-	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("k3", payload, false)
+	out, errConvert := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("k3", payload, false)
+	if errConvert != nil {
+		t.Fatalf("translate request: %v", errConvert)
+	}
 	names := chatToolNames(t, out)
 
 	if got := countName(names, "request_user_input"); got != 1 {
@@ -78,7 +81,10 @@ func TestResponsesToChatDedupesNamespaceAgainstQualifiedTopLevel(t *testing.T) {
 		"input": [{"type":"message","role":"user","content":"hi"}]
 	}`)
 
-	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("k3", payload, false)
+	out, errConvert := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("k3", payload, false)
+	if errConvert != nil {
+		t.Fatalf("translate request: %v", errConvert)
+	}
 	names := chatToolNames(t, out)
 
 	if got := countName(names, "collaboration__spawn_agent"); got != 1 {
@@ -103,7 +109,10 @@ func TestResponsesToChatKeepsDistinctTools(t *testing.T) {
 		"input": [{"type":"message","role":"user","content":"hi"}]
 	}`)
 
-	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("k3", payload, false)
+	out, errConvert := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("k3", payload, false)
+	if errConvert != nil {
+		t.Fatalf("translate request: %v", errConvert)
+	}
 	names := chatToolNames(t, out)
 
 	for _, want := range []string{"a", "b", "ns__c"} {

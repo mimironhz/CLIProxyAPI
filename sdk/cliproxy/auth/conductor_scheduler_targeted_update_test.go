@@ -78,10 +78,10 @@ func TestManager_MarkResult_TargetedModelShardUpdate(t *testing.T) {
 	manager.scheduler.mu.Lock()
 	defer manager.scheduler.mu.Unlock()
 
-	// 1. Verify model-a shard was updated into blocked / cooldown state.
+	// 1. Verify model-a shard was updated into a failure state.
 	entryA := shardA.entries[authID]
-	if entryA == nil || (entryA.state != scheduledStateBlocked && entryA.state != scheduledStateCooldown) {
-		t.Fatalf("model-a shard state = %v, want scheduledStateBlocked or scheduledStateCooldown", entryA.state)
+	if entryA == nil || (entryA.state != scheduledStateBlocked && entryA.state != scheduledStateCooldown && entryA.state != scheduledStateTransient) {
+		t.Fatalf("model-a shard state = %v, want scheduledStateBlocked, scheduledStateCooldown, or scheduledStateTransient", entryA.state)
 	}
 
 	// 2. Verify model-b and model-c shards were NOT visited/rebuilt.

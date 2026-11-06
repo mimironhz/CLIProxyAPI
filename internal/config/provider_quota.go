@@ -6,8 +6,6 @@ import (
 	"sort"
 	"strings"
 	"time"
-
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 )
 
 var quotaDayIndex = map[string]int{
@@ -383,7 +381,7 @@ func CanonicalQuotaModels(models []string, fallback string) string {
 	seen := make(map[string]struct{}, len(models))
 	canonical := make([]string, 0, len(models))
 	for _, model := range models {
-		model = strings.ToLower(strings.TrimSpace(thinking.ParseSuffix(model).ModelName))
+		model = canonicalQuotaModel(model)
 		if model == "" {
 			continue
 		}
@@ -394,13 +392,20 @@ func CanonicalQuotaModels(models []string, fallback string) string {
 		canonical = append(canonical, model)
 	}
 	if len(canonical) == 0 {
-		return strings.ToLower(strings.TrimSpace(thinking.ParseSuffix(fallback).ModelName))
+		return canonicalQuotaModel(fallback)
 	}
 	sort.Strings(canonical)
 	if len(canonical) == 1 {
 		return canonical[0]
 	}
 	return "pool:" + strings.Join(canonical, ",")
+}
+
+func canonicalQuotaModel(model string) string {
+	if lastOpen := strings.LastIndex(model, "("); lastOpen >= 0 && strings.HasSuffix(model, ")") {
+		model = model[:lastOpen]
+	}
+	return strings.ToLower(strings.TrimSpace(model))
 }
 
 func prefixedProviderQuotaModel(prefix, model string) string {
