@@ -901,7 +901,10 @@ func (e *KimiExecutor) executeResponses(ctx context.Context, auth *cliproxyauth.
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 
-	doc := ojson.NewDoc(req.Payload)
+	payload := helps.PrepareResponsesToolSearch(req.Payload)
+	payload = helps.RewriteCodexMultiAgentV2Input(ctx, opts.Headers, payload, e.cfg)
+	payload = helps.NormalizeCodexAgentMessageInput(helps.NormalizeCodexDelegationMessageSchema(payload))
+	doc := ojson.NewDoc(helps.NormalizeResponsesToolSchemas(payload))
 	upstreamModel := normalizeKimiUpstreamModel(baseModel)
 	reporter.SetUpstreamModel(upstreamModel)
 	if errSet := doc.Set("model", upstreamModel); errSet != nil {
@@ -997,6 +1000,7 @@ func (e *KimiExecutor) executeResponses(ctx context.Context, auth *cliproxyauth.
 	if errTransform != nil || (len(out) == 0 && helps.ApplyPatchRequested(originalRequest)) {
 		return resp, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
 	}
+	out = helps.RestoreToolSearchResponse(out)
 	if responseFormat != sdktranslator.FormatOpenAIResponse {
 		var param any
 		out = sdktranslator.TranslateNonStream(ctx, sdktranslator.FormatOpenAIResponse, responseFormat, req.Model, originalRequest, body, out, &param)
@@ -1034,7 +1038,10 @@ func (e *KimiExecutor) executeResponsesStream(ctx context.Context, auth *cliprox
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 
-	doc := ojson.NewDoc(req.Payload)
+	payload := helps.PrepareResponsesToolSearch(req.Payload)
+	payload = helps.RewriteCodexMultiAgentV2Input(ctx, opts.Headers, payload, e.cfg)
+	payload = helps.NormalizeCodexAgentMessageInput(helps.NormalizeCodexDelegationMessageSchema(payload))
+	doc := ojson.NewDoc(helps.NormalizeResponsesToolSchemas(payload))
 	upstreamModel := normalizeKimiUpstreamModel(baseModel)
 	reporter.SetUpstreamModel(upstreamModel)
 	if errSet := doc.Set("model", upstreamModel); errSet != nil {
@@ -1142,6 +1149,7 @@ func (e *KimiExecutor) executeResponsesStream(ctx context.Context, auth *cliprox
 		emitTranslatedLine := func(line []byte) bool {
 			helps.RecordApplyPatchStreamFailure(ctx, param, reporter, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
 			if responseFormat == sdktranslator.FormatOpenAIResponse {
+				line = helps.RestoreToolSearchStreamChunk(line)
 				chunkPayload := make([]byte, len(line)+1)
 				copy(chunkPayload, line)
 				chunkPayload[len(line)] = '\n'
@@ -1155,6 +1163,7 @@ func (e *KimiExecutor) executeResponsesStream(ctx context.Context, auth *cliprox
 			chunks := sdktranslator.TranslateStream(ctx, sdktranslator.FormatOpenAIResponse, responseFormat, req.Model, originalRequest, body, line, &param)
 			helps.RecordApplyPatchStreamFailure(ctx, param, reporter, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
 			for i := range chunks {
+				chunks[i] = helps.RestoreToolSearchStreamChunk(chunks[i])
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
 				case <-ctx.Done():
